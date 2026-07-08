@@ -1,0 +1,46 @@
+from decimal import Decimal
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from moneta.models import AccountType, Holding
+from moneta.views.networth import net_worth_report
+from tests.factories import make_account
+
+
+async def test_net_worth_counts_only_vested(session: AsyncSession) -> None:
+    await make_account(session, type=AccountType.checking, balance_cents=500000)
+    await make_account(session, type=AccountType.credit, balance_cents=-120000)
+    brokerage = await make_account(session, type=AccountType.brokerage)
+    session.add(
+        Holding(
+            account_id=brokerage.id,
+            symbol="ACME",
+            quantity=100.0,
+            market_value_cents=1000000,
+            vested_quantity=40.0,
+            unvested_quantity=60.0,
+        )
+    )
+    await session.flush()
+    r = await net_worth_report(session)
+    assert r.liquid == Decimal("5000")
+    assert r.liabilities == Decimal("1200")
+    assert r.vested_holdings == Decimal("4000")  # 40/100 of $10,000
+    assert r.unvested_potential == Decimal("6000")
+    assert r.net_worth == Decimal("7800")
+
+
+async def test_holding_without_vesting_data_counts_fully(session: AsyncSession) -> None:
+    brokerage = await make_account(session, type=AccountType.brokerage)
+    session.add(
+        Holding(account_id=brokerage.id, symbol="VTI", quantity=10.0, market_value_cents=250000)
+    )
+    await session.flush()
+    r = await net_worth_report(session)
+    assert r.vested_holdings == Decimal("2500") and r.unvested_potential == Decimal("0")
+
+
+async def test_unknown_accounts_flagged(session: AsyncSession) -> None:
+    await make_account(session, type=AccountType.unknown, balance_cents=99900)
+    r = await net_worth_report(session)
+    assert r.unknown_accounts == 1 and r.net_worth == Decimal("0")
