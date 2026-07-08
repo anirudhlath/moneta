@@ -66,6 +66,7 @@ async def ingest_snapshot(session: AsyncSession, snap: Snapshot) -> IngestStats:
         key = (acct_ids[txn.account_id], txn.id)
         if key in seen:
             continue
+        seen.add(key)
         session.add(
             Transaction(
                 account_id=key[0],

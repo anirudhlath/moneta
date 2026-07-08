@@ -69,6 +69,15 @@ async def test_ingest_updates_balance_not_type(session: AsyncSession) -> None:
     assert acct.balance_cents == 99900 and acct.type == AccountType.savings
 
 
+async def test_ingest_skips_in_snapshot_duplicate_txns(session: AsyncSession) -> None:
+    snap = _snap()
+    snap.transactions.append(snap.transactions[0].model_copy())
+    stats = await ingest_snapshot(session, snap)
+    assert stats.new_transactions == 1
+    n = (await session.execute(select(func.count()).select_from(Transaction))).scalar_one()
+    assert n == 1
+
+
 def test_infer_account_type() -> None:
     assert infer_account_type("Premier Checking", "Chase") == AccountType.checking
     assert infer_account_type("Online Savings", "Marcus") == AccountType.savings
