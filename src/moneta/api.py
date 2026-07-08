@@ -51,6 +51,7 @@ class SeriesOut(BaseModel):
     direction: str
     cadence: str
     expected_cents: int
+    expected_amount: str
     next_expected_on: date
     status: str
 
@@ -122,7 +123,19 @@ def create_app(
     @app.get("/recurring")
     async def recurring(session: Session) -> list[SeriesOut]:
         rows = (await session.execute(select(RecurringSeries))).scalars().all()
-        return [SeriesOut.model_validate(r, from_attributes=True) for r in rows]
+        return [
+            SeriesOut(
+                id=r.id,
+                merchant=r.merchant,
+                direction=r.direction,
+                cadence=r.cadence,
+                expected_cents=r.expected_cents,
+                expected_amount=f"{abs(r.expected_cents) / 100:.2f}",
+                next_expected_on=r.next_expected_on,
+                status=r.status,
+            )
+            for r in rows
+        ]
 
     @app.get("/recurring/events")
     async def events(session: Session) -> list[EventOut]:

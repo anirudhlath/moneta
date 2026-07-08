@@ -1,8 +1,11 @@
+import asyncio
 from pathlib import Path
 
 from typer.testing import CliRunner
 
 from moneta.cli.main import app
+from moneta.db import init_db, make_sessionmaker
+from moneta.models import ReviewItem
 
 runner = CliRunner()
 
@@ -41,3 +44,35 @@ def test_import_vesting(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no
     result = runner.invoke(app, ["import", "vesting", str(csv_file)])
     assert result.exit_code == 0
     assert "0" in result.output  # updated count (no holdings in fresh db)
+
+
+def test_set_promo_invalid_date_fails_cleanly(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["accounts", "--set-promo", "1", "not-a-date"])
+    assert result.exit_code == 1
+    assert "invalid date" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_review_non_integer_answer_skips_cleanly(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def _seed() -> None:
+        engine, sessionmaker = make_sessionmaker(f"sqlite+aiosqlite:///{tmp_path / 'moneta.db'}")
+        await init_db(engine)
+        async with sessionmaker() as session:
+            session.add(
+                ReviewItem(
+                    kind="transfer_pair",
+                    question="Which inflow matches outflow 1?",
+                    payload={"outflow_id": 1, "candidates": [2]},
+                )
+            )
+            await session.commit()
+        await engine.dispose()
+
+    asyncio.run(_seed())
+    result = runner.invoke(app, ["review"], input="abc\n")
+    assert result.exit_code == 0
+    assert "skipping" in result.output
+    assert "Traceback" not in result.output

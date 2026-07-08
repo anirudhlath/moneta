@@ -79,7 +79,7 @@ def recurring(events: Annotated[bool, typer.Option("--events")] = False) -> None
             table.add_row(
                 s["merchant"],
                 s["cadence"],
-                f"${abs(s['expected_cents']) / 100:.2f}",
+                f"${s['expected_amount']}",
                 s["next_expected_on"],
                 s["status"],
             )
@@ -116,11 +116,12 @@ def accounts(
     if set_type:
         request("PATCH", f"/accounts/{set_type[0]}", {"type": set_type[1]})
     if set_promo:
-        request(
-            "PATCH",
-            f"/accounts/{set_promo[0]}",
-            {"promo_expires_on": date.fromisoformat(set_promo[1]).isoformat()},
-        )
+        try:
+            promo = date.fromisoformat(set_promo[1]).isoformat()
+        except ValueError:
+            console.print(f"[red]Error:[/red] invalid date {set_promo[1]!r} (expected YYYY-MM-DD)")
+            raise typer.Exit(1) from None
+        request("PATCH", f"/accounts/{set_promo[0]}", {"promo_expires_on": promo})
     rows = request("GET", "/accounts")
     table = Table("ID", "Name", "Org", "Type", "Balance", "Promo ends")
     for a in rows:
@@ -150,7 +151,11 @@ def review() -> None:
         if item["kind"] == "merchant":
             resolution = {"merchant": answer}
         elif item["kind"] == "transfer_pair":
-            resolution = {"inflow_id": int(answer)}
+            try:
+                resolution = {"inflow_id": int(answer)}
+            except ValueError:
+                console.print("[red]invalid input, skipping[/red]")
+                continue
         else:
             resolution = {"note": answer}
         request("POST", f"/review/{item['id']}/resolve", {"resolution": resolution})
