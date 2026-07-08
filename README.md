@@ -34,7 +34,8 @@ No server needed — the CLI runs the app in-process. To run a server instead:
 
 Env vars (`MONETA_*`) override `~/.config/moneta/config.toml`:
 `MONETA_SIMPLEFIN_ACCESS_URL`, `MONETA_LLM_MODEL` (any LiteLLM model string; unset =
-no LLM, ambiguous items go to `moneta review`), `MONETA_API_URL`, `MONETA_DB_PATH`.
+no LLM, ambiguous items go to `moneta review`), `MONETA_API_URL`, `MONETA_DB_PATH`,
+`MONETA_CONFIG_DIR` (config-file location; default `~/.config/moneta`).
 
 ## Design
 
