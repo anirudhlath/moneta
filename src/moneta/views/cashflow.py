@@ -4,32 +4,22 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.models import Account, AccountType, Transaction, TransferLink, from_cents
+from moneta.models import Account, AccountType, Transaction, from_cents
+from moneta.queries import ClassifiedLink, classified_links, linked_txn_ids
 
 _SPEND_TYPES = (AccountType.checking, AccountType.savings, AccountType.credit)
 _LIQUID_TYPES = (AccountType.checking, AccountType.savings)
 
 
-async def _linked_map(session: AsyncSession) -> dict[int, int]:
-    """outflow txn id -> inflow txn id for all transfer links."""
-    return {
-        link.outflow_id: link.inflow_id
-        for link in (await session.execute(select(TransferLink))).scalars()
-    }
-
-
-async def _txn_account_types(session: AsyncSession) -> dict[int, AccountType]:
-    rows = (
-        await session.execute(
-            select(Transaction.id, Account.type).join(Account, Transaction.account_id == Account.id)
-        )
-    ).all()
-    return {tid: atype for tid, atype in rows}
-
-
-async def accrual_spend(session: AsyncSession, start: date, end: date) -> Decimal:
-    linked = await _linked_map(session)
-    inflow_ids = set(linked.values())
+async def accrual_spend(
+    session: AsyncSession,
+    start: date,
+    end: date,
+    links: list[ClassifiedLink] | None = None,
+) -> Decimal:
+    if links is None:
+        links = await classified_links(session)
+    excluded = linked_txn_ids(links)
     txns = (
         (
             await session.execute(
@@ -46,13 +36,19 @@ async def accrual_spend(session: AsyncSession, start: date, end: date) -> Decima
         .scalars()
         .all()
     )
-    total = sum(-t.amount_cents for t in txns if t.id not in linked and t.id not in inflow_ids)
+    total = sum(-t.amount_cents for t in txns if t.id not in excluded)
     return from_cents(total)
 
 
-async def cash_out(session: AsyncSession, start: date, end: date) -> Decimal:
-    linked = await _linked_map(session)
-    types = await _txn_account_types(session)
+async def cash_out(
+    session: AsyncSession,
+    start: date,
+    end: date,
+    links: list[ClassifiedLink] | None = None,
+) -> Decimal:
+    if links is None:
+        links = await classified_links(session)
+    by_outflow = {link.outflow_id: link for link in links}
     txns = (
         (
             await session.execute(
@@ -71,8 +67,8 @@ async def cash_out(session: AsyncSession, start: date, end: date) -> Decimal:
     )
     total = 0
     for t in txns:
-        inflow_id = linked.get(t.id)
-        if inflow_id is not None and types.get(inflow_id) in _LIQUID_TYPES:
+        link = by_outflow.get(t.id)
+        if link is not None and link.inflow_account_type in _LIQUID_TYPES:
             continue  # internal liquid->liquid move
         total += -t.amount_cents
     return from_cents(total)

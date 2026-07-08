@@ -6,7 +6,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.llm import Classifier
-from moneta.models import Account, AccountType, ReviewItem, Transaction, TransferLink
+from moneta.models import AccountType, ReviewItem, Transaction, TransferLink
+from moneta.queries import account_type_map
 
 _TRANSFER_PAT = re.compile(
     r"payment|pymt|transfer|xfer|ach|autopay|epay|billpay|deposit", re.IGNORECASE
@@ -58,7 +59,7 @@ async def link_transfers(session: AsyncSession, llm: Classifier | None) -> Trans
         ).scalars()
         if "outflow_id" in item.payload
     }
-    acct_types = {a.id: a.type for a in (await session.execute(select(Account))).scalars()}
+    acct_types = await account_type_map(session)
     txns = (await session.execute(select(Transaction))).scalars().all()
     outflows = [t for t in txns if t.amount_cents < 0 and t.id not in linked_ids]
     inflows = [t for t in txns if t.amount_cents > 0 and t.id not in linked_ids]

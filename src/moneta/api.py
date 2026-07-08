@@ -27,6 +27,7 @@ from moneta.models import (
     TransferLink,
 )
 from moneta.pipelines.run import SyncReport, run_sync
+from moneta.queries import classified_links
 from moneta.vesting import apply_vesting, parse_vesting_csv
 from moneta.views.cashflow import accrual_spend, cash_out
 from moneta.views.financing import Obligation, compute_obligations
@@ -141,11 +142,12 @@ def create_app(
         today = date.today()
         range_start = start or today.replace(day=1)
         range_end = end or today
+        links = await classified_links(session)
         return CashflowReport(
             start=range_start,
             end=range_end,
-            accrual=await accrual_spend(session, range_start, range_end),
-            cash_out=await cash_out(session, range_start, range_end),
+            accrual=await accrual_spend(session, range_start, range_end, links=links),
+            cash_out=await cash_out(session, range_start, range_end, links=links),
         )
 
     @app.get("/recurring")

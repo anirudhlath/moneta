@@ -10,11 +10,10 @@ from moneta.models import (
     Account,
     AccountType,
     RecurringSeries,
-    Transaction,
-    TransferLink,
     from_cents,
 )
 from moneta.pipelines.recurring import monthly_cents
+from moneta.queries import ClassifiedLink, classified_links
 
 
 class Obligation(BaseModel):
@@ -28,26 +27,17 @@ class Obligation(BaseModel):
     deferred_interest_risk: bool
 
 
-async def _payment_series_id(session: AsyncSession, loan_account_id: int) -> int | None:
+def _payment_series_id(loan_account_id: int, links: list[ClassifiedLink]) -> int | None:
     """Series of outflows transfer-linked into this loan account, newest first."""
-    inflow_txn = select(Transaction.id).where(Transaction.account_id == loan_account_id)
-    links = (
-        (await session.execute(select(TransferLink).where(TransferLink.inflow_id.in_(inflow_txn))))
-        .scalars()
-        .all()
-    )
-    outflow_ids = [link.outflow_id for link in links]
-    if not outflow_ids:
+    candidates = [
+        link
+        for link in links
+        if link.inflow_account_id == loan_account_id and link.outflow_series_id is not None
+    ]
+    if not candidates:
         return None
-    row = (
-        await session.execute(
-            select(Transaction.series_id)
-            .where(Transaction.id.in_(outflow_ids), Transaction.series_id.is_not(None))
-            .order_by(Transaction.posted_on.desc())
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-    return row
+    newest = max(candidates, key=lambda link: (link.outflow_posted_on, link.outflow_id))
+    return newest.outflow_series_id
 
 
 async def compute_obligations(session: AsyncSession, today: date) -> list[Obligation]:
@@ -60,13 +50,14 @@ async def compute_obligations(session: AsyncSession, today: date) -> list[Obliga
         .scalars()
         .all()
     )
+    links = await classified_links(session)
     result: list[Obligation] = []
     for loan in loans:
         balance_owed = from_cents(abs(loan.balance_cents))
         payment: Decimal | None = None
         months_left: int | None = None
         payoff: date | None = None
-        series_id = await _payment_series_id(session, loan.id)
+        series_id = _payment_series_id(loan.id, links)
         if series_id is not None:
             series = (
                 await session.execute(

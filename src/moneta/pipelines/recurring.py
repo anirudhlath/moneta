@@ -7,7 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.llm import Classifier
 from moneta.models import (
-    Account,
     AccountType,
     Cadence,
     Direction,
@@ -17,8 +16,8 @@ from moneta.models import (
     SeriesEvent,
     SeriesStatus,
     Transaction,
-    TransferLink,
 )
+from moneta.queries import classified_links
 
 CADENCE_DAYS: dict[Cadence, int] = {
     Cadence.weekly: 7,
@@ -68,18 +67,10 @@ def _match_cadence(dates: list[date]) -> Cadence | None:
 
 async def _excluded_txn_ids(session: AsyncSession) -> set[int]:
     """Transfer-linked txns are excluded UNLESS the link pays into a loan account."""
-    acct_types = {a.id: a.type for a in (await session.execute(select(Account))).scalars()}
-    txn_accounts = {
-        tid: aid
-        for tid, aid in (
-            await session.execute(select(Transaction.id, Transaction.account_id))
-        ).all()
-    }
     excluded: set[int] = set()
-    for link in (await session.execute(select(TransferLink))).scalars():
-        inflow_type = acct_types.get(txn_accounts.get(link.inflow_id, -1), AccountType.unknown)
+    for link in await classified_links(session):
         excluded.add(link.inflow_id)  # inflow side is never a spend/income signal
-        if inflow_type != AccountType.loan:
+        if link.inflow_account_type != AccountType.loan:
             excluded.add(link.outflow_id)
     return excluded
 
