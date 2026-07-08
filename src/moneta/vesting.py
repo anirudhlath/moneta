@@ -22,14 +22,18 @@ def parse_vesting_csv(text: str) -> list[VestingRow]:
     reader = csv.DictReader(io.StringIO(text))
     if reader.fieldnames != _EXPECTED:
         raise ValueError(f"expected header {','.join(_EXPECTED)!r}, got {reader.fieldnames!r}")
-    return [
-        VestingRow(
-            symbol=str(row["symbol"]),
-            vested_quantity=float(row["vested_quantity"]),
-            unvested_quantity=float(row["unvested_quantity"]),
+    rows: list[VestingRow] = []
+    for row in reader:
+        if any(row[field] is None for field in _EXPECTED):
+            raise ValueError(f"malformed row: {row!r}")
+        rows.append(
+            VestingRow(
+                symbol=str(row["symbol"]),
+                vested_quantity=float(row["vested_quantity"]),
+                unvested_quantity=float(row["unvested_quantity"]),
+            )
         )
-        for row in reader
-    ]
+    return rows
 
 
 async def apply_vesting(session: AsyncSession, rows: list[VestingRow]) -> int:

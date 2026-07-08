@@ -24,6 +24,11 @@ def test_parse_rejects_bad_header() -> None:
         parse_vesting_csv("ticker,vested\nACME,40\n")
 
 
+def test_parse_rejects_short_row() -> None:
+    with pytest.raises(ValueError):
+        parse_vesting_csv("symbol,vested_quantity,unvested_quantity\nACME,40\n")
+
+
 async def test_apply_vesting_updates_holdings(session: AsyncSession) -> None:
     brokerage = await make_account(session, type=AccountType.brokerage)
     session.add(
