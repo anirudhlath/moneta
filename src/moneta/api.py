@@ -21,6 +21,7 @@ from moneta.models import (
     ReviewItem,
     ReviewStatus,
     SeriesEvent,
+    SeriesStatus,
     Transaction,
     TransferLink,
 )
@@ -54,6 +55,10 @@ class SeriesOut(BaseModel):
     expected_amount: str
     next_expected_on: date
     status: str
+
+
+class SeriesPatch(BaseModel):
+    status: SeriesStatus
 
 
 class EventOut(BaseModel):
@@ -136,6 +141,19 @@ def create_app(
             )
             for r in rows
         ]
+
+    @app.patch("/recurring/{series_id}")
+    async def patch_recurring(
+        series_id: int, body: SeriesPatch, session: Session
+    ) -> dict[str, bool]:
+        series = (
+            await session.execute(select(RecurringSeries).where(RecurringSeries.id == series_id))
+        ).scalar_one_or_none()
+        if series is None:
+            raise HTTPException(status_code=404, detail="series not found")
+        series.status = body.status
+        await session.commit()
+        return {"ok": True}
 
     @app.get("/recurring/events")
     async def events(session: Session) -> list[EventOut]:

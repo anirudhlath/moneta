@@ -65,8 +65,14 @@ def networth() -> None:
 
 
 @app.command()
-def recurring(events: Annotated[bool, typer.Option("--events")] = False) -> None:
-    """List detected recurring series (or recent events with --events)."""
+def recurring(
+    events: Annotated[bool, typer.Option("--events")] = False,
+    end: Annotated[int | None, typer.Option("--end")] = None,
+) -> None:
+    """List detected recurring series (or recent events with --events); --end ID to cancel one."""
+    if end is not None:
+        request("PATCH", f"/recurring/{end}", {"status": "ended"})
+        console.print(f"[green]Series {end} ended.[/green]")
     if events:
         rows = request("GET", "/recurring/events")
         table = Table("When", "Series", "Event", "Details")

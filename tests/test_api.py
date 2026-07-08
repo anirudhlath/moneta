@@ -122,6 +122,31 @@ async def test_review_resolve_merchant(client: httpx.AsyncClient) -> None:
         SNAP.transactions.pop()
 
 
+async def test_patch_recurring_status_ends_series(client: httpx.AsyncClient) -> None:
+    await client.post("/sync")
+    series = (await client.get("/recurring")).json()
+    series_id = series[0]["id"]
+    assert Decimal((await client.get("/power")).json()["total_fixed"]) == Decimal("15.99")
+
+    r = await client.patch(f"/recurring/{series_id}", json={"status": "ended"})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True}
+
+    updated = (await client.get("/recurring")).json()[0]
+    assert updated["status"] == "ended"
+    assert Decimal((await client.get("/power")).json()["total_fixed"]) == Decimal("0")
+
+    r = await client.patch(f"/recurring/{series_id}", json={"status": "active"})
+    assert r.status_code == 200
+    reactivated = (await client.get("/recurring")).json()[0]
+    assert reactivated["status"] == "active"
+
+
+async def test_patch_recurring_unknown_id_is_404(client: httpx.AsyncClient) -> None:
+    r = await client.patch("/recurring/999999", json={"status": "ended"})
+    assert r.status_code == 404
+
+
 async def test_import_vesting_endpoint(client: httpx.AsyncClient) -> None:
     r = await client.post(
         "/import/vesting",
