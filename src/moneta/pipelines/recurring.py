@@ -14,6 +14,7 @@ from moneta.models import (
     RecurringSeries,
     ReviewItem,
     ReviewKind,
+    ReviewStatus,
     SeriesEvent,
     SeriesStatus,
     Transaction,
@@ -79,14 +80,22 @@ async def _excluded_txn_ids(session: AsyncSession) -> set[int]:
 async def detect_recurring(session: AsyncSession, llm: Classifier | None) -> RecurringStats:
     stats = RecurringStats()
     excluded = await _excluded_txn_ids(session)
-    reviewed = {
-        item.payload.get("merchant")
-        for item in (
-            await session.execute(
-                select(ReviewItem).where(ReviewItem.kind == ReviewKind.recurring_cluster)
-            )
-        ).scalars()
-    }
+    reviewed: set[str] = set()
+    force: dict[str, bool] = {}
+    for item in (
+        await session.execute(
+            select(ReviewItem).where(ReviewItem.kind == ReviewKind.recurring_cluster)
+        )
+    ).scalars():
+        merchant_key = item.payload.get("merchant")
+        if not isinstance(merchant_key, str):
+            continue
+        if item.status == ReviewStatus.open:
+            reviewed.add(merchant_key)
+        elif isinstance(item.resolution, dict) and isinstance(
+            item.resolution.get("is_recurring"), bool
+        ):
+            force[merchant_key] = item.resolution["is_recurring"]
     existing = {
         (s.merchant, s.direction): s
         for s in (await session.execute(select(RecurringSeries))).scalars()
@@ -121,27 +130,31 @@ async def detect_recurring(session: AsyncSession, llm: Classifier | None) -> Rec
         stable = all(abs(a - med) <= med * _AMOUNT_TOLERANCE for a in amounts)
         expected = -round(med) if direction == Direction.outflow else round(med)
         if not stable:
-            answer = (
-                await llm.classify_json(
-                    _LLM_PROMPT.format(
-                        merchant=merchant,
-                        rows=[(t.amount_cents, t.posted_on.isoformat()) for t in group],
-                    )
-                )
-                if llm
-                else None
-            )
-            if not (answer and answer.get("is_recurring")):
-                if merchant not in reviewed:
-                    session.add(
-                        ReviewItem(
-                            kind=ReviewKind.recurring_cluster,
-                            question=f"Is {merchant!r} a recurring bill?",
-                            payload={"merchant": merchant, "direction": direction},
+            forced = force.get(merchant)
+            if forced is False:
+                continue  # user-resolved as not recurring — suppress silently, forever
+            if forced is not True:  # not resolved (or resolved True skips straight to series)
+                answer = (
+                    await llm.classify_json(
+                        _LLM_PROMPT.format(
+                            merchant=merchant,
+                            rows=[(t.amount_cents, t.posted_on.isoformat()) for t in group],
                         )
                     )
-                    stats.review += 1
-                continue
+                    if llm
+                    else None
+                )
+                if not (answer and answer.get("is_recurring")):
+                    if merchant not in reviewed:
+                        session.add(
+                            ReviewItem(
+                                kind=ReviewKind.recurring_cluster,
+                                question=f"Is {merchant!r} a recurring bill?",
+                                payload={"merchant": merchant, "direction": direction},
+                            )
+                        )
+                        stats.review += 1
+                    continue
         next_on = dates[-1] + timedelta(days=CADENCE_DAYS[cadence])
         series = existing.get((merchant, direction))
         if series is None:

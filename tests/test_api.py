@@ -8,7 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from moneta.aggregator.base import AccountDTO, Snapshot, TransactionDTO
 from moneta.api import create_app
+from moneta.pipelines.recurring import detect_recurring
 from tests.conftest import FakeAdapter
+from tests.factories import make_account, make_txn
 
 SNAP = Snapshot(
     accounts=[
@@ -150,3 +152,39 @@ async def test_import_vesting_endpoint(client: httpx.AsyncClient) -> None:
     )
     assert r.status_code == 200
     assert r.json() == {"updated": 0}  # no holdings yet — still a valid parse+apply
+
+
+async def test_review_resolve_recurring_cluster_validates_and_applies(
+    client: httpx.AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    async with sessionmaker() as session:
+        acct = await make_account(session)
+        for month, cents in ((4, -2000), (5, -9000), (6, -4500)):
+            await make_txn(
+                session,
+                acct,
+                amount_cents=cents,
+                merchant="Util Co",
+                posted_on=date(2026, month, 10),
+            )
+        await session.commit()
+        await detect_recurring(session, llm=None)
+
+    items = (await client.get("/review")).json()
+    assert len(items) == 1 and items[0]["kind"] == "recurring_cluster"
+    item_id = items[0]["id"]
+
+    r = await client.post(f"/review/{item_id}/resolve", json={"resolution": {}})
+    assert r.status_code == 422
+
+    r = await client.post(
+        f"/review/{item_id}/resolve", json={"resolution": {"is_recurring": "yes"}}
+    )
+    assert r.status_code == 422
+
+    r = await client.post(f"/review/{item_id}/resolve", json={"resolution": {"is_recurring": True}})
+    assert r.status_code == 200
+
+    async with sessionmaker() as session:
+        stats = await detect_recurring(session, llm=None)
+    assert stats.new_series == 1

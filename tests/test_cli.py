@@ -102,3 +102,40 @@ def test_review_non_integer_answer_skips_cleanly(tmp_path: Path, monkeypatch) ->
     assert result.exit_code == 0
     assert "skipping" in result.output
     assert "Traceback" not in result.output
+
+
+def _seed_recurring_cluster_review(tmp_path: Path) -> None:
+    async def _seed() -> None:
+        engine, sessionmaker = make_sessionmaker(f"sqlite+aiosqlite:///{tmp_path / 'moneta.db'}")
+        await init_db(engine)
+        async with sessionmaker() as session:
+            session.add(
+                ReviewItem(
+                    kind="recurring_cluster",
+                    question="Is 'Util Co' a recurring bill?",
+                    payload={"merchant": "Util Co", "direction": "outflow"},
+                )
+            )
+            await session.commit()
+        await engine.dispose()
+
+    asyncio.run(_seed())
+
+
+def test_review_recurring_cluster_yes_resolves(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    _seed_recurring_cluster_review(tmp_path)
+    result = runner.invoke(app, ["review"], input="y\n")
+    assert result.exit_code == 0
+    assert "Recurring? [y/n]" in result.output
+    assert "resolved" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_review_recurring_cluster_invalid_answer_skips_cleanly(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    _seed_recurring_cluster_review(tmp_path)
+    result = runner.invoke(app, ["review"], input="maybe\n")
+    assert result.exit_code == 0
+    assert "invalid input, skipping" in result.output
+    assert "Traceback" not in result.output

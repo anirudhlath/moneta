@@ -273,6 +273,11 @@ def create_app(
                     method=LinkMethod.manual,
                 )
             )
+        elif item.kind == ReviewKind.recurring_cluster:
+            if not isinstance(body.resolution.get("is_recurring"), bool):
+                raise HTTPException(
+                    status_code=422, detail="resolution.is_recurring must be a bool"
+                )
         item.status = ReviewStatus.resolved
         item.resolution = body.resolution
         await session.commit()

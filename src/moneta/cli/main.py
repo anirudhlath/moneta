@@ -151,19 +151,32 @@ def review() -> None:
         return
     for item in items:
         console.print(f"\n[bold]{item['question']}[/bold]  ({item['kind']})")
-        answer = typer.prompt("Answer (blank to skip)", default="", show_default=False)
-        if not answer:
-            continue
-        if item["kind"] == "merchant":
-            resolution = {"merchant": answer}
-        elif item["kind"] == "transfer_pair":
-            try:
-                resolution = {"inflow_id": int(answer)}
-            except ValueError:
+        if item["kind"] == "recurring_cluster":
+            answer = typer.prompt("Recurring? [y/n]", default="", show_default=False)
+            if not answer:
+                continue
+            normalized = answer.strip().lower()
+            if normalized in ("y", "yes"):
+                resolution: dict[str, object] = {"is_recurring": True}
+            elif normalized in ("n", "no"):
+                resolution = {"is_recurring": False}
+            else:
                 console.print("[red]invalid input, skipping[/red]")
                 continue
         else:
-            resolution = {"note": answer}
+            answer = typer.prompt("Answer (blank to skip)", default="", show_default=False)
+            if not answer:
+                continue
+            if item["kind"] == "merchant":
+                resolution = {"merchant": answer}
+            elif item["kind"] == "transfer_pair":
+                try:
+                    resolution = {"inflow_id": int(answer)}
+                except ValueError:
+                    console.print("[red]invalid input, skipping[/red]")
+                    continue
+            else:
+                resolution = {"note": answer}
         request("POST", f"/review/{item['id']}/resolve", {"resolution": resolution})
         console.print("[green]resolved[/green]")
 

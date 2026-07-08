@@ -10,6 +10,8 @@ from moneta.models import (
     Direction,
     EventKind,
     RecurringSeries,
+    ReviewItem,
+    ReviewStatus,
     SeriesEvent,
     Transaction,
     TransferLink,
@@ -195,6 +197,73 @@ async def test_resync_does_not_duplicate_missed_events(session: AsyncSession) ->
     assert len(missed) == 1
     s = (await _series(session))[0]
     assert s.next_expected_on == date(2026, 5, 14)  # advance retained, not rewound
+
+
+async def test_recurring_cluster_resolved_true_creates_series_from_median(
+    session: AsyncSession,
+) -> None:
+    acct = await make_account(session)
+    for month, cents in ((4, -2000), (5, -9000), (6, -4500)):
+        await make_txn(
+            session, acct, amount_cents=cents, merchant="Util Co", posted_on=date(2026, month, 10)
+        )
+    stats = await detect_recurring(session, llm=None)
+    assert stats.new_series == 0 and stats.review == 1
+
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    item.status = ReviewStatus.resolved
+    item.resolution = {"is_recurring": True}
+    await session.commit()
+
+    stats2 = await detect_recurring(session, llm=None)
+    assert stats2.new_series == 1 and stats2.review == 0
+    s = (await _series(session))[0]
+    assert s.merchant == "Util Co" and s.expected_cents == -4500  # deterministic median
+    reviews = (await session.execute(select(ReviewItem))).scalars().all()
+    assert len(reviews) == 1  # no duplicate ReviewItem opened
+
+
+async def test_recurring_cluster_resolved_false_suppresses_series_forever(
+    session: AsyncSession,
+) -> None:
+    acct = await make_account(session)
+    for month, cents in ((4, -2000), (5, -9000), (6, -4500)):
+        await make_txn(
+            session, acct, amount_cents=cents, merchant="Util Co", posted_on=date(2026, month, 10)
+        )
+    await detect_recurring(session, llm=None)
+
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    item.status = ReviewStatus.resolved
+    item.resolution = {"is_recurring": False}
+    await session.commit()
+
+    # An LLM that would say "yes" proves force=False suppresses without even
+    # consulting the LLM — distinguishing this from the pre-fix behavior.
+    llm = _UnstableLLM({"is_recurring": True})
+    stats2 = await detect_recurring(session, llm=llm)
+    assert stats2.new_series == 0 and stats2.review == 0
+    assert (await _series(session)) == []
+    reviews = (await session.execute(select(ReviewItem))).scalars().all()
+    assert len(reviews) == 1  # no new ReviewItem opened
+
+
+async def test_recurring_cluster_still_open_no_series_no_duplicate_review(
+    session: AsyncSession,
+) -> None:
+    acct = await make_account(session)
+    for month, cents in ((4, -2000), (5, -9000), (6, -4500)):
+        await make_txn(
+            session, acct, amount_cents=cents, merchant="Util Co", posted_on=date(2026, month, 10)
+        )
+    stats = await detect_recurring(session, llm=None)
+    assert stats.review == 1
+
+    stats2 = await detect_recurring(session, llm=None)
+    assert stats2.new_series == 0 and stats2.review == 0
+    assert (await _series(session)) == []
+    reviews = (await session.execute(select(ReviewItem))).scalars().all()
+    assert len(reviews) == 1
 
 
 def test_monthly_cents_normalization() -> None:
