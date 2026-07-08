@@ -35,8 +35,8 @@ async def net_worth_report(session: AsyncSession) -> NetWorthReport:
         if h.vested_quantity is None or h.quantity <= 0:
             vested_cents += h.market_value_cents
             continue
-        vested_frac = h.vested_quantity / h.quantity
-        unvested_frac = (h.unvested_quantity or 0.0) / h.quantity
+        vested_frac = min(max(h.vested_quantity / h.quantity, 0.0), 1.0)
+        unvested_frac = min(max((h.unvested_quantity or 0.0) / h.quantity, 0.0), 1.0)
         vested_cents += round(h.market_value_cents * vested_frac)
         unvested_cents += round(h.market_value_cents * unvested_frac)
 

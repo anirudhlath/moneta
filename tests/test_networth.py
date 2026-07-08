@@ -44,3 +44,20 @@ async def test_unknown_accounts_flagged(session: AsyncSession) -> None:
     await make_account(session, type=AccountType.unknown, balance_cents=99900)
     r = await net_worth_report(session)
     assert r.unknown_accounts == 1 and r.net_worth == Decimal("0")
+
+
+async def test_vested_fraction_over_one_is_clamped(session: AsyncSession) -> None:
+    brokerage = await make_account(session, type=AccountType.brokerage)
+    session.add(
+        Holding(
+            account_id=brokerage.id,
+            symbol="ACME",
+            quantity=100.0,
+            market_value_cents=1000000,
+            vested_quantity=150.0,  # stale import: exceeds total quantity
+        )
+    )
+    await session.flush()
+    r = await net_worth_report(session)
+    assert r.vested_holdings == Decimal("10000")  # clamped to full market value, not 15000
+    assert r.net_worth == Decimal("10000")
