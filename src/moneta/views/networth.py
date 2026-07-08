@@ -4,7 +4,14 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.models import Account, AccountType, Holding, from_cents
+from moneta.models import (
+    LIABILITY_ACCOUNT_TYPES,
+    LIQUID_ACCOUNT_TYPES,
+    Account,
+    AccountType,
+    Holding,
+    from_cents,
+)
 
 
 class NetWorthReport(BaseModel):
@@ -18,12 +25,8 @@ class NetWorthReport(BaseModel):
 
 async def net_worth_report(session: AsyncSession) -> NetWorthReport:
     accounts = (await session.execute(select(Account))).scalars().all()
-    liquid = sum(
-        a.balance_cents for a in accounts if a.type in (AccountType.checking, AccountType.savings)
-    )
-    liabilities = sum(
-        abs(a.balance_cents) for a in accounts if a.type in (AccountType.credit, AccountType.loan)
-    )
+    liquid = sum(a.balance_cents for a in accounts if a.type in LIQUID_ACCOUNT_TYPES)
+    liabilities = sum(abs(a.balance_cents) for a in accounts if a.type in LIABILITY_ACCOUNT_TYPES)
     unknown = sum(1 for a in accounts if a.type == AccountType.unknown)
 
     vested_cents = 0

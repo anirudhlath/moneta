@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.models import (
+    SPEND_ACCOUNT_TYPES,
     Account,
     AccountType,
     Cadence,
@@ -17,8 +18,6 @@ from moneta.models import (
 )
 from moneta.pipelines.recurring import monthly_cents
 from moneta.queries import classified_links, linked_txn_ids
-
-_SPEND_TYPES = (AccountType.checking, AccountType.savings, AccountType.credit)
 
 
 class FixedCostLine(BaseModel):
@@ -79,7 +78,7 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
                     Transaction.posted_on >= month_start,
                     Transaction.posted_on <= today,
                     Transaction.series_id.is_(None),
-                    Account.type.in_(_SPEND_TYPES),
+                    Account.type.in_(SPEND_ACCOUNT_TYPES),
                 )
             )
         )

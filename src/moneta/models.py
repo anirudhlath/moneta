@@ -26,6 +26,15 @@ class AccountType(StrEnum):
     unknown = "unknown"
 
 
+LIQUID_ACCOUNT_TYPES: tuple[AccountType, ...] = (AccountType.checking, AccountType.savings)
+SPEND_ACCOUNT_TYPES: tuple[AccountType, ...] = (
+    AccountType.checking,
+    AccountType.savings,
+    AccountType.credit,
+)
+LIABILITY_ACCOUNT_TYPES: tuple[AccountType, ...] = (AccountType.credit, AccountType.loan)
+
+
 class Direction(StrEnum):
     inflow = "inflow"
     outflow = "outflow"
