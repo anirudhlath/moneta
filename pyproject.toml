@@ -1,7 +1,7 @@
 [project]
 name = "moneta"
 version = "0.1.0"
-description = "Add your description here"
+description = "Personal finance: monthly spending power = income minus fixed costs"
 readme = "README.md"
 authors = [
     { name = "Anirudh Lath", email = "anirudhlath@gmail.com" }

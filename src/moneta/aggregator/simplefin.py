@@ -4,7 +4,7 @@ import base64
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 import httpx
 from loguru import logger
@@ -14,7 +14,7 @@ from moneta.aggregator.base import AccountDTO, HoldingDTO, Snapshot, Transaction
 
 def _split_auth(access_url: str) -> tuple[str, tuple[str, str]]:
     parts = urlsplit(access_url)
-    auth = (parts.username or "", parts.password or "")
+    auth = (unquote(parts.username or ""), unquote(parts.password or ""))
     host = parts.hostname or ""
     if parts.port:
         host = f"{host}:{parts.port}"

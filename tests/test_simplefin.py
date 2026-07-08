@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import httpx
 
-from moneta.aggregator.simplefin import SimpleFINAdapter, claim_setup_token
+from moneta.aggregator.simplefin import SimpleFINAdapter, _split_auth, claim_setup_token
 
 SIMPLEFIN_PAYLOAD = {
     "errors": [],
@@ -115,3 +115,9 @@ async def test_missing_holdings_key_ok() -> None:
     )
     snap = await adapter.fetch()
     assert snap.holdings == []
+
+
+def test_split_auth_percent_decodes_credentials() -> None:
+    bare, auth = _split_auth("https://user%40x:p%23ss@bridge.example/simplefin")
+    assert auth == ("user@x", "p#ss")
+    assert bare == "https://bridge.example/simplefin"
