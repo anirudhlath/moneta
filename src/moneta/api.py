@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date
+from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -27,6 +28,7 @@ from moneta.models import (
 )
 from moneta.pipelines.run import SyncReport, run_sync
 from moneta.vesting import apply_vesting, parse_vesting_csv
+from moneta.views.cashflow import accrual_spend, cash_out
 from moneta.views.financing import Obligation, compute_obligations
 from moneta.views.networth import NetWorthReport, net_worth_report
 from moneta.views.power import PowerReport, power_report
@@ -84,6 +86,13 @@ class VestingIn(BaseModel):
     csv: str
 
 
+class CashflowReport(BaseModel):
+    start: date
+    end: date
+    accrual: Decimal
+    cash_out: Decimal
+
+
 def create_app(
     sessionmaker: async_sessionmaker[AsyncSession],
     adapter: AggregatorAdapter | None,
@@ -124,6 +133,20 @@ def create_app(
     @app.get("/obligations")
     async def obligations(session: Session) -> list[Obligation]:
         return await compute_obligations(session, today=date.today())
+
+    @app.get("/cashflow")
+    async def cashflow(
+        session: Session, start: date | None = None, end: date | None = None
+    ) -> CashflowReport:
+        today = date.today()
+        range_start = start or today.replace(day=1)
+        range_end = end or today
+        return CashflowReport(
+            start=range_start,
+            end=range_end,
+            accrual=await accrual_spend(session, range_start, range_end),
+            cash_out=await cash_out(session, range_start, range_end),
+        )
 
     @app.get("/recurring")
     async def recurring(session: Session) -> list[SeriesOut]:
