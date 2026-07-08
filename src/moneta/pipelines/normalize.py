@@ -53,8 +53,7 @@ async def normalize_merchants(session: AsyncSession, llm: Classifier | None) -> 
         if not looks_clean(candidate):
             answer = await llm.classify_json(_LLM_PROMPT.format(descriptor=raw)) if llm else None
             llm_merchant = answer.get("merchant") if answer else None
-            if isinstance(llm_merchant, str):
-                llm_merchant = llm_merchant.strip()
+            llm_merchant = llm_merchant.strip() if isinstance(llm_merchant, str) else None
             if llm_merchant:
                 candidate, source = llm_merchant, AliasSource.llm
             else:

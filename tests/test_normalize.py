@@ -72,6 +72,23 @@ class BlankLLM:
         return {"merchant": "  "}
 
 
+class MalformedLLM:
+    async def classify_json(self, prompt: str) -> dict[str, Any] | None:
+        return {"merchant": {"name": "X"}}  # truthy non-str must degrade, never crash sync
+
+
+async def test_normalize_rejects_non_string_llm_merchant(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    await make_txn(session, acct, description="X4529182 84756")
+    await normalize_merchants(session, llm=MalformedLLM())
+    txn = (await session.execute(select(Transaction))).scalar_one()
+    assert txn.merchant == rule_normalize("X4529182 84756")  # rule fallback, not a dict
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.kind == "merchant"
+    alias = (await session.execute(select(MerchantAlias))).scalar_one()
+    assert alias.source == "rule"
+
+
 async def test_normalize_rejects_empty_llm_merchant(session: AsyncSession) -> None:
     acct = await make_account(session)
     await make_txn(session, acct, description="X4529182 84756")
