@@ -177,9 +177,10 @@ async def detect_recurring(session: AsyncSession, llm: Classifier | None) -> Rec
             )
             stats.new_series += 1
         else:
-            changed = series.next_expected_on != next_on or series.cadence != cadence
+            advanced_on = max(series.next_expected_on, next_on)
+            changed = series.next_expected_on != advanced_on or series.cadence != cadence
             series.cadence = cadence
-            series.next_expected_on = next_on
+            series.next_expected_on = advanced_on
             if changed:
                 stats.updated += 1
         for t in group:

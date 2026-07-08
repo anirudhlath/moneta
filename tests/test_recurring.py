@@ -7,11 +7,13 @@ from moneta.models import (
     AccountType,
     Cadence,
     Direction,
+    EventKind,
     RecurringSeries,
     SeriesEvent,
     Transaction,
     TransferLink,
 )
+from moneta.pipelines.events import emit_series_events
 from moneta.pipelines.recurring import detect_recurring, monthly_cents
 from tests.factories import make_account, make_txn
 
@@ -136,6 +138,29 @@ async def test_rerun_updates_not_duplicates(session: AsyncSession) -> None:
     assert stats.new_series == 0 and stats.updated == 1
     s = (await _series(session))[0]
     assert s.next_expected_on == date(2026, 8, 14)  # 7/15 + 30 days
+
+
+async def test_resync_does_not_duplicate_missed_events(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    for month, day in ((1, 15), (2, 15), (3, 15)):
+        await make_txn(
+            session, acct, amount_cents=-1599, merchant="Netflix", posted_on=date(2026, month, day)
+        )
+    today = date(2026, 5, 1)
+
+    await detect_recurring(session, llm=None)
+    await emit_series_events(session, today=today)
+    await detect_recurring(session, llm=None)
+    await emit_series_events(session, today=today)
+
+    missed = (
+        (await session.execute(select(SeriesEvent).where(SeriesEvent.kind == EventKind.missed)))
+        .scalars()
+        .all()
+    )
+    assert len(missed) == 1
+    s = (await _series(session))[0]
+    assert s.next_expected_on == date(2026, 5, 14)  # advance retained, not rewound
 
 
 def test_monthly_cents_normalization() -> None:
