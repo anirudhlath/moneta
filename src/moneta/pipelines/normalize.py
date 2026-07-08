@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.llm import Classifier
-from moneta.models import MerchantAlias, ReviewItem, Transaction
+from moneta.models import AliasSource, MerchantAlias, ReviewItem, ReviewKind, Transaction
 
 _PREFIXES = re.compile(r"^(sq \*|tst\*\s*|paypal \*|py \*|amzn mktp us\*)", re.IGNORECASE)
 _STORE_NUM = re.compile(r"(#\d+|\b\d{3,}\b)")
@@ -49,15 +49,15 @@ async def normalize_merchants(session: AsyncSession, llm: Classifier | None) -> 
             count += 1
             continue
         candidate = rule_normalize(raw)
-        source = "rule"
+        source = AliasSource.rule
         if not looks_clean(candidate):
             answer = await llm.classify_json(_LLM_PROMPT.format(descriptor=raw)) if llm else None
             if answer and isinstance(answer.get("merchant"), str):
-                candidate, source = answer["merchant"], "llm"
+                candidate, source = answer["merchant"], AliasSource.llm
             else:
                 session.add(
                     ReviewItem(
-                        kind="merchant",
+                        kind=ReviewKind.merchant,
                         question=f"What merchant is {raw!r}?",
                         payload={"descriptor": raw, "fallback": candidate},
                     )

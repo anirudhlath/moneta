@@ -17,9 +17,12 @@ from moneta.llm import Classifier, build_classifier
 from moneta.models import (
     Account,
     AccountType,
+    AliasSource,
+    LinkMethod,
     MerchantAlias,
     RecurringSeries,
     ReviewItem,
+    ReviewKind,
     ReviewStatus,
     SeriesEvent,
     SeriesStatus,
@@ -240,7 +243,7 @@ def create_app(
         ).scalar_one_or_none()
         if item is None:
             raise HTTPException(status_code=404, detail="review item not found")
-        if item.kind == "merchant" and isinstance(body.resolution.get("merchant"), str):
+        if item.kind == ReviewKind.merchant and isinstance(body.resolution.get("merchant"), str):
             merchant = body.resolution["merchant"]
             raw = item.payload["descriptor"]
             alias = (
@@ -249,21 +252,25 @@ def create_app(
                 )
             ).scalar_one_or_none()
             if alias is None:
-                session.add(MerchantAlias(raw_descriptor=raw, merchant=merchant, source="manual"))
+                session.add(
+                    MerchantAlias(raw_descriptor=raw, merchant=merchant, source=AliasSource.manual)
+                )
             else:
                 alias.merchant = merchant
-                alias.source = "manual"
+                alias.source = AliasSource.manual
             for txn in (
                 await session.execute(select(Transaction).where(Transaction.description == raw))
             ).scalars():
                 txn.merchant = merchant
-        elif item.kind == "transfer_pair" and isinstance(body.resolution.get("inflow_id"), int):
+        elif item.kind == ReviewKind.transfer_pair and isinstance(
+            body.resolution.get("inflow_id"), int
+        ):
             session.add(
                 TransferLink(
                     outflow_id=item.payload["outflow_id"],
                     inflow_id=body.resolution["inflow_id"],
                     confidence=1.0,
-                    method="manual",
+                    method=LinkMethod.manual,
                 )
             )
         item.status = ReviewStatus.resolved

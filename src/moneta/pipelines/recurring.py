@@ -13,6 +13,7 @@ from moneta.models import (
     EventKind,
     RecurringSeries,
     ReviewItem,
+    ReviewKind,
     SeriesEvent,
     SeriesStatus,
     Transaction,
@@ -81,7 +82,9 @@ async def detect_recurring(session: AsyncSession, llm: Classifier | None) -> Rec
     reviewed = {
         item.payload.get("merchant")
         for item in (
-            await session.execute(select(ReviewItem).where(ReviewItem.kind == "recurring_cluster"))
+            await session.execute(
+                select(ReviewItem).where(ReviewItem.kind == ReviewKind.recurring_cluster)
+            )
         ).scalars()
     }
     existing = {
@@ -132,7 +135,7 @@ async def detect_recurring(session: AsyncSession, llm: Classifier | None) -> Rec
                 if merchant not in reviewed:
                     session.add(
                         ReviewItem(
-                            kind="recurring_cluster",
+                            kind=ReviewKind.recurring_cluster,
                             question=f"Is {merchant!r} a recurring bill?",
                             payload={"merchant": merchant, "direction": direction},
                         )

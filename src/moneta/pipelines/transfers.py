@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.llm import Classifier
-from moneta.models import AccountType, ReviewItem, Transaction, TransferLink
+from moneta.models import AccountType, LinkMethod, ReviewItem, ReviewKind, Transaction, TransferLink
 from moneta.queries import account_type_map
 
 _TRANSFER_PAT = re.compile(
@@ -55,7 +55,9 @@ async def link_transfers(session: AsyncSession, llm: Classifier | None) -> Trans
     reviewed: set[int] = {
         item.payload["outflow_id"]
         for item in (
-            await session.execute(select(ReviewItem).where(ReviewItem.kind == "transfer_pair"))
+            await session.execute(
+                select(ReviewItem).where(ReviewItem.kind == ReviewKind.transfer_pair)
+            )
         ).scalars()
         if "outflow_id" in item.payload
     }
@@ -86,17 +88,17 @@ async def link_transfers(session: AsyncSession, llm: Classifier | None) -> Trans
             continue
         out = cands[0].outflow
         if len(cands) == 1 and cands[0].confidence >= _AUTO_LINK:
-            _add_link(session, cands[0], "rule", used)
+            _add_link(session, cands[0], LinkMethod.rule, used)
             stats.linked += 1
             continue
         picked = await _llm_pick(llm, cands) if llm else None
         if picked is not None:
-            _add_link(session, picked, "llm", used)
+            _add_link(session, picked, LinkMethod.llm, used)
             stats.linked += 1
         elif out.id not in reviewed:
             session.add(
                 ReviewItem(
-                    kind="transfer_pair",
+                    kind=ReviewKind.transfer_pair,
                     question=f"Which inflow matches outflow {out.description!r} "
                     f"({out.posted_on}, {out.amount_cents / 100:.2f})?",
                     payload={
@@ -110,7 +112,7 @@ async def link_transfers(session: AsyncSession, llm: Classifier | None) -> Trans
     return stats
 
 
-def _add_link(session: AsyncSession, cand: _Cand, method: str, used: set[int]) -> None:
+def _add_link(session: AsyncSession, cand: _Cand, method: LinkMethod, used: set[int]) -> None:
     session.add(
         TransferLink(
             outflow_id=cand.outflow.id,

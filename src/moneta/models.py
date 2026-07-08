@@ -63,6 +63,24 @@ class ReviewStatus(StrEnum):
     resolved = "resolved"
 
 
+class LinkMethod(StrEnum):
+    rule = "rule"
+    llm = "llm"
+    manual = "manual"
+
+
+class AliasSource(StrEnum):
+    rule = "rule"
+    llm = "llm"
+    manual = "manual"
+
+
+class ReviewKind(StrEnum):
+    merchant = "merchant"
+    transfer_pair = "transfer_pair"
+    recurring_cluster = "recurring_cluster"
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -103,7 +121,7 @@ class TransferLink(Base):
     outflow_id: Mapped[int] = mapped_column(ForeignKey("transactions.id"), unique=True)
     inflow_id: Mapped[int] = mapped_column(ForeignKey("transactions.id"), unique=True)
     confidence: Mapped[float] = mapped_column(Float)
-    method: Mapped[str]  # "rule" | "llm" | "manual"
+    method: Mapped[LinkMethod] = mapped_column(String)
 
 
 class RecurringSeries(Base):
@@ -148,14 +166,14 @@ class MerchantAlias(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     raw_descriptor: Mapped[str] = mapped_column(unique=True)
     merchant: Mapped[str]
-    source: Mapped[str]  # "rule" | "llm" | "manual"
+    source: Mapped[AliasSource] = mapped_column(String)
 
 
 class ReviewItem(Base):
     __tablename__ = "review_items"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    kind: Mapped[str]  # "transfer_pair" | "recurring_cluster" | "merchant"
+    kind: Mapped[ReviewKind] = mapped_column(String)
     question: Mapped[str]
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     status: Mapped[ReviewStatus] = mapped_column(String, default=ReviewStatus.open)
