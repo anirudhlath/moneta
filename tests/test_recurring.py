@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -138,6 +139,39 @@ async def test_rerun_updates_not_duplicates(session: AsyncSession) -> None:
     assert stats.new_series == 0 and stats.updated == 1
     s = (await _series(session))[0]
     assert s.next_expected_on == date(2026, 8, 14)  # 7/15 + 30 days
+
+
+class _UnstableLLM:
+    def __init__(self, answer: dict[str, Any]) -> None:
+        self.answer = answer
+
+    async def classify_json(self, prompt: str) -> dict[str, Any] | None:
+        return self.answer
+
+
+async def test_llm_gates_but_never_sets_expected_amount(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    for month, cents in ((4, -2000), (5, -9000), (6, -4500)):
+        await make_txn(
+            session, acct, amount_cents=cents, merchant="Util Co", posted_on=date(2026, month, 10)
+        )
+    llm = _UnstableLLM({"is_recurring": True, "expected_amount_cents": 999999})
+    stats = await detect_recurring(session, llm=llm)
+    assert stats.new_series == 1
+    s = (await _series(session))[0]
+    assert s.expected_cents == -4500  # deterministic signed median, never the LLM's number
+
+
+async def test_llm_rejects_group_creates_review_no_series(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    for month, cents in ((4, -2000), (5, -9000), (6, -4500)):
+        await make_txn(
+            session, acct, amount_cents=cents, merchant="Util Co", posted_on=date(2026, month, 10)
+        )
+    llm = _UnstableLLM({"is_recurring": False})
+    stats = await detect_recurring(session, llm=llm)
+    assert stats.new_series == 0 and stats.review == 1
+    assert (await _series(session)) == []
 
 
 async def test_resync_does_not_duplicate_missed_events(session: AsyncSession) -> None:

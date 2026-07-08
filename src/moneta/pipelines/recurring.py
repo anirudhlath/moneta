@@ -43,7 +43,7 @@ _PER_MONTH: dict[Cadence, float] = {
 
 _LLM_PROMPT = """Is this group of bank transactions one recurring bill/subscription?
 Merchant: {merchant!r}; amounts (cents) and dates: {rows}
-Respond with JSON: {{"is_recurring": true/false, "expected_amount_cents": <int, typical amount>}}"""
+Respond with JSON: {{"is_recurring": true/false}}"""
 
 
 class RecurringStats(BaseModel):
@@ -137,13 +137,7 @@ async def detect_recurring(session: AsyncSession, llm: Classifier | None) -> Rec
                 if llm
                 else None
             )
-            if (
-                answer
-                and answer.get("is_recurring")
-                and isinstance(answer.get("expected_amount_cents"), int)
-            ):
-                expected = answer["expected_amount_cents"]
-            else:
+            if not (answer and answer.get("is_recurring")):
                 if merchant not in reviewed:
                     session.add(
                         ReviewItem(
