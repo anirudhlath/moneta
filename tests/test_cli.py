@@ -6,7 +6,8 @@ from typer.testing import CliRunner
 
 from moneta.cli.main import app
 from moneta.db import init_db, make_sessionmaker
-from moneta.models import Cadence, Direction, RecurringSeries, ReviewItem
+from moneta.models import ReviewItem
+from tests.factories import make_series
 
 runner = CliRunner()
 
@@ -62,14 +63,7 @@ def test_recurring_end_option_ends_series(tmp_path: Path, monkeypatch) -> None: 
         engine, sessionmaker = make_sessionmaker(f"sqlite+aiosqlite:///{tmp_path / 'moneta.db'}")
         await init_db(engine)
         async with sessionmaker() as session:
-            series = RecurringSeries(
-                merchant="Netflix",
-                direction=Direction.outflow,
-                cadence=Cadence.monthly,
-                expected_cents=-1599,
-                next_expected_on=date(2026, 7, 15),
-            )
-            session.add(series)
+            series = await make_series(session, next_expected_on=date(2026, 7, 15))
             await session.commit()
             await session.refresh(series)
             series_id = series.id

@@ -1,8 +1,10 @@
 from collections.abc import AsyncIterator
+from datetime import date
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from moneta.aggregator.base import Snapshot
 from moneta.db import init_db, make_sessionmaker
 
 
@@ -20,3 +22,11 @@ async def session(
 ) -> AsyncIterator[AsyncSession]:
     async with sessionmaker() as s:
         yield s
+
+
+class FakeAdapter:
+    def __init__(self, snapshot: Snapshot) -> None:
+        self.snapshot = snapshot
+
+    async def fetch(self, since: date | None = None) -> Snapshot:
+        return self.snapshot

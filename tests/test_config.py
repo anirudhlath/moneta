@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from pydantic_settings import BaseSettings
+
 from moneta.config import Settings, load_settings, save_config_value
 
 
@@ -25,4 +27,4 @@ def test_save_and_reload(tmp_path: Path, monkeypatch) -> None:  # type: ignore[n
 
 
 def test_settings_is_pydantic() -> None:
-    assert issubclass(Settings, object) and hasattr(Settings, "model_fields")
+    assert issubclass(Settings, BaseSettings)

@@ -5,12 +5,13 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from moneta.api import create_app
-from moneta.models import AccountType, TransferLink
+from moneta.models import Account, AccountType, TransferLink
 from moneta.views.cashflow import accrual_spend, cash_out
 from tests.factories import make_account, make_txn
 
 
-async def test_accrual_counts_cc_purchases_not_payments(session: AsyncSession) -> None:
+async def _cc_purchase_and_payment(session: AsyncSession) -> tuple[Account, Account]:
+    """Checking+credit accounts: one credit purchase, and a checking->credit CC payment link."""
     checking = await make_account(session, type=AccountType.checking)
     credit = await make_account(session, type=AccountType.credit)
     await make_txn(
@@ -28,27 +29,16 @@ async def test_accrual_counts_cc_purchases_not_payments(session: AsyncSession) -
     )
     session.add(TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule"))
     await session.flush()
+    return checking, credit
+
+
+async def test_accrual_counts_cc_purchases_not_payments(session: AsyncSession) -> None:
+    await _cc_purchase_and_payment(session)
     assert await accrual_spend(session, date(2026, 7, 1), date(2026, 7, 31)) == Decimal("80")
 
 
 async def test_cash_out_counts_cc_payment_not_purchase(session: AsyncSession) -> None:
-    checking = await make_account(session, type=AccountType.checking)
-    credit = await make_account(session, type=AccountType.credit)
-    await make_txn(
-        session, credit, amount_cents=-8000, posted_on=date(2026, 7, 2), description="RESTAURANT"
-    )
-    out = await make_txn(
-        session, checking, amount_cents=-8000, posted_on=date(2026, 7, 5), description="CC PAYMENT"
-    )
-    inn = await make_txn(
-        session,
-        credit,
-        amount_cents=8000,
-        posted_on=date(2026, 7, 5),
-        description="PAYMENT THANK YOU",
-    )
-    session.add(TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule"))
-    await session.flush()
+    await _cc_purchase_and_payment(session)
     assert await cash_out(session, date(2026, 7, 1), date(2026, 7, 31)) == Decimal("80")
 
 
@@ -74,22 +64,7 @@ async def test_internal_moves_count_nowhere(session: AsyncSession) -> None:
 async def test_cashflow_endpoint_returns_accrual_and_cash_out(
     session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
-    checking = await make_account(session, type=AccountType.checking)
-    credit = await make_account(session, type=AccountType.credit)
-    await make_txn(
-        session, credit, amount_cents=-8000, posted_on=date(2026, 7, 2), description="RESTAURANT"
-    )
-    out = await make_txn(
-        session, checking, amount_cents=-8000, posted_on=date(2026, 7, 5), description="CC PAYMENT"
-    )
-    inn = await make_txn(
-        session,
-        credit,
-        amount_cents=8000,
-        posted_on=date(2026, 7, 5),
-        description="PAYMENT THANK YOU",
-    )
-    session.add(TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule"))
+    await _cc_purchase_and_payment(session)
     await session.commit()
 
     app = create_app(sessionmaker, adapter=None, llm=None)

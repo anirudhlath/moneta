@@ -3,43 +3,22 @@ from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.models import (
-    AccountType,
-    Cadence,
-    Direction,
-    RecurringSeries,
-    SeriesStatus,
-    TransferLink,
-)
+from moneta.models import AccountType, Cadence, Direction, TransferLink
 from moneta.views.power import power_report
-from tests.factories import make_account, make_txn
-
-
-async def _mk_series(
-    session: AsyncSession,
-    merchant: str,
-    direction: Direction,
-    cadence: Cadence,
-    expected_cents: int,
-) -> RecurringSeries:
-    s = RecurringSeries(
-        merchant=merchant,
-        direction=direction,
-        cadence=cadence,
-        expected_cents=expected_cents,
-        next_expected_on=date(2026, 8, 1),
-        status=SeriesStatus.active,
-    )
-    session.add(s)
-    await session.flush()
-    return s
+from tests.factories import make_account, make_series, make_txn
 
 
 async def test_power_report_full_picture(session: AsyncSession) -> None:
     checking = await make_account(session, type=AccountType.checking)
-    payroll = await _mk_series(session, "Acme Payroll", Direction.inflow, Cadence.biweekly, 250000)
-    netflix = await _mk_series(session, "Netflix", Direction.outflow, Cadence.monthly, -1599)
-    rent = await _mk_series(session, "Landlord", Direction.outflow, Cadence.monthly, -180000)
+    payroll = await make_series(
+        session,
+        merchant="Acme Payroll",
+        direction=Direction.inflow,
+        cadence=Cadence.biweekly,
+        expected_cents=250000,
+    )
+    netflix = await make_series(session)
+    rent = await make_series(session, merchant="Landlord", expected_cents=-180000)
     # series-linked fixed-cost txn this month (must NOT double into spent_so_far)
     await make_txn(
         session,
@@ -76,9 +55,7 @@ async def test_power_report_full_picture(session: AsyncSession) -> None:
 async def test_credit_payment_series_excluded_from_fixed(session: AsyncSession) -> None:
     checking = await make_account(session, type=AccountType.checking)
     credit = await make_account(session, type=AccountType.credit)
-    cc_pay = await _mk_series(
-        session, "Chase Card Payment", Direction.outflow, Cadence.monthly, -50000
-    )
+    cc_pay = await make_series(session, merchant="Chase Card Payment", expected_cents=-50000)
     out = await make_txn(
         session,
         checking,
@@ -103,9 +80,7 @@ async def test_credit_payment_series_excluded_from_fixed(session: AsyncSession) 
 async def test_loan_payment_series_stays_in_fixed(session: AsyncSession) -> None:
     checking = await make_account(session, type=AccountType.checking)
     loan = await make_account(session, type=AccountType.loan)
-    synchrony = await _mk_series(
-        session, "Synchrony Bank", Direction.outflow, Cadence.monthly, -13500
-    )
+    synchrony = await make_series(session, merchant="Synchrony Bank", expected_cents=-13500)
     out = await make_txn(
         session,
         checking,

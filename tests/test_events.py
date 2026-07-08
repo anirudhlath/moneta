@@ -3,27 +3,15 @@ from datetime import date
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.models import Cadence, Direction, EventKind, RecurringSeries, SeriesEvent
+from moneta.models import EventKind, SeriesEvent
 from moneta.pipelines.events import emit_series_events
-from tests.factories import make_account, make_txn
-
-
-async def _mk_series(session: AsyncSession, **kw: object) -> RecurringSeries:
-    defaults: dict[str, object] = {
-        "merchant": "Netflix",
-        "direction": Direction.outflow,
-        "cadence": Cadence.monthly,
-        "expected_cents": -1599,
-        "next_expected_on": date(2026, 6, 15),
-    }
-    s = RecurringSeries(**{**defaults, **kw})
-    session.add(s)
-    await session.flush()
-    return s
+from tests.factories import make_account, make_series, make_txn
 
 
 async def test_missed_payment_emits_once_and_advances(session: AsyncSession) -> None:
-    s = await _mk_series(session)  # expected 6/15, grace 7 → missed after 6/22
+    s = await make_series(
+        session, next_expected_on=date(2026, 6, 15)
+    )  # expected 6/15, grace 7 → missed after 6/22
     n = await emit_series_events(session, today=date(2026, 7, 1))
     assert n == 1
     ev = (await session.execute(select(SeriesEvent))).scalar_one()
@@ -34,7 +22,7 @@ async def test_missed_payment_emits_once_and_advances(session: AsyncSession) -> 
 
 async def test_payment_on_time_no_miss(session: AsyncSession) -> None:
     acct = await make_account(session)
-    s = await _mk_series(session)
+    s = await make_series(session, next_expected_on=date(2026, 6, 15))
     await make_txn(
         session,
         acct,
@@ -48,7 +36,7 @@ async def test_payment_on_time_no_miss(session: AsyncSession) -> None:
 
 async def test_price_increase_detected(session: AsyncSession) -> None:
     acct = await make_account(session)
-    s = await _mk_series(session, next_expected_on=date(2026, 8, 15))
+    s = await make_series(session, next_expected_on=date(2026, 8, 15))
     await make_txn(
         session,
         acct,
@@ -68,7 +56,7 @@ async def test_price_increase_detected(session: AsyncSession) -> None:
 
 async def test_small_variation_not_price_increase(session: AsyncSession) -> None:
     acct = await make_account(session)
-    s = await _mk_series(session, next_expected_on=date(2026, 8, 15))
+    s = await make_series(session, next_expected_on=date(2026, 8, 15))
     await make_txn(
         session,
         acct,

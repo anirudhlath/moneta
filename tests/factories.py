@@ -3,7 +3,15 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.models import Account, AccountType, Transaction
+from moneta.models import (
+    Account,
+    AccountType,
+    Cadence,
+    Direction,
+    RecurringSeries,
+    SeriesStatus,
+    Transaction,
+)
 
 _counter = {"acct": 0, "txn": 0}
 
@@ -38,3 +46,18 @@ async def make_txn(session: AsyncSession, account: Account, **kw: Any) -> Transa
     session.add(txn)
     await session.flush()
     return txn
+
+
+async def make_series(session: AsyncSession, **kw: Any) -> RecurringSeries:
+    defaults: dict[str, Any] = {
+        "merchant": "Netflix",
+        "direction": Direction.outflow,
+        "cadence": Cadence.monthly,
+        "expected_cents": -1599,
+        "next_expected_on": date(2026, 8, 1),
+        "status": SeriesStatus.active,
+    }
+    series = RecurringSeries(**{**defaults, **kw})
+    session.add(series)
+    await session.flush()
+    return series

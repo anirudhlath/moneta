@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from moneta.aggregator.base import AccountDTO, Snapshot, TransactionDTO
 from moneta.api import create_app
+from tests.conftest import FakeAdapter
 
 SNAP = Snapshot(
     accounts=[
@@ -35,16 +36,11 @@ SNAP = Snapshot(
 )
 
 
-class FakeAdapter:
-    async def fetch(self, since: date | None = None) -> Snapshot:
-        return SNAP
-
-
 @pytest.fixture
 async def client(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> AsyncIterator[httpx.AsyncClient]:
-    app = create_app(sessionmaker, adapter=FakeAdapter(), llm=None)
+    app = create_app(sessionmaker, adapter=FakeAdapter(SNAP), llm=None)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c

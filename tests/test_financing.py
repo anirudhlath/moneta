@@ -3,16 +3,9 @@ from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.models import (
-    AccountType,
-    Cadence,
-    Direction,
-    RecurringSeries,
-    SeriesStatus,
-    TransferLink,
-)
+from moneta.models import AccountType, TransferLink
 from moneta.views.financing import compute_obligations
-from tests.factories import make_account, make_txn
+from tests.factories import make_account, make_series, make_txn
 
 
 async def _loan_setup(session: AsyncSession, promo: date | None = None) -> None:
@@ -24,16 +17,9 @@ async def _loan_setup(session: AsyncSession, promo: date | None = None) -> None:
         balance_cents=-121500,
         promo_expires_on=promo,
     )
-    series = RecurringSeries(
-        merchant="Synchrony Bank",
-        direction=Direction.outflow,
-        cadence=Cadence.monthly,
-        expected_cents=-13500,
-        next_expected_on=date(2026, 8, 5),
-        status=SeriesStatus.active,
+    series = await make_series(
+        session, merchant="Synchrony Bank", expected_cents=-13500, next_expected_on=date(2026, 8, 5)
     )
-    session.add(series)
-    await session.flush()
     for month in (5, 6, 7):
         out = await make_txn(
             session,

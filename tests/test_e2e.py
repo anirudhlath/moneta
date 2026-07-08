@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from moneta.aggregator.base import AccountDTO, Snapshot, TransactionDTO
 from moneta.api import create_app
+from tests.conftest import FakeAdapter
 
 # The API endpoints resolve date.today() at request time, so all snapshot
 # dates must be computed relative to today or the scenario silently ages out
@@ -106,16 +107,11 @@ SNAPSHOT = Snapshot(
 )
 
 
-class FakeAdapter:
-    async def fetch(self, since: date | None = None) -> Snapshot:
-        return SNAPSHOT
-
-
 @pytest.fixture
 async def client(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> AsyncIterator[httpx.AsyncClient]:
-    app = create_app(sessionmaker, adapter=FakeAdapter(), llm=None)
+    app = create_app(sessionmaker, adapter=FakeAdapter(SNAPSHOT), llm=None)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as c:
