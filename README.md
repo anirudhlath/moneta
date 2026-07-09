@@ -21,6 +21,8 @@ skipped by the incremental window.
 
 No server needed — the CLI runs the app in-process. To run a server instead:
 `uv run moneta serve`, then `export MONETA_API_URL=http://127.0.0.1:8300`.
+Binding a non-loopback host requires an API token (`MONETA_API_TOKEN` or
+`api_token` in config.toml); the CLI client sends it automatically.
 
 ## Commands
 
@@ -33,13 +35,17 @@ No server needed — the CLI runs the app in-process. To run a server instead:
 | `moneta review` | Resolve ambiguous classifications |
 | `moneta accounts` | Accounts; `--set-type ID TYPE`, `--set-promo ID DATE` |
 | `moneta import vesting f.csv` | Vesting data (`symbol,vested_quantity,unvested_quantity`) |
+| `moneta status` | Last sync run: when, success/failure, counts |
+| `moneta backup [dest]` | Online DB snapshot via SQLite `VACUUM INTO` |
 
 ## Configuration
 
 Env vars (`MONETA_*`) override `~/.config/moneta/config.toml`:
 `MONETA_SIMPLEFIN_ACCESS_URL`, `MONETA_LLM_MODEL` (any LiteLLM model string; unset =
-no LLM, ambiguous items go to `moneta review`), `MONETA_API_URL`, `MONETA_DB_PATH`,
-`MONETA_CONFIG_DIR` (config-file location; default `~/.config/moneta`).
+no LLM, ambiguous items go to `moneta review`), `MONETA_API_URL`, `MONETA_API_TOKEN`,
+`MONETA_DB_PATH`, `MONETA_CONFIG_DIR` (config-file location; default `~/.config/moneta`).
+
+Logs go to `<config dir>/moneta.log` (rotating); warnings also print to stderr.
 
 ## Design
 

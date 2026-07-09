@@ -15,11 +15,11 @@ since they're small and scattered rather than one feature.
   the `for err in data.get("errors", []): logger.warning(...)` branch, and
   `resp.raise_for_status()` raising on a non-2xx response, are both
   untested.
-- **`events.py` gaps**: the "advance next_expected_on without emitting a
-  missed event" path (a txn exists in the grace window — advances but
-  doesn't emit); the `status != active` skip (an ended series is ignored
-  entirely by `emit_series_events`); and the `s.expected_cents != 0` guard
-  that avoids a division-by-zero in the price-increase drift calculation.
+- **`events.py` gap**: the `s.expected_cents != 0` guard that avoids a
+  division-by-zero in the price-increase drift calculation. (The
+  "advance without emitting" path and the ended-series skip are now covered
+  by `test_catch_up_skips_windows_with_payment` and
+  `test_auto_ended_series_emits_no_missed_events`.)
 - **`ingest.py` gaps**: a transaction or holding whose `account_id` isn't
   in the current snapshot's accounts (`continue` branch, line ~64/~83); and
   a completely empty `Snapshot` (no accounts/transactions/holdings) through
@@ -41,9 +41,6 @@ since they're small and scattered rather than one feature.
   a year boundary, a leap day, month-end) to deterministically reproduce a
   date-arithmetic bug — today's harness can't be used to pin a regression
   to a specific calendar edge case.
-- **`LiteLLMClassifier` error path** (`llm.py`): the `except Exception:
-  logger.warning(...); return None` degrade-to-review-queue branch around
-  `litellm.acompletion` has no test forcing `litellm` to raise.
 
 ## Acceptance criteria
 - Each bullet above gets at least one test exercising the named branch.
