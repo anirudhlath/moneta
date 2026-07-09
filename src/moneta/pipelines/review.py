@@ -125,11 +125,31 @@ async def review_context(session: AsyncSession, item: ReviewItem) -> dict[str, A
         }
     if item.kind == ReviewKind.price_change:
         old, new = item.payload.get("old_cents"), item.payload.get("new_cents")
+        series_id = item.payload.get("series_id")
+        samples: list[dict[str, str]] = []
+        if isinstance(series_id, int):
+            txns = (
+                (
+                    await session.execute(
+                        select(Transaction)
+                        .where(Transaction.series_id == series_id)
+                        .order_by(Transaction.posted_on.desc())
+                        .limit(6)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            samples = [
+                {"posted_on": t.posted_on.isoformat(), "amount": f"{abs(t.amount_cents) / 100:.2f}"}
+                for t in txns
+            ]
         return {
             "merchant": item.payload.get("merchant"),
             "old_amount": f"{abs(old) / 100:.2f}" if isinstance(old, int) else None,
             "new_amount": f"{abs(new) / 100:.2f}" if isinstance(new, int) else None,
             "occurred_on": item.payload.get("occurred_on"),
+            "samples": samples,
         }
     return {}
 
@@ -283,7 +303,7 @@ async def verify_series(session: AsyncSession, llm: Classifier | None) -> Verify
     if llm is None:
         return stats
     seen = {
-        item.payload.get("merchant")
+        (item.payload.get("merchant"), str(item.payload.get("direction")))
         for item in (
             await session.execute(
                 select(ReviewItem).where(ReviewItem.kind == ReviewKind.recurring_cluster)
@@ -300,7 +320,7 @@ async def verify_series(session: AsyncSession, llm: Classifier | None) -> Verify
         .all()
     )
     for series in series_list:
-        if series.merchant in seen:
+        if (series.merchant, str(series.direction)) in seen:
             continue
         txns = (
             (

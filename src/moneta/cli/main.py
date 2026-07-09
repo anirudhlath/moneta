@@ -201,6 +201,8 @@ def _review_one(item: dict[str, object]) -> dict[str, object] | None:
         answer = _prompt_yes_no("Recurring? [y/n]")
         return None if answer is None else {"is_recurring": answer}
     if item["kind"] == "price_change":
+        for s in ctx.get("samples", []):
+            console.print(f"    {s['posted_on']}  ${s['amount']}")
         console.print(
             f"    ${ctx.get('old_amount')} → ${ctx.get('new_amount')} on {ctx.get('occurred_on')}"
         )
@@ -283,7 +285,9 @@ def review() -> None:
         console.print("[green]resolved[/green]")
     console.print(f"\nResolved {resolved}, skipped {skipped}.")
     if resolved:
-        console.print("Recurring/transfer answers apply on the next sync: [bold]moneta sync[/bold]")
+        # price/not-recurring answers apply immediately; new bills and transfer
+        # links shape detection on the next sync
+        console.print("Some answers take effect on the next sync: [bold]moneta sync[/bold]")
 
 
 @import_app.command("vesting")

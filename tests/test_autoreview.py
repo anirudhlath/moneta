@@ -23,6 +23,7 @@ from moneta.pipelines.review import (
     VerifyStats,
     apply_resolution,
     autoreview_items,
+    review_context,
     verify_series,
 )
 from tests.factories import make_account, make_series, make_txn
@@ -308,3 +309,50 @@ async def test_price_change_resolution_false_resolves_without_applying(
     assert series.expected_cents == -1599
     assert (await session.execute(select(SeriesEvent))).scalar_one_or_none() is None
     assert item.status == ReviewStatus.resolved
+
+
+async def test_force_map_is_direction_scoped(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.recurring_cluster,
+            question="Is 'Venmo' a recurring bill?",
+            payload={"merchant": "Venmo", "direction": "outflow"},
+            status=ReviewStatus.resolved,
+            resolution={"is_recurring": True, "resolved_by": "llm"},
+        )
+    )
+    # irregular INFLOW group: the outflow verification must not force it into income
+    for d in (date(2026, 4, 1), date(2026, 4, 11), date(2026, 5, 26)):
+        await make_txn(session, acct, amount_cents=30000, merchant="Venmo", posted_on=d)
+    await session.flush()
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.new_series == 0
+
+
+async def test_verify_covers_each_direction_separately(session: AsyncSession) -> None:
+    await make_series(session, merchant="Venmo")  # outflow
+    llm = ScriptedLLM({"Venmo": {"is_recurring": True, "confident": True}})
+    assert await verify_series(session, llm) == VerifyStats(verified=1, flagged=0)
+    # inflow series appears later (e.g. next sync); outflow's ledger must not mask it
+    await make_series(session, merchant="Venmo", direction=Direction.inflow, expected_cents=1599)
+    assert await verify_series(session, llm) == VerifyStats(verified=1, flagged=0)
+
+
+async def test_price_change_context_includes_recent_occurrences(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    series = await make_series(session)
+    await make_txn(
+        session,
+        acct,
+        amount_cents=-1899,
+        merchant="Netflix",
+        posted_on=date(2026, 7, 15),
+        series_id=series.id,
+    )
+    item = _price_change_item(series.id)
+    session.add(item)
+    await session.flush()
+    ctx = await review_context(session, item)
+    assert ctx["old_amount"] == "15.99" and ctx["new_amount"] == "18.99"
+    assert ctx["samples"] == [{"posted_on": "2026-07-15", "amount": "18.99"}]
