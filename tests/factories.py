@@ -9,6 +9,8 @@ from moneta.models import (
     Cadence,
     Direction,
     RecurringSeries,
+    ReviewItem,
+    ReviewKind,
     SeriesStatus,
     Transaction,
 )
@@ -61,3 +63,20 @@ async def make_series(session: AsyncSession, **kw: Any) -> RecurringSeries:
     session.add(series)
     await session.flush()
     return series
+
+
+def make_price_change_item(series_id: int, **kw: Any) -> ReviewItem:
+    """Unattached price_change ReviewItem; callers add/flush/commit themselves."""
+    defaults: dict[str, Any] = {
+        "kind": ReviewKind.price_change,
+        "question": "Did 'Netflix' change price from $15.99 to $18.99?",
+        "payload": {
+            "series_id": series_id,
+            "merchant": "Netflix",
+            "old_cents": -1599,
+            "new_cents": -1899,
+            "occurred_on": "2026-07-15",
+            "llm_flagged": True,
+        },
+    }
+    return ReviewItem(**{**defaults, **kw})

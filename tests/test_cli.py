@@ -8,7 +8,7 @@ from typer.testing import CliRunner
 from moneta.cli.main import app
 from moneta.db import init_db, make_sessionmaker
 from moneta.models import ReviewItem
-from tests.factories import make_series
+from tests.factories import make_price_change_item, make_series
 
 runner = CliRunner()
 
@@ -270,20 +270,7 @@ def _seed_price_change_review(tmp_path: Path) -> None:
         await init_db(engine)
         async with sessionmaker() as session:
             series = await make_series(session)
-            session.add(
-                ReviewItem(
-                    kind="price_change",
-                    question="Did 'Netflix' change price from $15.99 to $18.99?",
-                    payload={
-                        "series_id": series.id,
-                        "merchant": "Netflix",
-                        "old_cents": -1599,
-                        "new_cents": -1899,
-                        "occurred_on": "2026-07-15",
-                        "llm_flagged": True,
-                    },
-                )
-            )
+            session.add(make_price_change_item(series.id))
             await session.commit()
         await engine.dispose()
 

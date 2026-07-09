@@ -18,6 +18,7 @@ from moneta.models import (
     SeriesEvent,
     SeriesStatus,
     Transaction,
+    series_key,
 )
 from moneta.queries import classified_links
 
@@ -120,14 +121,9 @@ async def detect_recurring(
             select(ReviewItem).where(ReviewItem.kind == ReviewKind.recurring_cluster)
         )
     ).scalars():
-        merchant_key = item.payload.get("merchant")
-        direction_raw = item.payload.get("direction")
-        if not isinstance(merchant_key, str) or not isinstance(direction_raw, str):
-            continue
-        try:
-            # direction-scoped: an answer about outflows must not force inflows
-            key = (merchant_key, str(Direction(direction_raw)))
-        except ValueError:
+        # direction-scoped: an answer about outflows must not force inflows
+        key = series_key(item.payload.get("merchant"), item.payload.get("direction"))
+        if key is None:
             continue
         if item.status == ReviewStatus.open:
             reviewed.add(key)

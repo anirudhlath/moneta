@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from moneta.models import EventKind, ReviewItem, ReviewKind, ReviewStatus, SeriesEvent
 from moneta.pipelines.events import emit_series_events
 from moneta.pipelines.recurring import detect_recurring
-from tests.factories import make_account, make_series, make_txn
+from tests.factories import make_account, make_price_change_item, make_series, make_txn
 
 
 async def test_missed_payment_emits_once_and_advances(session: AsyncSession) -> None:
@@ -143,17 +143,8 @@ async def test_price_change_unconfident_queues_item_once(session: AsyncSession) 
 async def test_price_change_denied_resolution_suppresses(session: AsyncSession) -> None:
     s, _ = await _drifted_series(session)
     session.add(
-        ReviewItem(
-            kind=ReviewKind.price_change,
-            question="Did 'Netflix' change price from $15.99 to $18.99?",
-            payload={
-                "series_id": s.id,
-                "merchant": "Netflix",
-                "old_cents": -1599,
-                "new_cents": -1899,
-                "occurred_on": "2026-07-15",
-                "llm_flagged": True,
-            },
+        make_price_change_item(
+            s.id,
             status=ReviewStatus.resolved,
             resolution={"is_price_change": False, "resolved_by": "manual"},
         )

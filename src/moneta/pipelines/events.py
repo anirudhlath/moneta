@@ -3,7 +3,7 @@ from datetime import date, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.llm import Classifier
+from moneta.llm import Classifier, confident_yes
 from moneta.models import (
     Cadence,
     EventKind,
@@ -14,6 +14,7 @@ from moneta.models import (
     SeriesEvent,
     SeriesStatus,
     Transaction,
+    dollars,
 )
 from moneta.pipelines.recurring import CADENCE_DAYS
 
@@ -38,17 +39,28 @@ async def _confirms_price_change(
     answer = await llm.classify_json(
         _PRICE_PROMPT.format(
             merchant=series.merchant,
-            old=f"{abs(series.expected_cents) / 100:.2f}",
+            old=dollars(series.expected_cents),
             cadence=series.cadence,
-            new=f"{abs(latest.amount_cents) / 100:.2f}",
+            new=dollars(latest.amount_cents),
             posted_on=latest.posted_on.isoformat(),
         )
     )
-    return (
-        answer is not None
-        and answer.get("is_price_change") is True
-        and answer.get("confident") is True
+    return confident_yes(answer, "is_price_change")
+
+
+def apply_price_change(
+    session: AsyncSession, series: RecurringSeries, new_cents: int, occurred_on: date
+) -> None:
+    """Record a confirmed price change: emit the event, then move expected_cents."""
+    session.add(
+        SeriesEvent(
+            series_id=series.id,
+            kind=EventKind.price_increase,
+            occurred_on=occurred_on,
+            details={"old_cents": series.expected_cents, "new_cents": new_cents},
+        )
     )
+    series.expected_cents = new_cents
 
 
 async def emit_series_events(session: AsyncSession, llm: Classifier | None, today: date) -> int:
@@ -113,45 +125,35 @@ async def emit_series_events(session: AsyncSession, llm: Classifier | None, toda
                 .limit(1)
             )
         ).scalar_one_or_none()
-        if latest is not None and s.expected_cents != 0:
-            drift = abs(latest.amount_cents - s.expected_cents) / abs(s.expected_cents)
-            if (
-                drift > _PRICE_CHANGE_THRESHOLD
-                and s.id not in open_series
-                and (s.id, latest.amount_cents) not in denied
-            ):
-                if llm is None or await _confirms_price_change(llm, s, latest):
-                    session.add(
-                        SeriesEvent(
-                            series_id=s.id,
-                            kind=EventKind.price_increase,
-                            occurred_on=latest.posted_on,
-                            details={
-                                "old_cents": s.expected_cents,
-                                "new_cents": latest.amount_cents,
-                            },
-                        )
-                    )
-                    s.expected_cents = latest.amount_cents
-                    emitted += 1
-                else:
-                    session.add(
-                        ReviewItem(
-                            kind=ReviewKind.price_change,
-                            question=(
-                                f"Did {s.merchant!r} change price from "
-                                f"${abs(s.expected_cents) / 100:.2f} to "
-                                f"${abs(latest.amount_cents) / 100:.2f}?"
-                            ),
-                            payload={
-                                "series_id": s.id,
-                                "merchant": s.merchant,
-                                "old_cents": s.expected_cents,
-                                "new_cents": latest.amount_cents,
-                                "occurred_on": latest.posted_on.isoformat(),
-                                "llm_flagged": True,
-                            },
-                        )
-                    )
+        if latest is None or s.expected_cents == 0:
+            continue
+        drift = abs(latest.amount_cents - s.expected_cents) / abs(s.expected_cents)
+        if (
+            drift <= _PRICE_CHANGE_THRESHOLD
+            or s.id in open_series
+            or (s.id, latest.amount_cents) in denied
+        ):
+            continue
+        if llm is None or await _confirms_price_change(llm, s, latest):
+            apply_price_change(session, s, latest.amount_cents, latest.posted_on)
+            emitted += 1
+        else:
+            session.add(
+                ReviewItem(
+                    kind=ReviewKind.price_change,
+                    question=(
+                        f"Did {s.merchant!r} change price from "
+                        f"${dollars(s.expected_cents)} to ${dollars(latest.amount_cents)}?"
+                    ),
+                    payload={
+                        "series_id": s.id,
+                        "merchant": s.merchant,
+                        "old_cents": s.expected_cents,
+                        "new_cents": latest.amount_cents,
+                        "occurred_on": latest.posted_on.isoformat(),
+                        "llm_flagged": True,
+                    },
+                )
+            )
     await session.commit()
     return emitted

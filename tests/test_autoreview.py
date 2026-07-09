@@ -26,7 +26,7 @@ from moneta.pipelines.review import (
     review_context,
     verify_series,
 )
-from tests.factories import make_account, make_series, make_txn
+from tests.factories import make_account, make_price_change_item, make_series, make_txn
 
 
 class ScriptedLLM:
@@ -269,24 +269,9 @@ async def test_not_recurring_resolution_leaves_other_direction_alone(
     assert series.status == SeriesStatus.active
 
 
-def _price_change_item(series_id: int) -> ReviewItem:
-    return ReviewItem(
-        kind=ReviewKind.price_change,
-        question="Did 'Netflix' change price from $15.99 to $18.99?",
-        payload={
-            "series_id": series_id,
-            "merchant": "Netflix",
-            "old_cents": -1599,
-            "new_cents": -1899,
-            "occurred_on": "2026-07-15",
-            "llm_flagged": True,
-        },
-    )
-
-
 async def test_price_change_resolution_true_applies_amount(session: AsyncSession) -> None:
     series = await make_series(session)
-    item = _price_change_item(series.id)
+    item = make_price_change_item(series.id)
     session.add(item)
     await session.flush()
     await apply_resolution(session, item, {"is_price_change": True})
@@ -302,7 +287,7 @@ async def test_price_change_resolution_false_resolves_without_applying(
     session: AsyncSession,
 ) -> None:
     series = await make_series(session)
-    item = _price_change_item(series.id)
+    item = make_price_change_item(series.id)
     session.add(item)
     await session.flush()
     await apply_resolution(session, item, {"is_price_change": False})
@@ -350,7 +335,7 @@ async def test_price_change_context_includes_recent_occurrences(session: AsyncSe
         posted_on=date(2026, 7, 15),
         series_id=series.id,
     )
-    item = _price_change_item(series.id)
+    item = make_price_change_item(series.id)
     session.add(item)
     await session.flush()
     ctx = await review_context(session, item)

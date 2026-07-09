@@ -22,6 +22,11 @@ class Classifier(Protocol):
     async def classify_json(self, prompt: str) -> dict[str, Any] | None: ...
 
 
+def confident_yes(answer: dict[str, Any] | None, key: str) -> bool:
+    """True only when the classifier answered {key: true, confident: true}."""
+    return answer is not None and answer.get(key) is True and answer.get("confident") is True
+
+
 class LiteLLMClassifier:
     def __init__(self, model: str) -> None:
         self.model = model

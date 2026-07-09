@@ -12,22 +12,23 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.llm import Classifier
+from moneta.llm import Classifier, confident_yes
 from moneta.models import (
     Account,
     AliasSource,
-    EventKind,
     LinkMethod,
     MerchantAlias,
     RecurringSeries,
     ReviewItem,
     ReviewKind,
     ReviewStatus,
-    SeriesEvent,
     SeriesStatus,
     Transaction,
     TransferLink,
+    dollars,
+    series_key,
 )
+from moneta.pipelines.events import apply_price_change
 
 _MERCHANT_PROMPT = """You are auto-resolving a personal-finance review question.
 Name the merchant behind this bank descriptor.
@@ -58,6 +59,23 @@ Respond with JSON: {{"is_recurring": true/false, "confident": true/false}}
 Set confident=true ONLY if you are sure either way."""
 
 
+def _sample(txn: Transaction) -> dict[str, str]:
+    return {"posted_on": txn.posted_on.isoformat(), "amount": dollars(txn.amount_cents)}
+
+
+async def _recent_occurrences(session: AsyncSession, series_id: int) -> list[Transaction]:
+    return list(
+        (
+            await session.execute(
+                select(Transaction)
+                .where(Transaction.series_id == series_id)
+                .order_by(Transaction.posted_on.desc())
+                .limit(6)
+            )
+        ).scalars()
+    )
+
+
 async def txn_summaries(session: AsyncSession, txn_ids: list[int]) -> dict[int, dict[str, Any]]:
     if not txn_ids:
         return {}
@@ -71,8 +89,7 @@ async def txn_summaries(session: AsyncSession, txn_ids: list[int]) -> dict[int, 
     return {
         txn.id: {
             "id": txn.id,
-            "posted_on": txn.posted_on.isoformat(),
-            "amount": f"{abs(txn.amount_cents) / 100:.2f}",
+            **_sample(txn),
             "description": txn.description,
             "account": account_name,
         }
@@ -109,13 +126,7 @@ async def review_context(session: AsyncSession, item: ReviewItem) -> dict[str, A
             .all()
         )
         return {
-            "samples": [
-                {
-                    "posted_on": t.posted_on.isoformat(),
-                    "amount": f"{abs(t.amount_cents) / 100:.2f}",
-                }
-                for t in txns
-            ],
+            "samples": [_sample(t) for t in txns],
             "direction": item.payload.get("direction"),
         }
     if item.kind == ReviewKind.merchant:
@@ -126,28 +137,15 @@ async def review_context(session: AsyncSession, item: ReviewItem) -> dict[str, A
     if item.kind == ReviewKind.price_change:
         old, new = item.payload.get("old_cents"), item.payload.get("new_cents")
         series_id = item.payload.get("series_id")
-        samples: list[dict[str, str]] = []
-        if isinstance(series_id, int):
-            txns = (
-                (
-                    await session.execute(
-                        select(Transaction)
-                        .where(Transaction.series_id == series_id)
-                        .order_by(Transaction.posted_on.desc())
-                        .limit(6)
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            samples = [
-                {"posted_on": t.posted_on.isoformat(), "amount": f"{abs(t.amount_cents) / 100:.2f}"}
-                for t in txns
-            ]
+        samples = (
+            [_sample(t) for t in await _recent_occurrences(session, series_id)]
+            if isinstance(series_id, int)
+            else []
+        )
         return {
             "merchant": item.payload.get("merchant"),
-            "old_amount": f"{abs(old) / 100:.2f}" if isinstance(old, int) else None,
-            "new_amount": f"{abs(new) / 100:.2f}" if isinstance(new, int) else None,
+            "old_amount": dollars(old) if isinstance(old, int) else None,
+            "new_amount": dollars(new) if isinstance(new, int) else None,
             "occurred_on": item.payload.get("occurred_on"),
             "samples": samples,
         }
@@ -199,24 +197,14 @@ async def apply_resolution(
         for series in (await session.execute(stmt)).scalars():
             series.status = SeriesStatus.ended
     elif item.kind == ReviewKind.price_change and resolution.get("is_price_change") is True:
-        series_row = (
-            await session.execute(
-                select(RecurringSeries).where(RecurringSeries.id == item.payload["series_id"])
-            )
-        ).scalar_one_or_none()
+        series_row = await session.get(RecurringSeries, item.payload["series_id"])
         if series_row is not None:
-            session.add(
-                SeriesEvent(
-                    series_id=series_row.id,
-                    kind=EventKind.price_increase,
-                    occurred_on=date.fromisoformat(item.payload["occurred_on"]),
-                    details={
-                        "old_cents": series_row.expected_cents,
-                        "new_cents": item.payload["new_cents"],
-                    },
-                )
+            apply_price_change(
+                session,
+                series_row,
+                item.payload["new_cents"],
+                date.fromisoformat(item.payload["occurred_on"]),
             )
-            series_row.expected_cents = item.payload["new_cents"]
     item.status = ReviewStatus.resolved
     item.resolution = {**resolution, "resolved_by": resolved_by}
 
@@ -303,12 +291,13 @@ async def verify_series(session: AsyncSession, llm: Classifier | None) -> Verify
     if llm is None:
         return stats
     seen = {
-        (item.payload.get("merchant"), str(item.payload.get("direction")))
+        key
         for item in (
             await session.execute(
                 select(ReviewItem).where(ReviewItem.kind == ReviewKind.recurring_cluster)
             )
         ).scalars()
+        if (key := series_key(item.payload.get("merchant"), item.payload.get("direction")))
     }
     series_list = (
         (
@@ -320,51 +309,29 @@ async def verify_series(session: AsyncSession, llm: Classifier | None) -> Verify
         .all()
     )
     for series in series_list:
-        if (series.merchant, str(series.direction)) in seen:
+        if series_key(series.merchant, series.direction) in seen:
             continue
-        txns = (
-            (
-                await session.execute(
-                    select(Transaction)
-                    .where(Transaction.series_id == series.id)
-                    .order_by(Transaction.posted_on.desc())
-                    .limit(6)
-                )
-            )
-            .scalars()
-            .all()
-        )
         answer = await llm.classify_json(
             _VERIFY_PROMPT.format(
                 merchant=series.merchant,
                 direction=series.direction,
                 cadence=series.cadence,
-                expected=f"{abs(series.expected_cents) / 100:.2f}",
-                samples=[
-                    (t.posted_on.isoformat(), f"{abs(t.amount_cents) / 100:.2f}") for t in txns
-                ],
+                expected=dollars(series.expected_cents),
+                samples=[_sample(t) for t in await _recent_occurrences(session, series.id)],
             )
         )
-        payload: dict[str, Any] = {"merchant": series.merchant, "direction": series.direction}
-        if answer and answer.get("is_recurring") is True and answer.get("confident") is True:
-            session.add(
-                ReviewItem(
-                    kind=ReviewKind.recurring_cluster,
-                    question=f"Is {series.merchant!r} a recurring bill?",
-                    payload=payload,
-                    status=ReviewStatus.resolved,
-                    resolution={"is_recurring": True, "resolved_by": "llm"},
-                )
-            )
+        item = ReviewItem(
+            kind=ReviewKind.recurring_cluster,
+            question=f"Is {series.merchant!r} a recurring bill?",
+            payload={"merchant": series.merchant, "direction": series.direction},
+        )
+        if confident_yes(answer, "is_recurring"):
+            item.status = ReviewStatus.resolved
+            item.resolution = {"is_recurring": True, "resolved_by": "llm"}
             stats.verified += 1
         else:
-            session.add(
-                ReviewItem(
-                    kind=ReviewKind.recurring_cluster,
-                    question=f"Is {series.merchant!r} a recurring bill?",
-                    payload={**payload, "llm_flagged": True},
-                )
-            )
+            item.payload = {**item.payload, "llm_flagged": True}
             stats.flagged += 1
+        session.add(item)
     await session.commit()
     return stats

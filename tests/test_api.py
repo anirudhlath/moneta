@@ -13,7 +13,7 @@ from moneta.models import RecurringSeries, ReviewItem
 from moneta.pipelines.recurring import detect_recurring
 from moneta.pipelines.run import RESYNC_OVERLAP_DAYS
 from tests.conftest import FakeAdapter, RecordingAdapter
-from tests.factories import make_account, make_series, make_txn
+from tests.factories import make_account, make_price_change_item, make_series, make_txn
 
 # The /sync and /power endpoints resolve date.today() at request time, so snapshot
 # dates must be relative — pinned dates would go stale as real time passes.
@@ -216,7 +216,7 @@ async def test_review_resolve_recurring_cluster_validates_and_applies(
 async def test_review_context_enrichment(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    from moneta.models import AccountType, ReviewItem
+    from moneta.models import AccountType
 
     async with sessionmaker() as session:
         checking = await make_account(session, type=AccountType.checking)
@@ -294,20 +294,7 @@ async def test_review_resolve_price_change_validates_and_applies(
     async with sessionmaker() as session:
         series = await make_series(session)
         series_id = series.id
-        session.add(
-            ReviewItem(
-                kind="price_change",
-                question="Did 'Netflix' change price from $15.99 to $18.99?",
-                payload={
-                    "series_id": series_id,
-                    "merchant": "Netflix",
-                    "old_cents": -1599,
-                    "new_cents": -1899,
-                    "occurred_on": "2026-07-15",
-                    "llm_flagged": True,
-                },
-            )
-        )
+        session.add(make_price_change_item(series_id))
         await session.commit()
 
     items = (await client.get("/review")).json()
