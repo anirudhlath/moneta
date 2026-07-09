@@ -326,4 +326,12 @@ def serve(host: str = "127.0.0.1", port: int = 8300) -> None:
     """Run the moneta API server."""
     import uvicorn
 
+    from moneta.config import load_settings
+
+    if host not in ("127.0.0.1", "::1", "localhost") and not load_settings().api_token:
+        console.print(
+            "[red]Error:[/red] refusing to bind a non-loopback host without an API token. "
+            "Set MONETA_API_TOKEN or api_token in config.toml."
+        )
+        raise typer.Exit(1)
     uvicorn.run("moneta.api:build_app", host=host, port=port, factory=True)

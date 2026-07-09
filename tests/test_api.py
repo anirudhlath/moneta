@@ -292,3 +292,18 @@ async def test_sync_last_endpoint(client: httpx.AsyncClient) -> None:
     body = (await client.get("/sync/last")).json()
     assert body["success"] is True
     assert body["report"]["ingest"]["new_transactions"] == 3
+
+
+async def test_bearer_token_enforced_when_configured(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    app = create_app(sessionmaker, adapter=None, llm=None, api_token="s3cret")
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        assert (await c.get("/accounts")).status_code == 401
+        assert (
+            await c.get("/accounts", headers={"Authorization": "Bearer wrong"})
+        ).status_code == 401
+        assert (
+            await c.get("/accounts", headers={"Authorization": "Bearer s3cret"})
+        ).status_code == 200

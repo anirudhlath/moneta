@@ -244,3 +244,34 @@ def test_status_before_any_sync(tmp_path: Path, monkeypatch) -> None:  # type: i
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0
     assert "No sync has run yet" in result.output
+
+
+def test_serve_refuses_public_bind_without_token(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    import uvicorn
+
+    called: list[int] = []
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: called.append(1))
+    result = runner.invoke(app, ["serve", "--host", "0.0.0.0"])
+    assert result.exit_code == 1
+    assert "token" in result.output.lower()
+    assert not called
+
+
+def test_serve_public_bind_allowed_with_token(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("MONETA_API_TOKEN", "t0k3n")
+    import uvicorn
+
+    called: list[int] = []
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: called.append(1))
+    result = runner.invoke(app, ["serve", "--host", "0.0.0.0"])
+    assert result.exit_code == 0
+    assert called
+
+
+def test_in_process_cli_works_with_token_configured(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    (tmp_path / "config.toml").write_text('api_token = "t0k3n"\n')
+    result = runner.invoke(app, ["networth"])  # client must attach the bearer header
+    assert result.exit_code == 0

@@ -4,7 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -110,6 +110,7 @@ def create_app(
     adapter: AggregatorAdapter | None,
     llm: Classifier | None,
     engine: AsyncEngine | None = None,
+    api_token: str | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -117,7 +118,11 @@ def create_app(
             await init_db(engine)
         yield
 
-    app = FastAPI(title="moneta", lifespan=lifespan)
+    async def check_auth(authorization: Annotated[str | None, Header()] = None) -> None:
+        if api_token is not None and authorization != f"Bearer {api_token}":
+            raise HTTPException(status_code=401, detail="missing or invalid bearer token")
+
+    app = FastAPI(title="moneta", lifespan=lifespan, dependencies=[Depends(check_auth)])
 
     async def get_session() -> AsyncIterator[AsyncSession]:
         async with sessionmaker() as session:
@@ -303,4 +308,5 @@ def build_app() -> FastAPI:
         adapter,
         build_classifier(settings.llm_model),
         engine=engine,
+        api_token=settings.api_token,
     )
