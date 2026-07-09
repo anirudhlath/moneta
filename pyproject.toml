@@ -17,6 +17,7 @@ dependencies = [
     "pydantic-settings>=2.14.2",
     "rich>=15.0.0",
     "sqlalchemy[asyncio]>=2.0.51",
+    "tomli-w>=1.2.0",
     "typer>=0.26.8",
     "uvicorn[standard]>=0.50.2",
 ]

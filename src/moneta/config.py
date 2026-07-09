@@ -5,6 +5,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+import tomli_w
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -44,8 +45,10 @@ def load_settings() -> Settings:
 def save_config_value(key: str, value: str) -> None:
     config_dir = _config_dir()
     config_dir.mkdir(parents=True, exist_ok=True)
+    config_dir.chmod(0o700)  # the config file holds bank credentials
     path = config_dir / "config.toml"
     values = _read_config_file(config_dir)
     values[key] = value
-    lines = [f'{k} = "{v}"' for k, v in values.items()]
-    path.write_text("\n".join(lines) + "\n")
+    path.touch(mode=0o600, exist_ok=True)
+    path.write_text(tomli_w.dumps(values))
+    path.chmod(0o600)

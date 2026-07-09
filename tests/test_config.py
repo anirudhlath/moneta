@@ -28,3 +28,17 @@ def test_save_and_reload(tmp_path: Path, monkeypatch) -> None:  # type: ignore[n
 
 def test_settings_is_pydantic() -> None:
     assert issubclass(Settings, BaseSettings)
+
+
+def test_save_config_value_escapes_and_roundtrips(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("MONETA_CONFIG_DIR", str(tmp_path))
+    tricky = 'https://u:p"w\\x@bridge.example/simplefin'
+    save_config_value("simplefin_access_url", tricky)
+    assert load_settings().simplefin_access_url == tricky
+
+
+def test_save_config_value_restricts_permissions(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("MONETA_CONFIG_DIR", str(tmp_path))
+    save_config_value("llm_model", "gpt")
+    assert (tmp_path / "config.toml").stat().st_mode & 0o777 == 0o600
+    assert tmp_path.stat().st_mode & 0o777 == 0o700
