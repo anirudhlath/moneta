@@ -4,6 +4,7 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from moneta.cli.client import request
@@ -14,6 +15,14 @@ setup_app = typer.Typer(no_args_is_help=True)
 app.add_typer(import_app, name="import", help="Import external data files.")
 app.add_typer(setup_app, name="setup", help="Connect data sources.")
 console = Console()
+
+
+def _parse_iso_date(value: str) -> str:
+    try:
+        return date.fromisoformat(value).isoformat()
+    except ValueError:
+        console.print(f"[red]Error:[/red] invalid date {value!r} (expected YYYY-MM-DD)")
+        raise typer.Exit(1) from None
 
 
 @app.command()
@@ -46,9 +55,15 @@ def power() -> None:
     r = request("GET", "/power")
     table = Table(title=f"Spending power — {r['month']}", show_header=False)
     table.add_row("Income (detected)", f"${r['monthly_income']}/mo")
+    for line in r["income_sources"]:
+        table.add_row(
+            f"  {escape(line['merchant'])} ({line['cadence']})", f"${line['monthly_amount']}"
+        )
     table.add_row("Fixed costs", f"-${r['total_fixed']}/mo")
     for line in r["fixed_costs"]:
-        table.add_row(f"  {line['merchant']} ({line['cadence']})", f"${line['monthly_amount']}")
+        table.add_row(
+            f"  {escape(line['merchant'])} ({line['cadence']})", f"${line['monthly_amount']}"
+        )
     table.add_row("[bold]Spending power[/bold]", f"[bold]${r['spending_power']}/mo[/bold]")
     table.add_row("Spent so far", f"-${r['spent_so_far']}")
     table.add_row("[bold]Remaining[/bold]", f"[bold]${r['remaining']}[/bold]")
@@ -84,20 +99,48 @@ def recurring(
         console.print(f"[green]Series {end} ended.[/green]")
     if events:
         rows = request("GET", "/recurring/events")
-        table = Table("When", "Series", "Event", "Details")
+        table = Table("When", "ID", "Merchant", "Event", "Details")
         for e in rows:
-            table.add_row(e["occurred_on"], str(e["series_id"]), e["kind"], str(e["details"]))
+            table.add_row(
+                e["occurred_on"],
+                str(e["series_id"]),
+                escape(e["merchant"]),
+                e["kind"],
+                escape(str(e["details"])),
+            )
     else:
         rows = request("GET", "/recurring")
-        table = Table("Merchant", "Cadence", "Expected", "Next", "Status")
+        table = Table("ID", "Merchant", "Direction", "Cadence", "Expected", "Next", "Status")
         for s in rows:
             table.add_row(
-                s["merchant"],
+                str(s["id"]),
+                escape(s["merchant"]),
+                s["direction"],
                 s["cadence"],
                 f"${s['expected_amount']}",
                 s["next_expected_on"],
                 s["status"],
             )
+    console.print(table)
+
+
+@app.command()
+def cashflow(
+    start: Annotated[
+        str | None, typer.Option("--start", help="YYYY-MM-DD (default: month start).")
+    ] = None,
+    end: Annotated[str | None, typer.Option("--end", help="YYYY-MM-DD (default: today).")] = None,
+) -> None:
+    """Accrual spend vs cash out for a date range (defaults to this month)."""
+    params = {
+        name: _parse_iso_date(value)
+        for name, value in (("start", start), ("end", end))
+        if value is not None
+    }
+    r = request("GET", "/cashflow", params=params or None)
+    table = Table(title=f"Cashflow — {r['start']} to {r['end']}", show_header=False)
+    table.add_row("Accrual spend", f"${r['accrual']}")
+    table.add_row("Cash out", f"${r['cash_out']}")
     console.print(table)
 
 
@@ -110,7 +153,7 @@ def obligations() -> None:
         payoff = ob["payoff_estimate"] or "?"
         warn = " [red]![/red]" if ob["deferred_interest_risk"] else ""
         table.add_row(
-            ob["account_name"],
+            escape(ob["account_name"]),
             f"${ob['balance_owed']}",
             f"${ob['monthly_payment']}" if ob["monthly_payment"] else "?",
             str(ob["months_left"] or "?"),
@@ -131,19 +174,15 @@ def accounts(
     if set_type:
         request("PATCH", f"/accounts/{set_type[0]}", {"type": set_type[1]})
     if set_promo:
-        try:
-            promo = date.fromisoformat(set_promo[1]).isoformat()
-        except ValueError:
-            console.print(f"[red]Error:[/red] invalid date {set_promo[1]!r} (expected YYYY-MM-DD)")
-            raise typer.Exit(1) from None
+        promo = _parse_iso_date(set_promo[1])
         request("PATCH", f"/accounts/{set_promo[0]}", {"promo_expires_on": promo})
     rows = request("GET", "/accounts")
     table = Table("ID", "Name", "Org", "Type", "Balance", "Promo ends")
     for a in rows:
         table.add_row(
             str(a["id"]),
-            a["name"],
-            a["org_name"],
+            escape(a["name"]),
+            escape(a["org_name"]),
             a["type"],
             f"${a['balance']}",
             str(a["promo_expires_on"] or "—"),

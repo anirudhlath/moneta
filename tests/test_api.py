@@ -8,10 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from moneta.aggregator.base import AccountDTO, Snapshot, TransactionDTO
 from moneta.api import create_app
+from moneta.models import EventKind, SeriesEvent
 from moneta.pipelines.recurring import detect_recurring
 from moneta.pipelines.run import RESYNC_OVERLAP_DAYS
 from tests.conftest import FakeAdapter, RecordingAdapter
-from tests.factories import make_account, make_txn
+from tests.factories import make_account, make_series, make_series_event, make_txn
 
 # The /sync and /power endpoints resolve date.today() at request time, so snapshot
 # dates must be relative — pinned dates would go stale as real time passes.
@@ -159,6 +160,39 @@ async def test_patch_recurring_status_ends_series(client: httpx.AsyncClient) -> 
     assert r.status_code == 200
     reactivated = (await client.get("/recurring")).json()[0]
     assert reactivated["status"] == "active"
+
+
+async def test_events_include_series_merchant(
+    client: httpx.AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    async with sessionmaker() as session:
+        series = await make_series(session)
+        await make_series_event(session, series)
+        await session.commit()
+    r = await client.get("/recurring/events")
+    assert r.status_code == 200
+    events = r.json()
+    assert len(events) == 1
+    assert events[0]["merchant"] == "Netflix"
+
+
+async def test_events_with_dangling_series_still_listed(
+    client: httpx.AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """SQLite doesn't enforce FKs here — an orphaned event must not vanish silently."""
+    async with sessionmaker() as session:
+        session.add(
+            SeriesEvent(
+                series_id=999,
+                kind=EventKind.missed,
+                occurred_on=date(2026, 7, 1),
+                details={},
+            )
+        )
+        await session.commit()
+    events = (await client.get("/recurring/events")).json()
+    assert len(events) == 1
+    assert events[0]["merchant"] == "series 999"
 
 
 async def test_patch_recurring_unknown_id_is_404(client: httpx.AsyncClient) -> None:

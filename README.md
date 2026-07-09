@@ -28,6 +28,7 @@ No server needed — the CLI runs the app in-process. To run a server instead:
 |---|---|
 | `moneta power` | Income, fixed costs, spending power, spent so far, remaining |
 | `moneta networth` | Net worth (vested only); unvested listed as potential |
+| `moneta cashflow [--start D --end D]` | Accrual spend vs cash out for a range (default: this month) |
 | `moneta recurring [--events]` | Subscriptions/bills; missed payments and price increases |
 | `moneta obligations` | Loans/financing: payment, months left, deferred-interest warnings |
 | `moneta review` | Resolve ambiguous classifications |

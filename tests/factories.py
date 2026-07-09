@@ -8,7 +8,9 @@ from moneta.models import (
     AccountType,
     Cadence,
     Direction,
+    EventKind,
     RecurringSeries,
+    SeriesEvent,
     SeriesStatus,
     Transaction,
 )
@@ -61,3 +63,18 @@ async def make_series(session: AsyncSession, **kw: Any) -> RecurringSeries:
     session.add(series)
     await session.flush()
     return series
+
+
+async def make_series_event(
+    session: AsyncSession, series: RecurringSeries, **kw: Any
+) -> SeriesEvent:
+    defaults: dict[str, Any] = {
+        "series_id": series.id,
+        "kind": EventKind.missed,
+        "occurred_on": date(2026, 7, 1),
+        "details": {},
+    }
+    event = SeriesEvent(**{**defaults, **kw})
+    session.add(event)
+    await session.flush()
+    return event
