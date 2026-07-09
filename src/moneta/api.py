@@ -17,19 +17,15 @@ from moneta.llm import Classifier, build_classifier
 from moneta.models import (
     Account,
     AccountType,
-    AliasSource,
-    LinkMethod,
-    MerchantAlias,
     RecurringSeries,
     ReviewItem,
     ReviewKind,
     ReviewStatus,
     SeriesEvent,
     SeriesStatus,
-    Transaction,
-    TransferLink,
 )
 from moneta.pipelines.normalize import renormalize_merchants
+from moneta.pipelines.review import apply_resolution, review_context
 from moneta.pipelines.run import SyncReport, run_sync
 from moneta.queries import classified_links
 from moneta.vesting import apply_vesting, parse_vesting_csv
@@ -225,74 +221,6 @@ def create_app(
         await session.commit()
         return {"ok": True}
 
-    async def _txn_summaries(
-        session: AsyncSession, txn_ids: list[int]
-    ) -> dict[int, dict[str, Any]]:
-        if not txn_ids:
-            return {}
-        rows = (
-            await session.execute(
-                select(Transaction, Account.name)
-                .join(Account, Transaction.account_id == Account.id)
-                .where(Transaction.id.in_(txn_ids))
-            )
-        ).all()
-        return {
-            txn.id: {
-                "id": txn.id,
-                "posted_on": txn.posted_on.isoformat(),
-                "amount": f"{abs(txn.amount_cents) / 100:.2f}",
-                "description": txn.description,
-                "account": account_name,
-            }
-            for txn, account_name in rows
-        }
-
-    async def _review_context(session: AsyncSession, item: ReviewItem) -> dict[str, Any]:
-        if item.kind == ReviewKind.transfer_pair:
-            outflow_id = item.payload.get("outflow_id")
-            candidate_ids = [c for c in item.payload.get("candidates", []) if isinstance(c, int)]
-            ids = ([outflow_id] if isinstance(outflow_id, int) else []) + candidate_ids
-            summaries = await _txn_summaries(session, ids)
-            context: dict[str, Any] = {
-                "candidates": [summaries[c] for c in candidate_ids if c in summaries]
-            }
-            if isinstance(outflow_id, int) and outflow_id in summaries:
-                context["outflow"] = summaries[outflow_id]
-            return context
-        if item.kind == ReviewKind.recurring_cluster:
-            merchant = item.payload.get("merchant")
-            if not isinstance(merchant, str):
-                return {}
-            txns = (
-                (
-                    await session.execute(
-                        select(Transaction)
-                        .where(Transaction.merchant == merchant)
-                        .order_by(Transaction.posted_on.desc())
-                        .limit(6)
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            return {
-                "samples": [
-                    {
-                        "posted_on": t.posted_on.isoformat(),
-                        "amount": f"{abs(t.amount_cents) / 100:.2f}",
-                    }
-                    for t in txns
-                ],
-                "direction": item.payload.get("direction"),
-            }
-        if item.kind == ReviewKind.merchant:
-            return {
-                "descriptor": item.payload.get("descriptor"),
-                "suggested": item.payload.get("fallback"),
-            }
-        return {}
-
     @app.get("/review")
     async def review(session: Session) -> list[ReviewOut]:
         rows = (
@@ -310,7 +238,7 @@ def create_app(
                 kind=r.kind,
                 question=r.question,
                 payload=r.payload,
-                context=await _review_context(session, r),
+                context=await review_context(session, r),
             )
             for r in rows
         ]
@@ -322,43 +250,11 @@ def create_app(
         ).scalar_one_or_none()
         if item is None:
             raise HTTPException(status_code=404, detail="review item not found")
-        if item.kind == ReviewKind.merchant and isinstance(body.resolution.get("merchant"), str):
-            merchant = body.resolution["merchant"]
-            raw = item.payload["descriptor"]
-            alias = (
-                await session.execute(
-                    select(MerchantAlias).where(MerchantAlias.raw_descriptor == raw)
-                )
-            ).scalar_one_or_none()
-            if alias is None:
-                session.add(
-                    MerchantAlias(raw_descriptor=raw, merchant=merchant, source=AliasSource.manual)
-                )
-            else:
-                alias.merchant = merchant
-                alias.source = AliasSource.manual
-            for txn in (
-                await session.execute(select(Transaction).where(Transaction.description == raw))
-            ).scalars():
-                txn.merchant = merchant
-        elif item.kind == ReviewKind.transfer_pair and isinstance(
-            body.resolution.get("inflow_id"), int
+        if item.kind == ReviewKind.recurring_cluster and not isinstance(
+            body.resolution.get("is_recurring"), bool
         ):
-            session.add(
-                TransferLink(
-                    outflow_id=item.payload["outflow_id"],
-                    inflow_id=body.resolution["inflow_id"],
-                    confidence=1.0,
-                    method=LinkMethod.manual,
-                )
-            )
-        elif item.kind == ReviewKind.recurring_cluster:
-            if not isinstance(body.resolution.get("is_recurring"), bool):
-                raise HTTPException(
-                    status_code=422, detail="resolution.is_recurring must be a bool"
-                )
-        item.status = ReviewStatus.resolved
-        item.resolution = body.resolution
+            raise HTTPException(status_code=422, detail="resolution.is_recurring must be a bool")
+        await apply_resolution(session, item, body.resolution, resolved_by="manual")
         await session.commit()
         return {"ok": True}
 

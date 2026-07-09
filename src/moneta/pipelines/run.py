@@ -11,6 +11,7 @@ from moneta.pipelines.events import emit_series_events
 from moneta.pipelines.ingest import IngestStats, ingest_snapshot
 from moneta.pipelines.normalize import normalize_merchants
 from moneta.pipelines.recurring import RecurringStats, detect_recurring
+from moneta.pipelines.review import autoreview_items
 from moneta.pipelines.transfers import TransferStats, link_transfers
 
 # SimpleFIN's default window when start-date is omitted is server-chosen (~1 day),
@@ -30,6 +31,7 @@ class SyncReport(BaseModel):
     ingest: IngestStats
     normalized: int
     transfers: TransferStats
+    auto_resolved: int
     recurring: RecurringStats
     events: int
 
@@ -44,12 +46,16 @@ async def run_sync(
     ingest = await ingest_snapshot(session, snap)
     normalized = await normalize_merchants(session, llm)
     transfers = await link_transfers(session, llm)
+    # auto-review before detection so confident LLM answers (incl. last sync's
+    # recurring questions) influence this run's series and exclusions
+    auto_resolved = await autoreview_items(session, llm) if llm else 0
     recurring = await detect_recurring(session, llm)
     events = await emit_series_events(session, today)
     return SyncReport(
         ingest=ingest,
         normalized=normalized,
         transfers=transfers,
+        auto_resolved=auto_resolved,
         recurring=recurring,
         events=events,
     )
