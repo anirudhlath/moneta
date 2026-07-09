@@ -35,8 +35,10 @@ async def session(
 class FakeAdapter:
     def __init__(self, snapshot: Snapshot) -> None:
         self.snapshot = snapshot
+        self.since: date | None = None
 
     async def fetch(self, since: date | None = None) -> Snapshot:
+        self.since = since
         return self.snapshot
 
 

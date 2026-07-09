@@ -314,10 +314,13 @@ def setup_plaid(
     env: Annotated[str, typer.Option("--env", help="production or sandbox")] = "production",
 ) -> None:
     """Save Plaid API credentials (get them at https://dashboard.plaid.com)."""
+    from moneta.aggregator.plaid import PLAID_ENVS
     from moneta.config import save_config_value
 
-    if env not in ("production", "sandbox"):
-        console.print(f"[red]Error:[/red] --env must be production or sandbox, got {env!r}")
+    if env not in PLAID_ENVS:
+        console.print(
+            f"[red]Error:[/red] --env must be one of {', '.join(sorted(PLAID_ENVS))}, got {env!r}"
+        )
         raise typer.Exit(1)
     save_config_value("plaid_client_id", client_id)
     save_config_value("plaid_secret", secret)
@@ -338,7 +341,7 @@ def setup_plaid_link(
     from moneta.aggregator import plaid
 
     client, settings = _plaid_client()
-    products = product or ["transactions"]
+    products = product or list(plaid.DEFAULT_PRODUCTS)
 
     async def _link() -> str:
         link_token, url = await plaid.create_hosted_link(client, products)
@@ -384,7 +387,7 @@ def setup_plaid_unlink(item_id: str) -> None:
     """Unlink a Plaid item (stops Plaid billing for it); synced data stays in the db."""
     import asyncio
 
-    from moneta.aggregator.plaid import PlaidError, items_path, load_items, save_items
+    from moneta.aggregator.plaid import PlaidError, items_path, load_items, remove_item, save_items
 
     client, settings = _plaid_client()
     path = items_path(settings.config_dir)
@@ -396,7 +399,7 @@ def setup_plaid_unlink(item_id: str) -> None:
         )
         raise typer.Exit(1)
     try:
-        asyncio.run(client.post("/item/remove", {"access_token": match.access_token}))
+        asyncio.run(remove_item(client, match.access_token))
     except PlaidError as exc:
         # the local store is moneta's source of truth; a dead item (e.g. already
         # removed on Plaid's side) must still be removable locally

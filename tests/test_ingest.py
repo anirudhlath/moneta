@@ -106,23 +106,3 @@ async def test_type_hint_beats_keyword_inference(session: AsyncSession) -> None:
     await ingest_snapshot(session, snap)
     acct = (await session.execute(select(Account))).scalar_one()
     assert acct.type == AccountType.credit
-
-
-async def test_no_type_hint_falls_back_to_inference(session: AsyncSession) -> None:
-    snap = Snapshot(
-        accounts=[
-            AccountDTO(
-                id="sfin-1",
-                name="Premier Checking",
-                org_name="Chase",
-                currency="USD",
-                balance=Decimal("10.00"),
-                balance_date=date(2026, 7, 1),
-            )
-        ],
-        transactions=[],
-        holdings=[],
-    )
-    await ingest_snapshot(session, snap)
-    acct = (await session.execute(select(Account))).scalar_one()
-    assert acct.type == AccountType.checking

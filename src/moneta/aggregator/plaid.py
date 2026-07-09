@@ -20,13 +20,22 @@ import httpx
 from loguru import logger
 from pydantic import BaseModel, ValidationError
 
-from moneta.aggregator.base import AccountDTO, HoldingDTO, Snapshot, TransactionDTO
+from moneta.aggregator.base import (
+    AccountDTO,
+    HoldingDTO,
+    Snapshot,
+    TransactionDTO,
+    gather_snapshots,
+)
 from moneta.models import AccountType
 
 _BASE_URLS = {
     "sandbox": "https://sandbox.plaid.com",
     "production": "https://production.plaid.com",
 }
+PLAID_ENVS = frozenset(_BASE_URLS)
+DEFAULT_PRODUCTS: tuple[str, ...] = ("transactions",)
+_DAYS_REQUESTED = 730  # Plaid's maximum transaction history
 
 
 class PlaidError(Exception):
@@ -48,14 +57,12 @@ class PlaidClient:
             raise ValueError(f"unknown Plaid env {env!r}; expected one of {sorted(_BASE_URLS)}")
         self._base = _BASE_URLS[env]
         self._auth = {"client_id": client_id, "secret": secret}
-        self._client = client
+        # One client for the lifetime (no connection until first use): a sync
+        # paginates dozens of calls and link polling runs one every few seconds —
+        # a per-call client would pay a TCP+TLS handshake each time.
+        self._client = client or httpx.AsyncClient(timeout=30.0)
 
     async def post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        # Lazily created and kept for the client's lifetime: a sync paginates dozens
-        # of calls and link polling runs one every few seconds — a per-call client
-        # would pay a TCP+TLS handshake each time.
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=30.0)
         resp = await self._client.post(f"{self._base}{path}", json={**self._auth, **payload})
         if resp.status_code >= 400:
             try:
@@ -75,7 +82,7 @@ class PlaidItem(BaseModel):
     item_id: str
     access_token: str
     institution_name: str = ""
-    products: list[str] = ["transactions"]
+    products: list[str] = list(DEFAULT_PRODUCTS)
 
 
 def items_path(config_dir: Path) -> Path:
@@ -105,9 +112,7 @@ def save_items(path: Path, items: list[PlaidItem]) -> None:
     tmp.replace(path)
 
 
-async def create_hosted_link(
-    client: PlaidClient, products: list[str], days_requested: int = 730
-) -> tuple[str, str]:
+async def create_hosted_link(client: PlaidClient, products: list[str]) -> tuple[str, str]:
     payload: dict[str, Any] = {
         "client_name": "moneta",
         "user": {"client_user_id": "moneta"},
@@ -117,7 +122,7 @@ async def create_hosted_link(
         "hosted_link": {},
     }
     if "transactions" in products:
-        payload["transactions"] = {"days_requested": days_requested}
+        payload["transactions"] = {"days_requested": _DAYS_REQUESTED}
     data = await client.post("/link/token/create", payload)
     return data["link_token"], data["hosted_link_url"]
 
@@ -140,6 +145,11 @@ async def poll_link_result(
 async def exchange_public_token(client: PlaidClient, public_token: str) -> tuple[str, str]:
     data = await client.post("/item/public_token/exchange", {"public_token": public_token})
     return data["access_token"], data["item_id"]
+
+
+async def remove_item(client: PlaidClient, access_token: str) -> None:
+    """Deactivate an item on Plaid's side (stops billing for it)."""
+    await client.post("/item/remove", {"access_token": access_token})
 
 
 _SYNC_PAGE_SIZE = 500
@@ -194,31 +204,29 @@ class PlaidAdapter:
         # `since` is deliberately ignored: /transactions/sync replays from an empty
         # cursor every run (history capped at 730 days by the link token), and
         # ingest dedup absorbs the overlap. See design spec §3.
-        snap = Snapshot(accounts=[], transactions=[], holdings=[])
-        for item in self._items:
-            try:
-                part = await self._fetch_item(item)
-            except PlaidError as exc:
-                # Item-level failures degrade to warn+skip so one dead bank never
-                # blocks the others; credential-level errors stay fatal (design §6).
-                if exc.error_type != "ITEM_ERROR":
-                    raise
-                hint = (
-                    " — re-link with: moneta setup plaid-link"
-                    if exc.error_code == "ITEM_LOGIN_REQUIRED"
-                    else ""
-                )
-                logger.warning(
-                    "Plaid item {} skipped ({}){}",
-                    item.institution_name or item.item_id,
-                    exc,
-                    hint,
-                )
-                continue
-            snap.accounts.extend(part.accounts)
-            snap.transactions.extend(part.transactions)
-            snap.holdings.extend(part.holdings)
-        return snap
+        # Items are independent institutions, so they sync concurrently.
+        return await gather_snapshots(self._fetch_item_or_skip(item) for item in self._items)
+
+    async def _fetch_item_or_skip(self, item: PlaidItem) -> Snapshot:
+        try:
+            return await self._fetch_item(item)
+        except PlaidError as exc:
+            # Item-level failures degrade to warn+skip so one dead bank never
+            # blocks the others; credential-level errors stay fatal (design §6).
+            if exc.error_type != "ITEM_ERROR":
+                raise
+            hint = (
+                " — re-link with: moneta setup plaid-link"
+                if exc.error_code == "ITEM_LOGIN_REQUIRED"
+                else ""
+            )
+            logger.warning(
+                "Plaid item {} skipped ({}){}",
+                item.institution_name or item.item_id,
+                exc,
+                hint,
+            )
+            return Snapshot(accounts=[], transactions=[], holdings=[])
 
     async def _fetch_item(self, item: PlaidItem) -> Snapshot:
         # Built locally and merged only on success: a skipped item must not leave

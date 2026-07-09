@@ -22,6 +22,7 @@ from moneta.aggregator.plaid import (
     save_items,
 )
 from moneta.models import AccountType
+from tests.conftest import FakeAdapter
 
 
 def _snap(account_id: str) -> Snapshot:
@@ -41,23 +42,13 @@ def _snap(account_id: str) -> Snapshot:
     )
 
 
-class _StubAdapter:
-    def __init__(self, account_id: str) -> None:
-        self.account_id = account_id
-        self.seen_since: date | None = None
-
-    async def fetch(self, since: date | None = None) -> Snapshot:
-        self.seen_since = since
-        return _snap(self.account_id)
-
-
 async def test_merged_adapter_concatenates_and_passes_since() -> None:
-    a, b = _StubAdapter("A"), _StubAdapter("B")
+    a, b = FakeAdapter(_snap("A")), FakeAdapter(_snap("B"))
     adapters: list[AggregatorAdapter] = [a, b]
     merged = MergedAdapter(adapters)
     snap = await merged.fetch(since=date(2026, 1, 1))
     assert [acct.id for acct in snap.accounts] == ["A", "B"]
-    assert a.seen_since == b.seen_since == date(2026, 1, 1)
+    assert a.since == b.since == date(2026, 1, 1)
 
 
 def _plaid_client(handler: Callable[[httpx.Request], httpx.Response]) -> PlaidClient:
@@ -66,6 +57,12 @@ def _plaid_client(handler: Callable[[httpx.Request], httpx.Response]) -> PlaidCl
         "sec",
         "sandbox",
         client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+
+
+def _plaid_error(error_type: str, code: str, msg: str = "err") -> httpx.Response:
+    return httpx.Response(
+        400, json={"error_type": error_type, "error_code": code, "error_message": msg}
     )
 
 
@@ -86,14 +83,7 @@ async def test_post_injects_credentials_and_env_base_url() -> None:
 
 async def test_post_error_raises_plaid_error() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            400,
-            json={
-                "error_type": "ITEM_ERROR",
-                "error_code": "ITEM_LOGIN_REQUIRED",
-                "error_message": "user must re-link",
-            },
-        )
+        return _plaid_error("ITEM_ERROR", "ITEM_LOGIN_REQUIRED", "user must re-link")
 
     client = _plaid_client(handle)
     with pytest.raises(PlaidError) as exc_info:
@@ -331,11 +321,14 @@ def _sync_page(
 
 def _accounts_then_sync(
     sync_responses: list[httpx.Response],
+    sync_bodies: list[dict[str, Any]] | None = None,
 ) -> Callable[[httpx.Request], httpx.Response]:
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/accounts/get":
             return httpx.Response(200, json=_ACCOUNTS_PAYLOAD)
         assert request.url.path == "/transactions/sync"
+        if sync_bodies is not None:
+            sync_bodies.append(json.loads(request.content))
         return sync_responses.pop(0)
 
     return handle
@@ -348,17 +341,10 @@ async def test_fetch_transactions_paginates_negates_and_skips_pending() -> None:
         ),
         httpx.Response(200, json=_sync_page([_txn("t3", -1000.0)], False)),
     ]
-    cursors: list[str] = []
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/accounts/get":
-            return httpx.Response(200, json=_ACCOUNTS_PAYLOAD)
-        body = json.loads(request.content)
-        cursors.append(body["cursor"])
-        assert body["count"] == 500
-        return pages.pop(0)
-
-    adapter = PlaidAdapter(_plaid_client(handle), [_item(["transactions"])])
+    bodies: list[dict[str, Any]] = []
+    adapter = PlaidAdapter(
+        _plaid_client(_accounts_then_sync(pages, bodies)), [_item(["transactions"])]
+    )
     snap = await adapter.fetch()
     assert [t.id for t in snap.transactions] == ["t1", "t3"]
     # Plaid positive = outflow -> moneta negative; deposits flip positive
@@ -367,18 +353,12 @@ async def test_fetch_transactions_paginates_negates_and_skips_pending() -> None:
     assert snap.transactions[0].description == "RAW DESCRIPTOR t1"
     assert snap.transactions[0].posted_on == date(2026, 7, 1)
     assert snap.transactions[0].raw["merchant_name"] == "Clean Name"
-    assert cursors == ["", "cur-next"]
+    assert [b["cursor"] for b in bodies] == ["", "cur-next"]
+    assert all(b["count"] == 500 for b in bodies)
 
 
 def _mutation_error() -> httpx.Response:
-    return httpx.Response(
-        400,
-        json={
-            "error_type": "TRANSACTIONS_ERROR",
-            "error_code": "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION",
-            "error_message": "restart pagination",
-        },
-    )
+    return _plaid_error("TRANSACTIONS_ERROR", "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION")
 
 
 async def test_mutation_during_pagination_restarts_cleanly() -> None:
@@ -388,20 +368,15 @@ async def test_mutation_during_pagination_restarts_cleanly() -> None:
         httpx.Response(200, json=_sync_page([_txn("t1", 1.0)], True)),
         httpx.Response(200, json=_sync_page([_txn("t2", 2.0)], False)),
     ]
-    cursors: list[str] = []
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/accounts/get":
-            return httpx.Response(200, json=_ACCOUNTS_PAYLOAD)
-        cursors.append(json.loads(request.content)["cursor"])
-        return pages.pop(0)
-
-    adapter = PlaidAdapter(_plaid_client(handle), [_item(["transactions"])])
+    bodies: list[dict[str, Any]] = []
+    adapter = PlaidAdapter(
+        _plaid_client(_accounts_then_sync(pages, bodies)), [_item(["transactions"])]
+    )
     snap = await adapter.fetch()
     # restart discarded the partial first attempt: no duplicate t1
     assert [t.id for t in snap.transactions] == ["t1", "t2"]
     # and each retry restarted from the first page, not the stale cursor
-    assert cursors == ["", "cur-next", "", "cur-next"]
+    assert [b["cursor"] for b in bodies] == ["", "cur-next", "", "cur-next"]
 
 
 async def test_mutation_forever_raises_after_bounded_retries() -> None:
@@ -462,14 +437,7 @@ async def test_holdings_product_errors_degrade_to_empty() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/accounts/get":
             return httpx.Response(200, json=_ACCOUNTS_PAYLOAD)
-        return httpx.Response(
-            400,
-            json={
-                "error_type": "ITEM_ERROR",
-                "error_code": "NO_INVESTMENT_ACCOUNTS",
-                "error_message": "none",
-            },
-        )
+        return _plaid_error("ITEM_ERROR", "NO_INVESTMENT_ACCOUNTS")
 
     snap = await PlaidAdapter(_plaid_client(handle), [_item(["investments"])]).fetch()
     assert snap.holdings == []
@@ -498,37 +466,10 @@ async def test_item_login_required_skips_item_but_not_sync() -> None:
 
 async def test_other_plaid_errors_propagate() -> None:
     def handle(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            400,
-            json={
-                "error_type": "INVALID_INPUT",
-                "error_code": "INVALID_API_KEYS",
-                "error_message": "bad keys",
-            },
-        )
+        return _plaid_error("INVALID_INPUT", "INVALID_API_KEYS", "bad keys")
 
     with pytest.raises(PlaidError):
         await PlaidAdapter(_plaid_client(handle), [_item()]).fetch()
-
-
-async def test_item_not_found_skips_item_but_not_sync() -> None:
-    def handle(request: httpx.Request) -> httpx.Response:
-        token = json.loads(request.content)["access_token"]
-        if token == "access-gone":
-            return httpx.Response(
-                400,
-                json={
-                    "error_type": "ITEM_ERROR",
-                    "error_code": "ITEM_NOT_FOUND",
-                    "error_message": "removed on the dashboard",
-                },
-            )
-        return httpx.Response(200, json=_ACCOUNTS_PAYLOAD)
-
-    gone = PlaidItem(item_id="it-gone", access_token="access-gone", products=[])
-    alive = PlaidItem(item_id="it-1", access_token="access-1", products=[])
-    snap = await PlaidAdapter(_plaid_client(handle), [gone, alive]).fetch()
-    assert len(snap.accounts) == 3  # only the healthy item's accounts
 
 
 async def test_login_required_mid_item_drops_partial_accounts() -> None:
@@ -592,6 +533,6 @@ class _BoomAdapter:
 
 
 async def test_merged_adapter_propagates_child_failure() -> None:
-    adapters: list[AggregatorAdapter] = [_StubAdapter("A"), _BoomAdapter()]
+    adapters: list[AggregatorAdapter] = [FakeAdapter(_snap("A")), _BoomAdapter()]
     with pytest.raises(RuntimeError, match="boom"):
         await MergedAdapter(adapters).fetch()

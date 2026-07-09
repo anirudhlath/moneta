@@ -240,6 +240,15 @@ def test_renormalize_command_runs(tmp_path: Path, monkeypatch) -> None:  # type:
     assert "Updated 0 merchant name(s)" in result.output
 
 
+def _setup_plaid(tmp_path: Path, monkeypatch) -> Any:  # type: ignore[no-untyped-def]
+    """Isolate env, save sandbox Plaid credentials, return the plaid module."""
+    import moneta.aggregator.plaid as plaid_mod
+
+    _isolate(monkeypatch, tmp_path)
+    runner.invoke(app, ["setup", "plaid", "cid", "sec", "--env", "sandbox"])
+    return plaid_mod
+
+
 def test_setup_plaid_saves_credentials(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     _isolate(monkeypatch, tmp_path)
     result = runner.invoke(app, ["setup", "plaid", "cid", "sec", "--env", "sandbox"])
@@ -266,12 +275,9 @@ def test_setup_plaid_link_requires_credentials(tmp_path: Path, monkeypatch) -> N
 
 
 def test_setup_plaid_link_happy_path(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    _isolate(monkeypatch, tmp_path)
-    runner.invoke(app, ["setup", "plaid", "cid", "sec", "--env", "sandbox"])
+    plaid_mod = _setup_plaid(tmp_path, monkeypatch)
 
-    import moneta.aggregator.plaid as plaid_mod
-
-    async def fake_create(client: Any, products: list[str], days_requested: int = 730) -> Any:
+    async def fake_create(client: Any, products: list[str]) -> Any:
         return "lt-1", "https://hosted.plaid.com/link/abc"
 
     async def fake_poll(
@@ -301,11 +307,7 @@ def test_setup_plaid_link_happy_path(tmp_path: Path, monkeypatch) -> None:  # ty
 
 
 def test_setup_plaid_list_and_unlink(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    _isolate(monkeypatch, tmp_path)
-    runner.invoke(app, ["setup", "plaid", "cid", "sec", "--env", "sandbox"])
-
-    import moneta.aggregator.plaid as plaid_mod
-
+    plaid_mod = _setup_plaid(tmp_path, monkeypatch)
     plaid_mod.save_items(
         plaid_mod.items_path(tmp_path),
         [plaid_mod.PlaidItem(item_id="it-1", access_token="a", institution_name="Chase")],
@@ -333,11 +335,7 @@ def test_setup_plaid_list_and_unlink(tmp_path: Path, monkeypatch) -> None:  # ty
 
 
 def test_setup_plaid_unlink_survives_remote_failure(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    _isolate(monkeypatch, tmp_path)
-    runner.invoke(app, ["setup", "plaid", "cid", "sec", "--env", "sandbox"])
-
-    import moneta.aggregator.plaid as plaid_mod
-
+    plaid_mod = _setup_plaid(tmp_path, monkeypatch)
     plaid_mod.save_items(
         plaid_mod.items_path(tmp_path),
         [plaid_mod.PlaidItem(item_id="it-dead", access_token="a", institution_name="Old Bank")],
