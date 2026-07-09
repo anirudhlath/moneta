@@ -388,10 +388,20 @@ async def test_mutation_during_pagination_restarts_cleanly() -> None:
         httpx.Response(200, json=_sync_page([_txn("t1", 1.0)], True)),
         httpx.Response(200, json=_sync_page([_txn("t2", 2.0)], False)),
     ]
-    adapter = PlaidAdapter(_plaid_client(_accounts_then_sync(pages)), [_item(["transactions"])])
+    cursors: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/accounts/get":
+            return httpx.Response(200, json=_ACCOUNTS_PAYLOAD)
+        cursors.append(json.loads(request.content)["cursor"])
+        return pages.pop(0)
+
+    adapter = PlaidAdapter(_plaid_client(handle), [_item(["transactions"])])
     snap = await adapter.fetch()
     # restart discarded the partial first attempt: no duplicate t1
     assert [t.id for t in snap.transactions] == ["t1", "t2"]
+    # and each retry restarted from the first page, not the stale cursor
+    assert cursors == ["", "cur-next", "", "cur-next"]
 
 
 async def test_mutation_forever_raises_after_bounded_retries() -> None:
@@ -499,3 +509,89 @@ async def test_other_plaid_errors_propagate() -> None:
 
     with pytest.raises(PlaidError):
         await PlaidAdapter(_plaid_client(handle), [_item()]).fetch()
+
+
+async def test_item_not_found_skips_item_but_not_sync() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        token = json.loads(request.content)["access_token"]
+        if token == "access-gone":
+            return httpx.Response(
+                400,
+                json={
+                    "error_type": "ITEM_ERROR",
+                    "error_code": "ITEM_NOT_FOUND",
+                    "error_message": "removed on the dashboard",
+                },
+            )
+        return httpx.Response(200, json=_ACCOUNTS_PAYLOAD)
+
+    gone = PlaidItem(item_id="it-gone", access_token="access-gone", products=[])
+    alive = PlaidItem(item_id="it-1", access_token="access-1", products=[])
+    snap = await PlaidAdapter(_plaid_client(handle), [gone, alive]).fetch()
+    assert len(snap.accounts) == 3  # only the healthy item's accounts
+
+
+async def test_login_required_mid_item_drops_partial_accounts() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/accounts/get":
+            return httpx.Response(200, json=_ACCOUNTS_PAYLOAD)
+        return httpx.Response(
+            400,
+            json={
+                "error_type": "ITEM_ERROR",
+                "error_code": "ITEM_LOGIN_REQUIRED",
+                "error_message": "re-link",
+            },
+        )
+
+    snap = await PlaidAdapter(_plaid_client(handle), [_item(["transactions"])]).fetch()
+    # all-or-nothing per item: the cached /accounts/get result must not survive
+    # the failed /transactions/sync
+    assert snap.accounts == []
+    assert snap.transactions == []
+
+
+async def test_liability_null_current_defaults_to_zero_not_available() -> None:
+    payload = {
+        "accounts": [
+            {
+                "account_id": "acc-paid-off",
+                "name": "Paid Off Card",
+                "type": "credit",
+                "subtype": "credit card",
+                # available on credit accounts is the remaining credit line
+                "balances": {"current": None, "available": 3000.0},
+            }
+        ],
+        "item": {"institution_name": "Bank"},
+    }
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    snap = await PlaidAdapter(_plaid_client(handle), [_item()]).fetch()
+    assert snap.accounts[0].balance == Decimal("0")
+
+
+def test_load_items_corrupt_file_raises_clean_error(tmp_path: Path) -> None:
+    path = items_path(tmp_path)
+    path.write_text("{not json")
+    with pytest.raises(ValueError, match="plaid-link"):
+        load_items(path)
+
+
+def test_save_items_leaves_no_tmp_file(tmp_path: Path) -> None:
+    path = items_path(tmp_path)
+    save_items(path, [PlaidItem(item_id="it-1", access_token="a")])
+    assert [p.name for p in tmp_path.iterdir()] == ["plaid_items.json"]
+
+
+class _BoomAdapter:
+    async def fetch(self, since: date | None = None) -> Snapshot:
+        raise RuntimeError("boom")
+
+
+async def test_merged_adapter_propagates_child_failure() -> None:
+    adapters: list[AggregatorAdapter] = [_StubAdapter("A"), _BoomAdapter()]
+    with pytest.raises(RuntimeError, match="boom"):
+        await MergedAdapter(adapters).fetch()

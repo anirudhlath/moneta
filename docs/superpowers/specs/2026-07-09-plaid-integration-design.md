@@ -234,5 +234,9 @@ endpoint, injected client, no network.
   (`NOT_READY`); the stateless replay means the next sync completes it.
 - **Access tokens on disk** in `plaid_items.json` (0600 via write) — same trust
   model as the SimpleFIN access URL already stored in `config.toml`.
+- **Plaid pins the global re-sync window.** `_sync_since` uses the newest txn
+  across all sources; Plaid's daily full replay keeps it ≈ today, so a
+  SimpleFIN outage longer than the 7-day overlap needs a manual `sync --full`
+  to backfill the gap (backlog: per-source-sync-window).
 - Backlog: cursor-based incremental sync; surfacing per-item sync warnings in
-  the CLI report; Link update mode.
+  the CLI report; Link update mode; per-source sync window.

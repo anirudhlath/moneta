@@ -330,3 +330,24 @@ def test_setup_plaid_list_and_unlink(tmp_path: Path, monkeypatch) -> None:  # ty
     result = runner.invoke(app, ["setup", "plaid-unlink", "nope"])
     assert result.exit_code == 1
     assert "plaid-list" in result.output
+
+
+def test_setup_plaid_unlink_survives_remote_failure(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    runner.invoke(app, ["setup", "plaid", "cid", "sec", "--env", "sandbox"])
+
+    import moneta.aggregator.plaid as plaid_mod
+
+    plaid_mod.save_items(
+        plaid_mod.items_path(tmp_path),
+        [plaid_mod.PlaidItem(item_id="it-dead", access_token="a", institution_name="Old Bank")],
+    )
+
+    async def failing_post(self: Any, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        raise plaid_mod.PlaidError("ITEM_ERROR", "ITEM_NOT_FOUND", "already gone")
+
+    monkeypatch.setattr(plaid_mod.PlaidClient, "post", failing_post)
+    result = runner.invoke(app, ["setup", "plaid-unlink", "it-dead"])
+    assert result.exit_code == 0
+    assert "removing locally" in result.output
+    assert plaid_mod.load_items(plaid_mod.items_path(tmp_path)) == []

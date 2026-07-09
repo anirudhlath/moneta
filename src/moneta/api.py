@@ -5,6 +5,7 @@ from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException
+from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -282,7 +283,13 @@ def _build_adapter(settings: Settings) -> AggregatorAdapter | None:
     if settings.simplefin_access_url:
         adapters.append(SimpleFINAdapter(settings.simplefin_access_url))
     if settings.plaid_client_id and settings.plaid_secret:
-        items = load_items(items_path(settings.config_dir))
+        try:
+            items = load_items(items_path(settings.config_dir))
+        except ValueError as exc:
+            # a corrupt items file must not take down every endpoint — sync just
+            # runs without Plaid until the user re-links
+            logger.warning("{}", exc)
+            items = []
         if items:
             adapters.append(
                 PlaidAdapter(

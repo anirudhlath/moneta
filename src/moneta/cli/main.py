@@ -384,7 +384,7 @@ def setup_plaid_unlink(item_id: str) -> None:
     """Unlink a Plaid item (stops Plaid billing for it); synced data stays in the db."""
     import asyncio
 
-    from moneta.aggregator.plaid import items_path, load_items, save_items
+    from moneta.aggregator.plaid import PlaidError, items_path, load_items, save_items
 
     client, settings = _plaid_client()
     path = items_path(settings.config_dir)
@@ -395,7 +395,12 @@ def setup_plaid_unlink(item_id: str) -> None:
             f"[red]Error:[/red] no linked item {item_id!r} (see: moneta setup plaid-list)"
         )
         raise typer.Exit(1)
-    asyncio.run(client.post("/item/remove", {"access_token": match.access_token}))
+    try:
+        asyncio.run(client.post("/item/remove", {"access_token": match.access_token}))
+    except PlaidError as exc:
+        # the local store is moneta's source of truth; a dead item (e.g. already
+        # removed on Plaid's side) must still be removable locally
+        console.print(f"[yellow]Plaid /item/remove failed ({exc}); removing locally.[/yellow]")
     save_items(path, [it for it in items if it.item_id != item_id])
     console.print(f"[green]Unlinked {match.institution_name or item_id}.[/green]")
 

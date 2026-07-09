@@ -9,6 +9,7 @@ Two moneta-specific inversions (see the design spec §2):
 
 import asyncio
 import json
+import os
 import time
 from datetime import date, datetime
 from decimal import Decimal
@@ -17,7 +18,7 @@ from typing import Any
 
 import httpx
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from moneta.aggregator.base import AccountDTO, HoldingDTO, Snapshot, TransactionDTO
 from moneta.models import AccountType
@@ -50,12 +51,12 @@ class PlaidClient:
         self._client = client
 
     async def post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        own = self._client or httpx.AsyncClient(timeout=30.0)
-        try:
-            resp = await own.post(f"{self._base}{path}", json={**self._auth, **payload})
-        finally:
-            if self._client is None:
-                await own.aclose()
+        # Lazily created and kept for the client's lifetime: a sync paginates dozens
+        # of calls and link polling runs one every few seconds — a per-call client
+        # would pay a TCP+TLS handshake each time.
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=30.0)
+        resp = await self._client.post(f"{self._base}{path}", json={**self._auth, **payload})
         if resp.status_code >= 400:
             try:
                 err = resp.json()
@@ -84,13 +85,24 @@ def items_path(config_dir: Path) -> Path:
 def load_items(path: Path) -> list[PlaidItem]:
     if not path.exists():
         return []
-    return [PlaidItem.model_validate(x) for x in json.loads(path.read_text())]
+    try:
+        return [PlaidItem.model_validate(x) for x in json.loads(path.read_text())]
+    except (json.JSONDecodeError, ValidationError, TypeError) as exc:
+        raise ValueError(
+            f"Plaid items file {path} is corrupt; delete it and re-link with: "
+            "moneta setup plaid-link"
+        ) from exc
 
 
 def save_items(path: Path, items: list[PlaidItem]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps([i.model_dump() for i in items], indent=2) + "\n")
-    path.chmod(0o600)
+    # 0600 from creation (access tokens) and atomic replace so a crash mid-write
+    # can't leave a corrupt or world-readable file
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(json.dumps([i.model_dump() for i in items], indent=2) + "\n")
+    tmp.replace(path)
 
 
 async def create_hosted_link(
@@ -152,11 +164,13 @@ def _to_decimal(value: Any) -> Decimal:
 
 def _parse_account(acct: dict[str, Any], org_name: str) -> AccountDTO:
     balances = acct.get("balances") or {}
+    liability = acct.get("type") in _LIABILITY_PLAID_TYPES
     current = balances.get("current")
     if current is None:
-        current = balances.get("available") or 0
+        # `available` on credit/loan is the remaining credit line, not the amount owed
+        current = 0 if liability else balances.get("available") or 0
     balance = _to_decimal(current)
-    if acct.get("type") in _LIABILITY_PLAID_TYPES:
+    if liability:
         balance = -balance
     updated = balances.get("last_updated_datetime")
     balance_date = datetime.fromisoformat(updated).date() if updated else date.today()
@@ -183,25 +197,45 @@ class PlaidAdapter:
         snap = Snapshot(accounts=[], transactions=[], holdings=[])
         for item in self._items:
             try:
-                await self._fetch_item(item, snap)
+                part = await self._fetch_item(item)
             except PlaidError as exc:
-                if exc.error_code != "ITEM_LOGIN_REQUIRED":
+                # Item-level failures degrade to warn+skip so one dead bank never
+                # blocks the others; credential-level errors stay fatal (design §6).
+                if exc.error_type != "ITEM_ERROR":
                     raise
+                hint = (
+                    " — re-link with: moneta setup plaid-link"
+                    if exc.error_code == "ITEM_LOGIN_REQUIRED"
+                    else ""
+                )
                 logger.warning(
-                    "Plaid item {} needs re-linking (run: moneta setup plaid-link): {}",
+                    "Plaid item {} skipped ({}){}",
                     item.institution_name or item.item_id,
                     exc,
+                    hint,
                 )
+                continue
+            snap.accounts.extend(part.accounts)
+            snap.transactions.extend(part.transactions)
+            snap.holdings.extend(part.holdings)
         return snap
 
-    async def _fetch_item(self, item: PlaidItem, snap: Snapshot) -> None:
+    async def _fetch_item(self, item: PlaidItem) -> Snapshot:
+        # Built locally and merged only on success: a skipped item must not leave
+        # partial accounts behind (e.g. cached /accounts/get followed by a failing
+        # /transactions/sync).
         data = await self._client.post("/accounts/get", {"access_token": item.access_token})
         org = (data.get("item") or {}).get("institution_name") or item.institution_name
-        snap.accounts.extend(_parse_account(a, org) for a in data.get("accounts", []))
+        snap = Snapshot(
+            accounts=[_parse_account(a, org) for a in data.get("accounts", [])],
+            transactions=[],
+            holdings=[],
+        )
         if "transactions" in item.products:
-            snap.transactions.extend(await self._fetch_transactions(item))
+            snap.transactions = await self._fetch_transactions(item)
         if "investments" in item.products:
-            snap.holdings.extend(await self._fetch_holdings(item))
+            snap.holdings = await self._fetch_holdings(item)
+        return snap
 
     async def _fetch_holdings(self, item: PlaidItem) -> list[HoldingDTO]:
         try:

@@ -52,7 +52,15 @@ class MergedAdapter:
         self._adapters = list(adapters)
 
     async def fetch(self, since: date | None = None) -> Snapshot:
-        snaps = await asyncio.gather(*(a.fetch(since) for a in self._adapters))
+        # return_exceptions lets every sibling settle before the first failure is
+        # raised — a bare gather would leave the others running unawaited.
+        results = await asyncio.gather(
+            *(a.fetch(since) for a in self._adapters), return_exceptions=True
+        )
+        for r in results:
+            if isinstance(r, BaseException):
+                raise r
+        snaps = [r for r in results if isinstance(r, Snapshot)]
         return Snapshot(
             accounts=[a for s in snaps for a in s.accounts],
             transactions=[t for s in snaps for t in s.transactions],

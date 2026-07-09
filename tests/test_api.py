@@ -325,3 +325,9 @@ def test_build_adapter_merges_simplefin_and_plaid(tmp_path: Path) -> None:
         )
     )
     assert isinstance(adapter, MergedAdapter)
+
+
+def test_build_adapter_tolerates_corrupt_items_file(tmp_path: Path) -> None:
+    items_path(tmp_path).write_text("{not json")
+    s = _settings(tmp_path, plaid_client_id="cid", plaid_secret="sec")
+    assert _build_adapter(s) is None  # no crash: sync just runs without Plaid
