@@ -1,4 +1,5 @@
 import statistics
+from calendar import monthrange
 from datetime import date, timedelta
 
 from pydantic import BaseModel
@@ -47,6 +48,26 @@ _PER_MONTH: dict[Cadence, float] = {
     Cadence.monthly: 1.0,
     Cadence.annual: 1 / 12,
 }
+
+
+def _add_months(d: date, months: int) -> date:
+    total = d.month - 1 + months
+    year, month = d.year + total // 12, total % 12 + 1
+    return date(year, month, min(d.day, monthrange(year, month)[1]))
+
+
+def advance_expected_on(d: date, cadence: Cadence) -> date:
+    """One period after d — calendar-aware for monthly/annual so day-of-month holds."""
+    match cadence:
+        case Cadence.weekly:
+            return d + timedelta(days=7)
+        case Cadence.biweekly:
+            return d + timedelta(days=14)
+        case Cadence.monthly:
+            return _add_months(d, 1)
+        case Cadence.annual:
+            return _add_months(d, 12)
+
 
 _LLM_PROMPT = """Is this group of bank transactions one recurring bill/subscription?
 Merchant: {merchant!r}; amounts (cents) and dates: {rows}
@@ -204,7 +225,7 @@ async def detect_recurring(
             if not (answer and answer.get("is_recurring")):
                 _open_review()
                 continue
-        next_on = dates[-1] + timedelta(days=CADENCE_DAYS[cadence])
+        next_on = advance_expected_on(dates[-1], cadence)
         stale = _stale(dates[-1], cadence, today)
         series = existing.get((merchant, direction))
         if series is None:

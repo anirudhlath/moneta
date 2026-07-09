@@ -11,7 +11,7 @@ from moneta.models import (
     SeriesStatus,
     Transaction,
 )
-from moneta.pipelines.recurring import CADENCE_DAYS
+from moneta.pipelines.recurring import advance_expected_on
 
 _GRACE: dict[Cadence, int] = {
     Cadence.weekly: 3,
@@ -35,7 +35,6 @@ async def emit_series_events(session: AsyncSession, today: date) -> int:
     )
     for s in series_list:
         grace = timedelta(days=_GRACE[s.cadence])
-        period = timedelta(days=CADENCE_DAYS[s.cadence])
 
         if today > s.next_expected_on + grace:
             window_hit = (
@@ -59,7 +58,7 @@ async def emit_series_events(session: AsyncSession, today: date) -> int:
                     )
                 )
                 emitted += 1
-            s.next_expected_on = s.next_expected_on + period
+            s.next_expected_on = advance_expected_on(s.next_expected_on, s.cadence)
 
         latest = (
             await session.execute(

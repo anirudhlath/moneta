@@ -19,7 +19,7 @@ from moneta.models import (
     TransferLink,
 )
 from moneta.pipelines.events import emit_series_events
-from moneta.pipelines.recurring import detect_recurring, monthly_cents
+from moneta.pipelines.recurring import advance_expected_on, detect_recurring, monthly_cents
 from tests.factories import make_account, make_txn
 
 
@@ -153,7 +153,7 @@ async def test_rerun_updates_not_duplicates(session: AsyncSession) -> None:
     stats = await detect_recurring(session, llm=None, today=date(2026, 7, 16))
     assert stats.new_series == 0 and stats.updated == 1
     s = (await _series(session))[0]
-    assert s.next_expected_on == date(2026, 8, 14)  # 7/15 + 30 days
+    assert s.next_expected_on == date(2026, 8, 15)  # 7/15 + 1 month
 
 
 class _UnstableLLM:
@@ -205,7 +205,7 @@ async def test_resync_does_not_duplicate_missed_events(session: AsyncSession) ->
     )
     assert len(missed) == 1
     s = (await _series(session))[0]
-    assert s.next_expected_on == date(2026, 5, 14)  # advance retained, not rewound
+    assert s.next_expected_on == date(2026, 5, 15)  # advance retained, not rewound
 
 
 async def test_recurring_cluster_resolved_true_creates_series_from_median(
@@ -281,7 +281,7 @@ async def test_stale_history_creates_ended_series(session: AsyncSession) -> None
     assert stats.new_series == 1
     s = (await _series(session))[0]
     assert s.status == SeriesStatus.ended
-    assert s.next_expected_on == date(2025, 4, 14)  # still computed: 3/15 + 30
+    assert s.next_expected_on == date(2025, 4, 15)  # still computed: 3/15 + 1 month
 
 
 async def test_active_series_auto_ends_when_stale(session: AsyncSession) -> None:
@@ -321,7 +321,7 @@ async def test_manually_ended_series_reactivates_on_new_occurrence(
     stats = await detect_recurring(session, llm=None, today=date(2026, 7, 16))
     assert stats.updated == 1
     assert s.status == SeriesStatus.active
-    assert s.next_expected_on == date(2026, 8, 14)
+    assert s.next_expected_on == date(2026, 8, 15)
 
 
 async def test_backfilled_old_txns_do_not_reactivate_ended_series(
@@ -365,7 +365,7 @@ async def test_auto_ended_series_reactivates_when_cadence_reestablished(
     assert stats.updated == 1
     s = (await _series(session))[0]
     assert s.status == SeriesStatus.active
-    assert s.next_expected_on == date(2026, 7, 31)
+    assert s.next_expected_on == date(2026, 8, 1)
 
 
 async def test_series_with_trailing_noise_still_auto_ends(session: AsyncSession) -> None:
@@ -519,3 +519,15 @@ async def test_cadence_miss_habitual_frequency_stays_silent(session: AsyncSessio
     stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
     assert stats.new_series == 0 and stats.review == 0
     assert (await session.execute(select(ReviewItem))).scalars().all() == []
+
+
+def test_advance_monthly_keeps_day_of_month() -> None:
+    assert advance_expected_on(date(2026, 1, 1), Cadence.monthly) == date(2026, 2, 1)
+    assert advance_expected_on(date(2026, 1, 31), Cadence.monthly) == date(2026, 2, 28)
+    assert advance_expected_on(date(2026, 4, 30), Cadence.monthly) == date(2026, 5, 30)
+
+
+def test_advance_annual_and_fixed_cadences() -> None:
+    assert advance_expected_on(date(2026, 2, 28), Cadence.annual) == date(2027, 2, 28)
+    assert advance_expected_on(date(2026, 7, 1), Cadence.weekly) == date(2026, 7, 8)
+    assert advance_expected_on(date(2026, 7, 1), Cadence.biweekly) == date(2026, 7, 15)
