@@ -23,7 +23,7 @@ def _split_auth(access_url: str) -> tuple[str, tuple[str, str]]:
 
 
 def _ts_to_date(ts: int) -> date:
-    return datetime.fromtimestamp(ts, tz=UTC).date()
+    return datetime.fromtimestamp(ts).date()  # local tz: the user's calendar day
 
 
 async def claim_setup_token(token: str, client: httpx.AsyncClient | None = None) -> str:

@@ -1,11 +1,18 @@
 import base64
 import json
+import os
+import time
 from datetime import date
 from decimal import Decimal
 
 import httpx
 
-from moneta.aggregator.simplefin import SimpleFINAdapter, _split_auth, claim_setup_token
+from moneta.aggregator.simplefin import (
+    SimpleFINAdapter,
+    _split_auth,
+    _ts_to_date,
+    claim_setup_token,
+)
 
 SIMPLEFIN_PAYLOAD = {
     "errors": [],
@@ -121,3 +128,14 @@ def test_split_auth_percent_decodes_credentials() -> None:
     bare, auth = _split_auth("https://user%40x:p%23ss@bridge.example/simplefin")
     assert auth == ("user@x", "p#ss")
     assert bare == "https://bridge.example/simplefin"
+
+
+def test_ts_to_date_uses_local_timezone() -> None:
+    os.environ["TZ"] = "America/Los_Angeles"  # the autouse fixture restores TZ afterwards
+    time.tzset()
+    # 1782963000 == 2026-07-02T03:30:00Z == 2026-07-01 20:30 in Los Angeles
+    assert _ts_to_date(1782963000) == date(2026, 7, 1)
+
+
+def test_ts_to_date_utc() -> None:  # TZ pinned to UTC by the autouse fixture
+    assert _ts_to_date(1782963000) == date(2026, 7, 2)
