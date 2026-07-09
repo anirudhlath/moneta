@@ -1,6 +1,9 @@
+from pathlib import Path
 from typing import Any
 
-from sqlalchemy import event
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import Connection, event, inspect
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -9,7 +12,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import StaticPool
 
-from moneta.models import Base
+_BASELINE = "0001"
 
 
 def make_sessionmaker(db_url: str) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
@@ -31,6 +34,16 @@ def make_sessionmaker(db_url: str) -> tuple[AsyncEngine, async_sessionmaker[Asyn
     return engine, async_sessionmaker(engine, expire_on_commit=False)
 
 
+def _upgrade(conn: Connection) -> None:
+    cfg = Config()
+    cfg.set_main_option("script_location", str(Path(__file__).parent / "migrations"))
+    cfg.attributes["connection"] = conn
+    insp = inspect(conn)
+    if insp.has_table("accounts") and not insp.has_table("alembic_version"):
+        command.stamp(cfg, _BASELINE)  # adopt a pre-Alembic database at the baseline
+    command.upgrade(cfg, "head")
+
+
 async def init_db(engine: AsyncEngine) -> None:
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_upgrade)
