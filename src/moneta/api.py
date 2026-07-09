@@ -17,18 +17,15 @@ from moneta.llm import Classifier, build_classifier
 from moneta.models import (
     Account,
     AccountType,
-    AliasSource,
-    LinkMethod,
-    MerchantAlias,
     RecurringSeries,
     ReviewItem,
     ReviewKind,
     ReviewStatus,
     SeriesEvent,
     SeriesStatus,
-    Transaction,
-    TransferLink,
 )
+from moneta.pipelines.normalize import renormalize_merchants
+from moneta.pipelines.review import apply_resolution, review_context
 from moneta.pipelines.run import SyncReport, run_sync
 from moneta.queries import classified_links
 from moneta.vesting import apply_vesting, parse_vesting_csv
@@ -80,6 +77,7 @@ class ReviewOut(BaseModel):
     kind: str
     question: str
     payload: dict[str, Any]
+    context: dict[str, Any] = {}
 
 
 class ResolveIn(BaseModel):
@@ -234,7 +232,16 @@ def create_app(
             .scalars()
             .all()
         )
-        return [ReviewOut.model_validate(r, from_attributes=True) for r in rows]
+        return [
+            ReviewOut(
+                id=r.id,
+                kind=r.kind,
+                question=r.question,
+                payload=r.payload,
+                context=await review_context(session, r),
+            )
+            for r in rows
+        ]
 
     @app.post("/review/{item_id}/resolve")
     async def resolve(item_id: int, body: ResolveIn, session: Session) -> dict[str, bool]:
@@ -243,45 +250,17 @@ def create_app(
         ).scalar_one_or_none()
         if item is None:
             raise HTTPException(status_code=404, detail="review item not found")
-        if item.kind == ReviewKind.merchant and isinstance(body.resolution.get("merchant"), str):
-            merchant = body.resolution["merchant"]
-            raw = item.payload["descriptor"]
-            alias = (
-                await session.execute(
-                    select(MerchantAlias).where(MerchantAlias.raw_descriptor == raw)
-                )
-            ).scalar_one_or_none()
-            if alias is None:
-                session.add(
-                    MerchantAlias(raw_descriptor=raw, merchant=merchant, source=AliasSource.manual)
-                )
-            else:
-                alias.merchant = merchant
-                alias.source = AliasSource.manual
-            for txn in (
-                await session.execute(select(Transaction).where(Transaction.description == raw))
-            ).scalars():
-                txn.merchant = merchant
-        elif item.kind == ReviewKind.transfer_pair and isinstance(
-            body.resolution.get("inflow_id"), int
+        if item.kind == ReviewKind.recurring_cluster and not isinstance(
+            body.resolution.get("is_recurring"), bool
         ):
-            session.add(
-                TransferLink(
-                    outflow_id=item.payload["outflow_id"],
-                    inflow_id=body.resolution["inflow_id"],
-                    confidence=1.0,
-                    method=LinkMethod.manual,
-                )
-            )
-        elif item.kind == ReviewKind.recurring_cluster:
-            if not isinstance(body.resolution.get("is_recurring"), bool):
-                raise HTTPException(
-                    status_code=422, detail="resolution.is_recurring must be a bool"
-                )
-        item.status = ReviewStatus.resolved
-        item.resolution = body.resolution
+            raise HTTPException(status_code=422, detail="resolution.is_recurring must be a bool")
+        await apply_resolution(session, item, body.resolution, resolved_by="manual")
         await session.commit()
         return {"ok": True}
+
+    @app.post("/normalize/rerun")
+    async def normalize_rerun(session: Session) -> dict[str, int]:
+        return {"changed": await renormalize_merchants(session)}
 
     @app.post("/import/vesting")
     async def import_vesting(body: VestingIn, session: Session) -> dict[str, int]:

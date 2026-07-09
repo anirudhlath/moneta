@@ -109,3 +109,56 @@ async def test_alias_cache_skips_llm(session: AsyncSession) -> None:
     await make_txn(session, acct, description="X4529182 84756")
     await normalize_merchants(session, llm=llm)
     assert len(llm.calls) == 1  # second run served from MerchantAlias
+
+
+def test_rule_normalize_strips_reference_tokens() -> None:
+    # payment-reference tokens (8+ chars containing a digit) must not fragment merchants
+    variants = [
+        "BILT PAYMENT BILTRENT f3d9bb17a1f74fa WEB ID: 9999918544",
+        "BILT PAYMENT BILTRENT 262f2feddc034a5 WEB ID: 9999918544",
+        "BILT PAYMENT BILTRENT 311233ba29b5469 WEB ID: 9999918544",
+    ]
+    names = {rule_normalize(v) for v in variants}
+    assert len(names) == 1
+    assert names.pop() == "Bilt Payment Biltrent Web Id"
+
+
+async def test_renormalize_merges_fragmented_merchants(session: AsyncSession) -> None:
+    from moneta.models import AliasSource, RecurringSeries
+    from moneta.pipelines.normalize import renormalize_merchants
+
+    acct = await make_account(session)
+    raws = [
+        "BILT PAYMENT BILTRENT f3d9bb17a1f74fa WEB ID: 9999918544",
+        "BILT PAYMENT BILTRENT 262f2feddc034a5 WEB ID: 9999918544",
+        "BILT PAYMENT BILTRENT 311233ba29b5469 WEB ID: 9999918544",
+    ]
+    old_names = ["Bilt Payment Biltrent F3D9Bb17A1F74Fa Web Id:", "Bilt 262F2F", "Bilt Rent"]
+    for raw, old in zip(raws, old_names, strict=True):
+        await make_txn(session, acct, description=raw, merchant=old, amount_cents=-249004)
+        session.add(
+            MerchantAlias(
+                raw_descriptor=raw,
+                merchant=old,
+                source=AliasSource.llm if old == "Bilt Rent" else AliasSource.rule,
+            )
+        )
+    # a manual alias must never be touched
+    await make_txn(session, acct, description="SOME RAW 12345678x", merchant="My Custom Name")
+    session.add(
+        MerchantAlias(
+            raw_descriptor="SOME RAW 12345678x",
+            merchant="My Custom Name",
+            source=AliasSource.manual,
+        )
+    )
+    await session.flush()
+
+    changed = await renormalize_merchants(session)
+    assert changed == 3
+    txns = (await session.execute(select(Transaction))).scalars().all()
+    bilt_names = {t.merchant for t in txns if t.description.startswith("BILT")}
+    assert bilt_names == {"Bilt Payment Biltrent Web Id"}
+    manual = next(t for t in txns if t.description == "SOME RAW 12345678x")
+    assert manual.merchant == "My Custom Name"
+    assert (await session.execute(select(RecurringSeries))).scalars().all() == []

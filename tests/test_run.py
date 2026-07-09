@@ -28,3 +28,31 @@ async def test_full_sync_forces_epoch_pull_despite_existing_txns(session: AsyncS
     adapter = RecordingAdapter()
     await run_sync(session, adapter, llm=None, today=date(2026, 7, 9), full=True)
     assert adapter.since == date(1970, 1, 1)
+
+
+async def test_run_sync_autoreview_resolves_before_detection(session: AsyncSession) -> None:
+    from typing import Any
+
+    from sqlalchemy import select
+
+    from moneta.models import ReviewItem, ReviewStatus
+
+    session.add(
+        ReviewItem(
+            kind="merchant",
+            question="What merchant is 'Q9X8Z7Y6'?",
+            payload={"descriptor": "Q9X8Z7Y6", "fallback": "Q9X8Z7Y6"},
+        )
+    )
+    await session.flush()
+
+    class ConfidentLLM:
+        async def classify_json(self, prompt: str) -> dict[str, Any] | None:
+            if "Q9X8Z7Y6" in prompt:
+                return {"merchant": "Quix Labs", "confident": True}
+            return None
+
+    report = await run_sync(session, RecordingAdapter(), llm=ConfidentLLM(), today=date(2026, 7, 9))
+    assert report.auto_resolved == 1
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.status == ReviewStatus.resolved

@@ -56,6 +56,7 @@ def test_sync_full_flag_requests_full_sync(monkeypatch) -> None:  # type: ignore
                 "transfers": {"linked": 0},
                 "recurring": {"new_series": 0},
                 "events": 0,
+                "auto_resolved": 0,
             }
         return []
 
@@ -171,3 +172,68 @@ def test_review_recurring_cluster_invalid_answer_skips_cleanly(tmp_path: Path, m
     assert result.exit_code == 0
     assert "invalid input, skipping" in result.output
     assert "Traceback" not in result.output
+
+
+def test_review_shows_summary_and_numbered_candidates(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def _seed() -> None:
+        from datetime import date as _date
+
+        from moneta.models import AccountType
+        from tests.factories import make_account, make_txn
+
+        engine, sessionmaker = make_sessionmaker(f"sqlite+aiosqlite:///{tmp_path / 'moneta.db'}")
+        await init_db(engine)
+        async with sessionmaker() as session:
+            checking = await make_account(session, type=AccountType.checking)
+            savings = await make_account(session, type=AccountType.savings, name="My Savings")
+            out = await make_txn(
+                session,
+                checking,
+                amount_cents=-50000,
+                posted_on=_date(2026, 7, 1),
+                description="ACH TRANSFER",
+            )
+            c1 = await make_txn(
+                session,
+                savings,
+                amount_cents=50000,
+                posted_on=_date(2026, 7, 2),
+                description="DEPOSIT A",
+            )
+            session.add(
+                ReviewItem(
+                    kind="transfer_pair",
+                    question="Which inflow matches?",
+                    payload={"outflow_id": out.id, "candidates": [c1.id]},
+                )
+            )
+            await session.commit()
+        await engine.dispose()
+
+    asyncio.run(_seed())
+    result = runner.invoke(app, ["review"], input="1\n")
+    assert result.exit_code == 0
+    assert "Review queue" in result.output  # upfront summary
+    assert "transfer match" in result.output  # kind explained
+    assert "DEPOSIT A" in result.output  # candidate rendered, not a raw id
+    assert "resolved" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_review_summary_counts_kinds(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    _seed_recurring_cluster_review(tmp_path)
+    result = runner.invoke(app, ["review"], input="\n")
+    assert result.exit_code == 0
+    assert "Review queue" in result.output
+    assert "recurring bill" in result.output
+    assert "skipped" in result.output.lower()
+
+
+def test_renormalize_command_runs(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["renormalize"])
+    assert result.exit_code == 0
+    assert "Updated 0 merchant name(s)" in result.output

@@ -36,6 +36,11 @@ _TOLERANCE: dict[Cadence, int] = {
 _MIN_OCCURRENCES = 3
 _AMOUNT_TOLERANCE = 0.20
 _STALE_PERIODS = 3
+# charges below this fraction of the group's median are adjustments, not occurrences
+_MINOR_FRACTION = 0.25
+# cadence-miss groups only warrant a review question when timing is bill-like,
+# not habitual spending (coffee, rideshare) with sub-weekly bursts
+_MIN_REVIEW_GAP_DAYS = 10
 _PER_MONTH: dict[Cadence, float] = {
     Cadence.weekly: 52 / 12,
     Cadence.biweekly: 26 / 12,
@@ -81,6 +86,16 @@ def _match_cadence(dates: list[date]) -> tuple[Cadence, date] | None:
         if abs(statistics.median(gaps[start:]) - days) <= tol:
             return cadence, dates[start]
     return None
+
+
+def _median_gap(dates: list[date]) -> float:
+    gaps = [(b - a).days for a, b in zip(dates, dates[1:], strict=False)]
+    return float(statistics.median(gaps))
+
+
+def _closest_cadence(dates: list[date]) -> Cadence:
+    med = _median_gap(dates)
+    return min(CADENCE_DAYS, key=lambda c: abs(CADENCE_DAYS[c] - med))
 
 
 async def _excluded_txn_ids(session: AsyncSession) -> set[int]:
@@ -137,44 +152,58 @@ async def detect_recurring(
         groups.setdefault((t.merchant, direction), []).append(t)
 
     for (merchant, direction), group in groups.items():
-        if len(group) < _MIN_OCCURRENCES:
+        scale = statistics.median([abs(t.amount_cents) for t in group])
+        significant = [t for t in group if abs(t.amount_cents) >= scale * _MINOR_FRACTION]
+        if len(significant) < _MIN_OCCURRENCES:
             continue
-        dates = sorted({t.posted_on for t in group})  # dedup: double-posts aren't a 0-day gap
+        dates = sorted({t.posted_on for t in significant})  # dedup: double-posts aren't 0-day gaps
         match = _match_cadence(dates)
         if match is None:
-            continue
-        cadence, run_start = match
-        run = [t for t in group if t.posted_on >= run_start]
+            cadence, run = None, significant
+        else:
+            # stats come from the newest cadence-run so ancient price epochs don't skew them
+            cadence, run_start = match
+            run = [t for t in significant if t.posted_on >= run_start]
         amounts = [abs(t.amount_cents) for t in run]
         med = statistics.median(amounts)
         stable = all(abs(a - med) <= med * _AMOUNT_TOLERANCE for a in amounts)
         expected = -round(med) if direction == Direction.outflow else round(med)
-        if not stable:
-            forced = force.get(merchant)
-            if forced is False:
-                continue  # user-resolved as not recurring — suppress silently, forever
-            if forced is not True:  # not resolved (or resolved True skips straight to series)
-                answer = (
-                    await llm.classify_json(
-                        _LLM_PROMPT.format(
-                            merchant=merchant,
-                            rows=[(t.amount_cents, t.posted_on.isoformat()) for t in group],
-                        )
+        forced = force.get(merchant)
+        if forced is False:
+            continue  # user-resolved as not recurring — suppress silently, forever
+
+        def _open_review(merchant: str = merchant, direction: Direction = direction) -> None:
+            if merchant not in reviewed:
+                session.add(
+                    ReviewItem(
+                        kind=ReviewKind.recurring_cluster,
+                        question=f"Is {merchant!r} a recurring bill?",
+                        payload={"merchant": merchant, "direction": direction},
                     )
-                    if llm
-                    else None
                 )
-                if not (answer and answer.get("is_recurring")):
-                    if merchant not in reviewed:
-                        session.add(
-                            ReviewItem(
-                                kind=ReviewKind.recurring_cluster,
-                                question=f"Is {merchant!r} a recurring bill?",
-                                payload={"merchant": merchant, "direction": direction},
-                            )
-                        )
-                        stats.review += 1
-                    continue
+                stats.review += 1
+
+        if cadence is None:
+            if forced is not True:  # irregular timing needs a human, not the LLM
+                # only ask when it plausibly IS a bill: steady amounts at bill-like intervals
+                if stable and _median_gap(dates) >= _MIN_REVIEW_GAP_DAYS:
+                    _open_review()
+                continue
+            cadence = _closest_cadence(dates)
+        elif not stable and forced is not True:
+            answer = (
+                await llm.classify_json(
+                    _LLM_PROMPT.format(
+                        merchant=merchant,
+                        rows=[(t.amount_cents, t.posted_on.isoformat()) for t in run],
+                    )
+                )
+                if llm
+                else None
+            )
+            if not (answer and answer.get("is_recurring")):
+                _open_review()
+                continue
         next_on = dates[-1] + timedelta(days=CADENCE_DAYS[cadence])
         stale = _stale(dates[-1], cadence, today)
         series = existing.get((merchant, direction))
@@ -202,9 +231,10 @@ async def detect_recurring(
             advanced_on = max(series.next_expected_on, next_on)
             if stale:
                 status = SeriesStatus.ended
-            elif series.status == SeriesStatus.ended and group[-1].series_id is None:
+            elif series.status == SeriesStatus.ended and significant[-1].series_id is None:
                 # the newest occurrence is untagged ⇒ genuinely new since the last run: an
                 # ended series (auto- or manually) that charges again at cadence revives
+                # (minor adjustments are never tagged, so they can't trigger this)
                 status = SeriesStatus.active
             else:
                 status = series.status
@@ -218,7 +248,7 @@ async def detect_recurring(
             series.status = status
             if changed:
                 stats.updated += 1
-        for t in group:
+        for t in significant:
             t.series_id = series.id
 
     # Groups that no longer match a cadence (trailing noise, shrunk by exclusions) never

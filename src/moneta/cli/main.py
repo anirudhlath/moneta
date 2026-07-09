@@ -33,6 +33,8 @@ def sync(
         f"{report['recurring']['new_series']} new series, "
         f"{report['events']} events."
     )
+    if report["auto_resolved"]:
+        console.print(f"LLM auto-resolved {report['auto_resolved']} review item(s).")
     open_reviews = request("GET", "/review")
     if open_reviews:
         console.print(f"[yellow]{len(open_reviews)} items need review:[/yellow] moneta review")
@@ -149,6 +151,87 @@ def accounts(
     console.print(table)
 
 
+_REVIEW_KINDS = {
+    "recurring_cluster": (
+        "recurring bill question",
+        "your answers set the fixed costs and income behind `moneta power`",
+    ),
+    "transfer_pair": (
+        "transfer match",
+        "matching keeps card/loan payments out of your spending totals",
+    ),
+    "merchant": (
+        "merchant name",
+        "names a messy bank descriptor so it reads cleanly everywhere",
+    ),
+}
+
+
+def _review_one(item: dict[str, object]) -> dict[str, object] | None:
+    """Prompt for one item; return the resolution, or None to skip."""
+    ctx = item.get("context") or {}
+    assert isinstance(ctx, dict)
+    if item["kind"] == "recurring_cluster":
+        for s in ctx.get("samples", []):
+            console.print(f"    {s['posted_on']}  ${s['amount']}")
+        if ctx.get("direction") == "inflow":
+            console.print("    [dim](these are deposits — answering y counts them as income)[/dim]")
+        answer = typer.prompt("Recurring? [y/n]", default="", show_default=False)
+        if not answer:
+            return None
+        normalized = answer.strip().lower()
+        if normalized in ("y", "yes"):
+            return {"is_recurring": True}
+        if normalized in ("n", "no"):
+            return {"is_recurring": False}
+        console.print("[red]invalid input, skipping[/red]")
+        return None
+    if item["kind"] == "transfer_pair":
+        if outflow := ctx.get("outflow"):
+            console.print(
+                f"    out: ${outflow['amount']} on {outflow['posted_on']} "
+                f"from {outflow['account']} — {outflow['description']!r}"
+            )
+        candidates = ctx.get("candidates") or []
+        if candidates:
+            for n, c in enumerate(candidates, 1):
+                console.print(
+                    f"    {n}. ${c['amount']} on {c['posted_on']} "
+                    f"into {c['account']} — {c['description']!r}"
+                )
+            answer = typer.prompt(
+                "Match number (Enter to skip, 0 = none of these)", default="", show_default=False
+            )
+        else:
+            answer = typer.prompt(
+                "Matching inflow id (Enter to skip)", default="", show_default=False
+            )
+        if not answer:
+            return None
+        try:
+            pick = int(answer)
+        except ValueError:
+            console.print("[red]invalid input, skipping[/red]")
+            return None
+        if candidates:
+            if pick == 0:
+                return {"inflow_id": None}
+            if not 1 <= pick <= len(candidates):
+                console.print("[red]invalid input, skipping[/red]")
+                return None
+            chosen = candidates[pick - 1]
+            assert isinstance(chosen, dict)
+            return {"inflow_id": chosen["id"]}
+        return {"inflow_id": pick}
+    if item["kind"] == "merchant":
+        if suggested := ctx.get("suggested"):
+            console.print(f"    current guess: {suggested!r}")
+        answer = typer.prompt("Merchant name (Enter to skip)", default="", show_default=False)
+        return {"merchant": answer} if answer else None
+    answer = typer.prompt("Answer (blank to skip)", default="", show_default=False)
+    return {"note": answer} if answer else None
+
+
 @app.command()
 def review() -> None:
     """Resolve ambiguous classifications interactively."""
@@ -156,36 +239,31 @@ def review() -> None:
     if not items:
         console.print("Nothing to review.")
         return
+    counts: dict[str, int] = {}
     for item in items:
-        console.print(f"\n[bold]{item['question']}[/bold]  ({item['kind']})")
-        if item["kind"] == "recurring_cluster":
-            answer = typer.prompt("Recurring? [y/n]", default="", show_default=False)
-            if not answer:
-                continue
-            normalized = answer.strip().lower()
-            if normalized in ("y", "yes"):
-                resolution: dict[str, object] = {"is_recurring": True}
-            elif normalized in ("n", "no"):
-                resolution = {"is_recurring": False}
-            else:
-                console.print("[red]invalid input, skipping[/red]")
-                continue
-        else:
-            answer = typer.prompt("Answer (blank to skip)", default="", show_default=False)
-            if not answer:
-                continue
-            if item["kind"] == "merchant":
-                resolution = {"merchant": answer}
-            elif item["kind"] == "transfer_pair":
-                try:
-                    resolution = {"inflow_id": int(answer)}
-                except ValueError:
-                    console.print("[red]invalid input, skipping[/red]")
-                    continue
-            else:
-                resolution = {"note": answer}
+        counts[item["kind"]] = counts.get(item["kind"], 0) + 1
+    console.print(f"[bold]Review queue — {len(items)} item(s)[/bold]")
+    for kind, n in counts.items():
+        label, why = _REVIEW_KINDS.get(kind, (kind, ""))
+        console.print(f"  {n} × {label} — [dim]{why}[/dim]")
+    console.print(
+        "[dim]Press Enter to skip any item. Ctrl-C stops; skipped items return next time.[/dim]"
+    )
+    resolved = skipped = 0
+    for idx, item in enumerate(items, 1):
+        console.print(
+            f"\n[bold cyan][{idx}/{len(items)}][/bold cyan] [bold]{item['question']}[/bold]"
+        )
+        resolution = _review_one(item)
+        if resolution is None:
+            skipped += 1
+            continue
         request("POST", f"/review/{item['id']}/resolve", {"resolution": resolution})
+        resolved += 1
         console.print("[green]resolved[/green]")
+    console.print(f"\nResolved {resolved}, skipped {skipped}.")
+    if resolved:
+        console.print("Recurring/transfer answers apply on the next sync: [bold]moneta sync[/bold]")
 
 
 @import_app.command("vesting")
@@ -206,6 +284,15 @@ def setup_simplefin(token: str) -> None:
     access_url = asyncio.run(claim_setup_token(token))
     save_config_value("simplefin_access_url", access_url)
     console.print("[green]SimpleFIN connected.[/green] Run: moneta sync")
+
+
+@app.command()
+def renormalize() -> None:
+    """Re-apply improved merchant-naming rules to already-synced transactions."""
+    result = request("POST", "/normalize/rerun")
+    console.print(f"Updated {result['changed']} merchant name(s).")
+    if result["changed"]:
+        console.print("Re-run detection to pick up merged groups: [bold]moneta sync[/bold]")
 
 
 @app.command()

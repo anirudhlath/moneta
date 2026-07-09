@@ -209,3 +209,78 @@ async def test_review_resolve_recurring_cluster_validates_and_applies(
     async with sessionmaker() as session:
         stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
     assert stats.new_series == 1
+
+
+async def test_review_context_enrichment(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from moneta.models import AccountType, ReviewItem
+
+    async with sessionmaker() as session:
+        checking = await make_account(session, type=AccountType.checking)
+        savings = await make_account(session, type=AccountType.savings, name="My Savings")
+        out = await make_txn(
+            session,
+            checking,
+            amount_cents=-50000,
+            posted_on=date(2026, 7, 1),
+            description="ACH TRANSFER",
+        )
+        c1 = await make_txn(
+            session,
+            savings,
+            amount_cents=50000,
+            posted_on=date(2026, 7, 2),
+            description="DEPOSIT A",
+        )
+        c2 = await make_txn(
+            session,
+            savings,
+            amount_cents=50000,
+            posted_on=date(2026, 7, 3),
+            description="DEPOSIT B",
+        )
+        for month, cents in ((4, -2000), (5, -9000), (6, -4500)):
+            await make_txn(
+                session,
+                checking,
+                amount_cents=cents,
+                merchant="Util Co",
+                posted_on=date(2026, month, 10),
+            )
+        session.add(
+            ReviewItem(
+                kind="transfer_pair",
+                question="which?",
+                payload={"outflow_id": out.id, "candidates": [c1.id, c2.id]},
+            )
+        )
+        session.add(
+            ReviewItem(
+                kind="recurring_cluster",
+                question="recurring?",
+                payload={"merchant": "Util Co", "direction": "outflow"},
+            )
+        )
+        await session.commit()
+
+    app = create_app(sessionmaker, adapter=None, llm=None)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        items = (await client.get("/review")).json()
+
+    tp = next(i for i in items if i["kind"] == "transfer_pair")
+    assert tp["context"]["outflow"]["amount"] == "500.00"
+    assert tp["context"]["outflow"]["description"] == "ACH TRANSFER"
+    cands = tp["context"]["candidates"]
+    assert [c["description"] for c in cands] == ["DEPOSIT A", "DEPOSIT B"]
+    assert cands[0]["account"] == "My Savings"
+    assert cands[0]["amount"] == "500.00"
+    assert cands[0]["id"] == c1.id
+
+    rc = next(i for i in items if i["kind"] == "recurring_cluster")
+    samples = rc["context"]["samples"]
+    assert len(samples) == 3
+    assert samples[0]["amount"] == "45.00"  # newest first
+    assert rc["context"]["direction"] == "outflow"
