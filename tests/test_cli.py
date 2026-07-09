@@ -58,6 +58,10 @@ def test_sync_full_flag_requests_full_sync(monkeypatch) -> None:  # type: ignore
     result = runner.invoke(app, ["sync", "--full"])
     assert result.exit_code == 0
     assert calls[0] == ("POST", "/sync?full=true")
+    calls.clear()
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 0
+    assert calls[0] == ("POST", "/sync")
 
 
 def test_import_vesting(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]

@@ -24,6 +24,17 @@ still gets `t.series_id = series.id` set on it.
 The money simply disappears from the power report — the charge is real,
 still leaving the account, but appears nowhere.
 
+**Update (feature/full-history-sync):** two changes to this picture.
+- Reactivation narrows the manual-end case: a *new* occurrence at cadence now
+  flips an ended series back to active on the next sync, so the charge
+  reappears in fixed costs after one sync cycle. The invisible window is now
+  one sync, not forever.
+- Stale *auto*-ending adds a new entry path: a weekly series auto-ends 21
+  days after its last charge, so a same-month tagged charge can predate the
+  auto-end and vanish from that month's report (monthly/biweekly horizons of
+  90/42 days can't produce a same-month tagged charge). Counting
+  ended-series txns as spent_so_far fixes this shape too.
+
 ## Acceptance criteria
 - Decide the correct bucket for txns whose `series_id` points at an ended
   series: most likely they should count as `spent_so_far` (discretionary,

@@ -2,7 +2,7 @@ import statistics
 from datetime import date, timedelta
 
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.llm import Classifier
@@ -119,7 +119,7 @@ async def detect_recurring(
             await session.execute(
                 select(Transaction)
                 .where(Transaction.merchant.is_not(None))
-                .order_by(Transaction.posted_on)
+                .order_by(Transaction.posted_on, Transaction.id)
             )
         )
         .scalars()
@@ -135,12 +135,12 @@ async def detect_recurring(
     for (merchant, direction), group in groups.items():
         if len(group) < _MIN_OCCURRENCES:
             continue
-        dates = [t.posted_on for t in group]
+        dates = sorted({t.posted_on for t in group})  # dedup: double-posts aren't a 0-day gap
         match = _match_cadence(dates)
         if match is None:
             continue
         cadence, start = match
-        run = group[start:]
+        run = [t for t in group if t.posted_on >= dates[start]]
         amounts = [abs(t.amount_cents) for t in run]
         med = statistics.median(amounts)
         stable = all(abs(a - med) <= med * _AMOUNT_TOLERANCE for a in amounts)
@@ -216,5 +216,21 @@ async def detect_recurring(
                 stats.updated += 1
         for t in group:
             t.series_id = series.id
+
+    # Groups that no longer match a cadence (trailing noise, shrunk by exclusions) never
+    # reach the stale check above — sweep every still-active series by its own txns.
+    for series in existing.values():
+        if series.status != SeriesStatus.active:
+            continue
+        newest = (
+            await session.execute(
+                select(func.max(Transaction.posted_on)).where(Transaction.series_id == series.id)
+            )
+        ).scalar_one_or_none()
+        period = CADENCE_DAYS[series.cadence]
+        last_seen = newest or series.next_expected_on - timedelta(days=period)
+        if (today - last_seen).days > _STALE_PERIODS * period:
+            series.status = SeriesStatus.ended
+            stats.updated += 1
     await session.commit()
     return stats

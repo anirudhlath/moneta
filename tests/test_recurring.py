@@ -392,6 +392,62 @@ async def test_auto_ended_series_reactivates_when_cadence_reestablished(
     assert s.next_expected_on == date(2026, 7, 31)
 
 
+async def test_series_with_trailing_noise_still_auto_ends(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    for month in (4, 5, 6):
+        await make_txn(
+            session, acct, amount_cents=-1599, merchant="Gym", posted_on=date(2026, month, 15)
+        )
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    # a one-off purchase at the same merchant breaks the cadence run...
+    await make_txn(session, acct, amount_cents=-2500, merchant="Gym", posted_on=date(2026, 7, 2))
+    # ...and the merchant then goes dead; a much later sync must still auto-end the series
+    stats = await detect_recurring(session, llm=None, today=date(2026, 12, 1))
+    assert stats.updated == 1
+    s = (await _series(session))[0]
+    assert s.status == SeriesStatus.ended
+
+
+async def test_duplicate_same_day_charge_does_not_break_detection(
+    session: AsyncSession,
+) -> None:
+    acct = await make_account(session)
+    for month in (4, 5, 6):
+        await make_txn(
+            session, acct, amount_cents=-1599, merchant="Netflix", posted_on=date(2026, month, 15)
+        )
+    # double-posted/retried charge on the newest date
+    await make_txn(
+        session, acct, amount_cents=-1599, merchant="Netflix", posted_on=date(2026, 6, 15)
+    )
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.new_series == 1
+    s = (await _series(session))[0]
+    assert s.cadence == Cadence.monthly and s.status == SeriesStatus.active
+    assert s.next_expected_on == date(2026, 7, 15)
+
+
+async def test_stale_newer_backfill_does_not_reactivate_ended_series(
+    session: AsyncSession,
+) -> None:
+    """Pins that staleness takes precedence over the untagged-newest reactivation check."""
+    acct = await make_account(session)
+    for month in (1, 2, 3):
+        await make_txn(
+            session, acct, amount_cents=-1599, merchant="Netflix", posted_on=date(2025, month, 15)
+        )
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    s = (await _series(session))[0]
+    assert s.status == SeriesStatus.ended  # auto-ended: stale history
+    # a relinked account backfills an occurrence newer than anything stored — but ancient
+    await make_txn(
+        session, acct, amount_cents=-1599, merchant="Netflix", posted_on=date(2025, 4, 15)
+    )
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    s = (await _series(session))[0]
+    assert s.status == SeriesStatus.ended
+
+
 def test_monthly_cents_normalization() -> None:
     s = RecurringSeries(
         merchant="X",
