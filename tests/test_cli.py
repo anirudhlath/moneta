@@ -197,3 +197,10 @@ def test_review_summary_counts_kinds(tmp_path: Path, monkeypatch) -> None:  # ty
     assert "Review queue" in result.output
     assert "recurring bill" in result.output
     assert "skipped" in result.output.lower()
+
+
+def test_renormalize_command_runs(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["renormalize"])
+    assert result.exit_code == 0
+    assert "Updated 0 merchant name(s)" in result.output

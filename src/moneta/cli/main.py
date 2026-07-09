@@ -278,6 +278,15 @@ def setup_simplefin(token: str) -> None:
 
 
 @app.command()
+def renormalize() -> None:
+    """Re-apply improved merchant-naming rules to already-synced transactions."""
+    result = request("POST", "/normalize/rerun")
+    console.print(f"Updated {result['changed']} merchant name(s).")
+    if result["changed"]:
+        console.print("Re-run detection to pick up merged groups: [bold]moneta sync[/bold]")
+
+
+@app.command()
 def serve(host: str = "127.0.0.1", port: int = 8300) -> None:
     """Run the moneta API server."""
     import uvicorn

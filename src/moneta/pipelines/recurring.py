@@ -35,6 +35,8 @@ _TOLERANCE: dict[Cadence, int] = {
 }
 _MIN_OCCURRENCES = 3
 _AMOUNT_TOLERANCE = 0.20
+# charges below this fraction of the group's median are adjustments, not occurrences
+_MINOR_FRACTION = 0.25
 _PER_MONTH: dict[Cadence, float] = {
     Cadence.weekly: 52 / 12,
     Cadence.biweekly: 26 / 12,
@@ -65,6 +67,12 @@ def _match_cadence(dates: list[date]) -> Cadence | None:
         if abs(med - days) <= tol and all(abs(g - days) <= tol * 2 for g in gaps):
             return cadence
     return None
+
+
+def _closest_cadence(dates: list[date]) -> Cadence:
+    gaps = [(b - a).days for a, b in zip(dates, dates[1:], strict=False)]
+    med = statistics.median(gaps)
+    return min(CADENCE_DAYS, key=lambda c: abs(CADENCE_DAYS[c] - med))
 
 
 async def _excluded_txn_ids(session: AsyncSession) -> set[int]:
@@ -119,42 +127,50 @@ async def detect_recurring(session: AsyncSession, llm: Classifier | None) -> Rec
         groups.setdefault((t.merchant, direction), []).append(t)
 
     for (merchant, direction), group in groups.items():
-        if len(group) < _MIN_OCCURRENCES:
+        scale = statistics.median([abs(t.amount_cents) for t in group])
+        significant = [t for t in group if abs(t.amount_cents) >= scale * _MINOR_FRACTION]
+        if len(significant) < _MIN_OCCURRENCES:
             continue
-        dates = [t.posted_on for t in group]
+        dates = [t.posted_on for t in significant]
         cadence = _match_cadence(dates)
-        if cadence is None:
-            continue
-        amounts = [abs(t.amount_cents) for t in group]
+        amounts = [abs(t.amount_cents) for t in significant]
         med = statistics.median(amounts)
         stable = all(abs(a - med) <= med * _AMOUNT_TOLERANCE for a in amounts)
         expected = -round(med) if direction == Direction.outflow else round(med)
-        if not stable:
-            forced = force.get(merchant)
-            if forced is False:
-                continue  # user-resolved as not recurring — suppress silently, forever
-            if forced is not True:  # not resolved (or resolved True skips straight to series)
-                answer = (
-                    await llm.classify_json(
-                        _LLM_PROMPT.format(
-                            merchant=merchant,
-                            rows=[(t.amount_cents, t.posted_on.isoformat()) for t in group],
-                        )
+        forced = force.get(merchant)
+        if forced is False:
+            continue  # user-resolved as not recurring — suppress silently, forever
+
+        def _open_review(merchant: str = merchant, direction: Direction = direction) -> None:
+            if merchant not in reviewed:
+                session.add(
+                    ReviewItem(
+                        kind=ReviewKind.recurring_cluster,
+                        question=f"Is {merchant!r} a recurring bill?",
+                        payload={"merchant": merchant, "direction": direction},
                     )
-                    if llm
-                    else None
                 )
-                if not (answer and answer.get("is_recurring")):
-                    if merchant not in reviewed:
-                        session.add(
-                            ReviewItem(
-                                kind=ReviewKind.recurring_cluster,
-                                question=f"Is {merchant!r} a recurring bill?",
-                                payload={"merchant": merchant, "direction": direction},
-                            )
-                        )
-                        stats.review += 1
-                    continue
+                stats.review += 1
+
+        if cadence is None:
+            if forced is not True:  # irregular timing needs a human, not the LLM
+                _open_review()
+                continue
+            cadence = _closest_cadence(dates)
+        elif not stable and forced is not True:
+            answer = (
+                await llm.classify_json(
+                    _LLM_PROMPT.format(
+                        merchant=merchant,
+                        rows=[(t.amount_cents, t.posted_on.isoformat()) for t in significant],
+                    )
+                )
+                if llm
+                else None
+            )
+            if not (answer and answer.get("is_recurring")):
+                _open_review()
+                continue
         next_on = dates[-1] + timedelta(days=CADENCE_DAYS[cadence])
         series = existing.get((merchant, direction))
         if series is None:
@@ -184,7 +200,7 @@ async def detect_recurring(session: AsyncSession, llm: Classifier | None) -> Rec
             series.next_expected_on = advanced_on
             if changed:
                 stats.updated += 1
-        for t in group:
+        for t in significant:
             t.series_id = series.id
     await session.commit()
     return stats

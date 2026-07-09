@@ -278,3 +278,62 @@ def test_monthly_cents_normalization() -> None:
     s.cadence = Cadence.annual
     s.expected_cents = -12000
     assert monthly_cents(s) == -1000
+
+
+async def test_tiny_adjustment_charge_ignored_for_cadence(session: AsyncSession) -> None:
+    """A sub-scale adjustment (e.g. $1.89 insurance true-up) must not break cadence."""
+    acct = await make_account(session)
+    await make_txn(
+        session, acct, amount_cents=-26665, merchant="Tesla Insurance", posted_on=date(2026, 4, 27)
+    )
+    await make_txn(
+        session, acct, amount_cents=-189, merchant="Tesla Insurance", posted_on=date(2026, 5, 12)
+    )  # the poison pill
+    await make_txn(
+        session, acct, amount_cents=-22522, merchant="Tesla Insurance", posted_on=date(2026, 5, 24)
+    )
+    await make_txn(
+        session, acct, amount_cents=-25059, merchant="Tesla Insurance", posted_on=date(2026, 6, 27)
+    )
+    stats = await detect_recurring(session, llm=None)
+    assert stats.new_series == 1
+    s = (await _series(session))[0]
+    assert s.cadence == Cadence.monthly
+    assert s.expected_cents == -25059  # median of the three real charges
+    tiny = (
+        await session.execute(select(Transaction).where(Transaction.amount_cents == -189))
+    ).scalar_one()
+    assert tiny.series_id is None  # adjustment stays out of the series
+
+
+async def test_cadence_miss_goes_to_review(session: AsyncSession) -> None:
+    from moneta.models import ReviewItem
+
+    acct = await make_account(session)
+    for d in (date(2026, 4, 1), date(2026, 4, 11), date(2026, 5, 26)):
+        await make_txn(session, acct, amount_cents=-30000, merchant="Odd Timing Co", posted_on=d)
+    stats = await detect_recurring(session, llm=None)
+    assert stats.new_series == 0 and stats.review == 1
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.kind == "recurring_cluster"
+    # re-run: no duplicate review item
+    stats = await detect_recurring(session, llm=None)
+    assert stats.review == 0
+
+
+async def test_cadence_miss_force_accept_uses_closest_cadence(session: AsyncSession) -> None:
+    from moneta.models import ReviewItem, ReviewStatus
+
+    acct = await make_account(session)
+    for d in (date(2026, 4, 1), date(2026, 4, 11), date(2026, 5, 26)):
+        await make_txn(session, acct, amount_cents=-30000, merchant="Odd Timing Co", posted_on=d)
+    await detect_recurring(session, llm=None)
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    item.status = ReviewStatus.resolved
+    item.resolution = {"is_recurring": True}
+    await session.flush()
+    stats = await detect_recurring(session, llm=None)
+    assert stats.new_series == 1
+    s = (await _series(session))[0]
+    assert s.cadence == Cadence.monthly  # median gap 27.5 days → closest cadence
+    assert s.expected_cents == -30000

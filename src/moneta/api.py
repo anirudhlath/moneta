@@ -29,6 +29,7 @@ from moneta.models import (
     Transaction,
     TransferLink,
 )
+from moneta.pipelines.normalize import renormalize_merchants
 from moneta.pipelines.run import SyncReport, run_sync
 from moneta.queries import classified_links
 from moneta.vesting import apply_vesting, parse_vesting_csv
@@ -360,6 +361,10 @@ def create_app(
         item.resolution = body.resolution
         await session.commit()
         return {"ok": True}
+
+    @app.post("/normalize/rerun")
+    async def normalize_rerun(session: Session) -> dict[str, int]:
+        return {"changed": await renormalize_merchants(session)}
 
     @app.post("/import/vesting")
     async def import_vesting(body: VestingIn, session: Session) -> dict[str, int]:
