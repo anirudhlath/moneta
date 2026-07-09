@@ -80,6 +80,7 @@ class ReviewOut(BaseModel):
     kind: str
     question: str
     payload: dict[str, Any]
+    context: dict[str, Any] = {}
 
 
 class ResolveIn(BaseModel):
@@ -223,6 +224,74 @@ def create_app(
         await session.commit()
         return {"ok": True}
 
+    async def _txn_summaries(
+        session: AsyncSession, txn_ids: list[int]
+    ) -> dict[int, dict[str, Any]]:
+        if not txn_ids:
+            return {}
+        rows = (
+            await session.execute(
+                select(Transaction, Account.name)
+                .join(Account, Transaction.account_id == Account.id)
+                .where(Transaction.id.in_(txn_ids))
+            )
+        ).all()
+        return {
+            txn.id: {
+                "id": txn.id,
+                "posted_on": txn.posted_on.isoformat(),
+                "amount": f"{abs(txn.amount_cents) / 100:.2f}",
+                "description": txn.description,
+                "account": account_name,
+            }
+            for txn, account_name in rows
+        }
+
+    async def _review_context(session: AsyncSession, item: ReviewItem) -> dict[str, Any]:
+        if item.kind == ReviewKind.transfer_pair:
+            outflow_id = item.payload.get("outflow_id")
+            candidate_ids = [c for c in item.payload.get("candidates", []) if isinstance(c, int)]
+            ids = ([outflow_id] if isinstance(outflow_id, int) else []) + candidate_ids
+            summaries = await _txn_summaries(session, ids)
+            context: dict[str, Any] = {
+                "candidates": [summaries[c] for c in candidate_ids if c in summaries]
+            }
+            if isinstance(outflow_id, int) and outflow_id in summaries:
+                context["outflow"] = summaries[outflow_id]
+            return context
+        if item.kind == ReviewKind.recurring_cluster:
+            merchant = item.payload.get("merchant")
+            if not isinstance(merchant, str):
+                return {}
+            txns = (
+                (
+                    await session.execute(
+                        select(Transaction)
+                        .where(Transaction.merchant == merchant)
+                        .order_by(Transaction.posted_on.desc())
+                        .limit(6)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return {
+                "samples": [
+                    {
+                        "posted_on": t.posted_on.isoformat(),
+                        "amount": f"{abs(t.amount_cents) / 100:.2f}",
+                    }
+                    for t in txns
+                ],
+                "direction": item.payload.get("direction"),
+            }
+        if item.kind == ReviewKind.merchant:
+            return {
+                "descriptor": item.payload.get("descriptor"),
+                "suggested": item.payload.get("fallback"),
+            }
+        return {}
+
     @app.get("/review")
     async def review(session: Session) -> list[ReviewOut]:
         rows = (
@@ -234,7 +303,16 @@ def create_app(
             .scalars()
             .all()
         )
-        return [ReviewOut.model_validate(r, from_attributes=True) for r in rows]
+        return [
+            ReviewOut(
+                id=r.id,
+                kind=r.kind,
+                question=r.question,
+                payload=r.payload,
+                context=await _review_context(session, r),
+            )
+            for r in rows
+        ]
 
     @app.post("/review/{item_id}/resolve")
     async def resolve(item_id: int, body: ResolveIn, session: Session) -> dict[str, bool]:
