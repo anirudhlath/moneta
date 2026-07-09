@@ -37,7 +37,8 @@ def test_sync_without_setup_fails_cleanly(tmp_path: Path, monkeypatch) -> None: 
     _isolate(monkeypatch, tmp_path)
     result = runner.invoke(app, ["sync"])
     assert result.exit_code == 1
-    assert "SimpleFIN" in result.output
+    assert "simplefin" in result.output
+    assert "plaid" in result.output
 
 
 def test_sync_full_flag_requests_full_sync(monkeypatch) -> None:  # type: ignore[no-untyped-def]
