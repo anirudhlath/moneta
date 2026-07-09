@@ -7,14 +7,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from moneta.models import (
     AccountType,
     MerchantAlias,
+    RecurringSeries,
     ReviewItem,
+    ReviewKind,
     ReviewStatus,
+    SeriesStatus,
     Transaction,
     TransferLink,
 )
 from moneta.pipelines.recurring import detect_recurring
-from moneta.pipelines.review import autoreview_items
-from tests.factories import make_account, make_txn
+from moneta.pipelines.review import VerifyStats, autoreview_items, verify_series
+from tests.factories import make_account, make_series, make_txn
 
 
 class ScriptedLLM:
@@ -128,3 +131,86 @@ async def test_confident_recurring_answer_feeds_next_detection(session: AsyncSes
     # consumes the force map
     stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
     assert stats.new_series == 1
+
+
+async def _series_with_occurrences(session: AsyncSession) -> RecurringSeries:
+    acct = await make_account(session)
+    series = await make_series(session, merchant="Netflix")
+    await make_txn(
+        session,
+        acct,
+        amount_cents=-1599,
+        merchant="Netflix",
+        posted_on=date(2026, 6, 15),
+        series_id=series.id,
+    )
+    return series
+
+
+async def test_verify_confident_yes_writes_resolved_ledger_item(session: AsyncSession) -> None:
+    await _series_with_occurrences(session)
+    llm = ScriptedLLM({"Netflix": {"is_recurring": True, "confident": True}})
+    stats = await verify_series(session, llm)
+    assert stats == VerifyStats(verified=1, flagged=0)
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.status == ReviewStatus.resolved
+    assert item.resolution == {"is_recurring": True, "resolved_by": "llm"}
+    # settled: a second run asks nothing
+    assert await verify_series(session, llm) == VerifyStats()
+    assert len(llm.prompts) == 1
+
+
+async def test_verify_prompt_carries_amounts_and_dates(session: AsyncSession) -> None:
+    await _series_with_occurrences(session)
+    llm = ScriptedLLM({"Netflix": {"is_recurring": True, "confident": True}})
+    await verify_series(session, llm)
+    assert "15.99" in llm.prompts[0] and "2026-06-15" in llm.prompts[0]
+
+
+async def test_verify_unconfident_flags_for_human(session: AsyncSession) -> None:
+    series = await _series_with_occurrences(session)
+    llm = ScriptedLLM({"Netflix": {"is_recurring": True, "confident": False}})
+    stats = await verify_series(session, llm)
+    assert stats == VerifyStats(verified=0, flagged=1)
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.status == ReviewStatus.open
+    assert item.payload["llm_flagged"] is True
+    assert series.status == SeriesStatus.active  # keeps counting until a human rules
+
+
+async def test_verify_confident_no_flags_rather_than_suppresses(session: AsyncSession) -> None:
+    series = await _series_with_occurrences(session)
+    llm = ScriptedLLM({"Netflix": {"is_recurring": False, "confident": True}})
+    stats = await verify_series(session, llm)
+    assert stats == VerifyStats(verified=0, flagged=1)
+    assert series.status == SeriesStatus.active  # the LLM never suppresses determinism
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.status == ReviewStatus.open
+
+
+async def test_verify_skips_merchants_with_existing_items(session: AsyncSession) -> None:
+    await _series_with_occurrences(session)
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.recurring_cluster,
+            question="Is 'Netflix' a recurring bill?",
+            payload={"merchant": "Netflix", "direction": "outflow"},
+        )
+    )
+    await session.flush()
+    llm = ScriptedLLM({"Netflix": {"is_recurring": True, "confident": True}})
+    assert await verify_series(session, llm) == VerifyStats()
+    assert llm.prompts == []
+
+
+async def test_verify_skips_ended_series(session: AsyncSession) -> None:
+    await make_series(session, merchant="Old Gym", status=SeriesStatus.ended)
+    llm = ScriptedLLM({"Old Gym": {"is_recurring": True, "confident": True}})
+    assert await verify_series(session, llm) == VerifyStats()
+    assert llm.prompts == []
+
+
+async def test_verify_without_llm_is_noop(session: AsyncSession) -> None:
+    await _series_with_occurrences(session)
+    assert await verify_series(session, None) == VerifyStats()
+    assert (await session.execute(select(ReviewItem))).scalar_one_or_none() is None

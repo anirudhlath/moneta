@@ -7,6 +7,7 @@ resolution path a human answer takes, tagged resolved_by="llm" for audit.
 
 from typing import Any
 
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,9 +17,11 @@ from moneta.models import (
     AliasSource,
     LinkMethod,
     MerchantAlias,
+    RecurringSeries,
     ReviewItem,
     ReviewKind,
     ReviewStatus,
+    SeriesStatus,
     Transaction,
     TransferLink,
 )
@@ -42,6 +45,14 @@ Is this one recurring bill/subscription/income stream (vs. one-off spending)?
 Merchant: {merchant!r}; direction: {direction}; recent charges: {samples}
 Respond with JSON: {{"is_recurring": true/false, "confident": true/false}}
 Set confident=true ONLY if the pattern is clear."""
+
+_VERIFY_PROMPT = """You are double-checking automatic recurring-bill detection.
+Is this one recurring bill/subscription/income stream (vs. habitual spending
+like groceries, gas, or dining that merely happens on a regular rhythm)?
+Merchant: {merchant!r}; direction: {direction}; cadence: {cadence}; \
+expected amount: ${expected}; recent occurrences: {samples}
+Respond with JSON: {{"is_recurring": true/false, "confident": true/false}}
+Set confident=true ONLY if you are sure either way."""
 
 
 async def txn_summaries(session: AsyncSession, txn_ids: list[int]) -> dict[int, dict[str, Any]]:
@@ -208,3 +219,88 @@ async def autoreview_items(session: AsyncSession, llm: Classifier) -> int:
         resolved += 1
     await session.commit()
     return resolved
+
+
+class VerifyStats(BaseModel):
+    verified: int = 0
+    flagged: int = 0
+
+
+async def verify_series(session: AsyncSession, llm: Classifier | None) -> VerifyStats:
+    """LLM second opinion on deterministically detected series.
+
+    A recurring_cluster ReviewItem (open or resolved) is the per-merchant
+    verification ledger: confident "yes" is recorded resolved (which also feeds
+    detect_recurring's force map); anything else opens a human item flagged
+    llm_flagged so autoreview never re-asks the LLM. The LLM never suppresses a
+    deterministic detection — flagged series stay active until a human rules.
+    """
+    stats = VerifyStats()
+    if llm is None:
+        return stats
+    seen = {
+        item.payload.get("merchant")
+        for item in (
+            await session.execute(
+                select(ReviewItem).where(ReviewItem.kind == ReviewKind.recurring_cluster)
+            )
+        ).scalars()
+    }
+    series_list = (
+        (
+            await session.execute(
+                select(RecurringSeries).where(RecurringSeries.status == SeriesStatus.active)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for series in series_list:
+        if series.merchant in seen:
+            continue
+        txns = (
+            (
+                await session.execute(
+                    select(Transaction)
+                    .where(Transaction.series_id == series.id)
+                    .order_by(Transaction.posted_on.desc())
+                    .limit(6)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        answer = await llm.classify_json(
+            _VERIFY_PROMPT.format(
+                merchant=series.merchant,
+                direction=series.direction,
+                cadence=series.cadence,
+                expected=f"{abs(series.expected_cents) / 100:.2f}",
+                samples=[
+                    (t.posted_on.isoformat(), f"{abs(t.amount_cents) / 100:.2f}") for t in txns
+                ],
+            )
+        )
+        payload: dict[str, Any] = {"merchant": series.merchant, "direction": series.direction}
+        if answer and answer.get("is_recurring") is True and answer.get("confident") is True:
+            session.add(
+                ReviewItem(
+                    kind=ReviewKind.recurring_cluster,
+                    question=f"Is {series.merchant!r} a recurring bill?",
+                    payload=payload,
+                    status=ReviewStatus.resolved,
+                    resolution={"is_recurring": True, "resolved_by": "llm"},
+                )
+            )
+            stats.verified += 1
+        else:
+            session.add(
+                ReviewItem(
+                    kind=ReviewKind.recurring_cluster,
+                    question=f"Is {series.merchant!r} a recurring bill?",
+                    payload={**payload, "llm_flagged": True},
+                )
+            )
+            stats.flagged += 1
+    await session.commit()
+    return stats
