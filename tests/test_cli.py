@@ -262,3 +262,49 @@ def test_sync_prints_verification_line(monkeypatch) -> None:  # type: ignore[no-
     result = runner.invoke(app, ["sync"])
     assert result.exit_code == 0
     assert "LLM verified 2 series; flagged 1 for review." in result.output
+
+
+def _seed_price_change_review(tmp_path: Path) -> None:
+    async def _seed() -> None:
+        engine, sessionmaker = make_sessionmaker(f"sqlite+aiosqlite:///{tmp_path / 'moneta.db'}")
+        await init_db(engine)
+        async with sessionmaker() as session:
+            series = await make_series(session)
+            session.add(
+                ReviewItem(
+                    kind="price_change",
+                    question="Did 'Netflix' change price from $15.99 to $18.99?",
+                    payload={
+                        "series_id": series.id,
+                        "merchant": "Netflix",
+                        "old_cents": -1599,
+                        "new_cents": -1899,
+                        "occurred_on": "2026-07-15",
+                        "llm_flagged": True,
+                    },
+                )
+            )
+            await session.commit()
+        await engine.dispose()
+
+    asyncio.run(_seed())
+
+
+def test_review_price_change_yes_resolves(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    _seed_price_change_review(tmp_path)
+    result = runner.invoke(app, ["review"], input="y\n")
+    assert result.exit_code == 0
+    assert "$15.99 → $18.99" in result.output
+    assert "Price change? [y/n]" in result.output
+    assert "resolved" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_review_price_change_invalid_answer_skips_cleanly(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    _seed_price_change_review(tmp_path)
+    result = runner.invoke(app, ["review"], input="maybe\n")
+    assert result.exit_code == 0
+    assert "invalid input, skipping" in result.output
+    assert "Traceback" not in result.output

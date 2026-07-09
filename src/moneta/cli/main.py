@@ -169,7 +169,24 @@ _REVIEW_KINDS = {
         "merchant name",
         "names a messy bank descriptor so it reads cleanly everywhere",
     ),
+    "price_change": (
+        "price change",
+        "confirming updates the expected amount behind `moneta power`",
+    ),
 }
+
+
+def _prompt_yes_no(question: str) -> bool | None:
+    answer = typer.prompt(question, default="", show_default=False)
+    if not answer:
+        return None
+    normalized = answer.strip().lower()
+    if normalized in ("y", "yes"):
+        return True
+    if normalized in ("n", "no"):
+        return False
+    console.print("[red]invalid input, skipping[/red]")
+    return None
 
 
 def _review_one(item: dict[str, object]) -> dict[str, object] | None:
@@ -181,16 +198,14 @@ def _review_one(item: dict[str, object]) -> dict[str, object] | None:
             console.print(f"    {s['posted_on']}  ${s['amount']}")
         if ctx.get("direction") == "inflow":
             console.print("    [dim](these are deposits — answering y counts them as income)[/dim]")
-        answer = typer.prompt("Recurring? [y/n]", default="", show_default=False)
-        if not answer:
-            return None
-        normalized = answer.strip().lower()
-        if normalized in ("y", "yes"):
-            return {"is_recurring": True}
-        if normalized in ("n", "no"):
-            return {"is_recurring": False}
-        console.print("[red]invalid input, skipping[/red]")
-        return None
+        answer = _prompt_yes_no("Recurring? [y/n]")
+        return None if answer is None else {"is_recurring": answer}
+    if item["kind"] == "price_change":
+        console.print(
+            f"    ${ctx.get('old_amount')} → ${ctx.get('new_amount')} on {ctx.get('occurred_on')}"
+        )
+        answer = _prompt_yes_no("Price change? [y/n]")
+        return None if answer is None else {"is_price_change": answer}
     if item["kind"] == "transfer_pair":
         if outflow := ctx.get("outflow"):
             console.print(
