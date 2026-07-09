@@ -13,6 +13,10 @@ from moneta.pipelines.run import RESYNC_OVERLAP_DAYS
 from tests.conftest import FakeAdapter
 from tests.factories import make_account, make_txn
 
+# The /sync and /power endpoints resolve date.today() at request time, so snapshot
+# dates must be relative — pinned dates would go stale as real time passes.
+_TODAY = date.today()
+
 SNAP = Snapshot(
     accounts=[
         AccountDTO(
@@ -21,19 +25,19 @@ SNAP = Snapshot(
             org_name="Chase",
             currency="USD",
             balance=Decimal("1000.00"),
-            balance_date=date(2026, 7, 1),
+            balance_date=_TODAY,
         ),
     ],
     transactions=[
         TransactionDTO(
-            id=f"TRN-{m}",
+            id=f"TRN-{i}",
             account_id="ACT-1",
-            posted_on=date(2026, m, 15),
+            posted_on=_TODAY - timedelta(days=days_ago),
             amount=Decimal("-15.99"),
             description="NETFLIX.COM",
             raw={},
         )
-        for m in (4, 5, 6)
+        for i, days_ago in enumerate((75, 45, 15))
     ],
     holdings=[],
 )
@@ -194,7 +198,7 @@ async def test_review_resolve_recurring_cluster_validates_and_applies(
                 posted_on=date(2026, month, 10),
             )
         await session.commit()
-        await detect_recurring(session, llm=None)
+        await detect_recurring(session, llm=None, today=date(2026, 7, 1))
 
     items = (await client.get("/review")).json()
     assert len(items) == 1 and items[0]["kind"] == "recurring_cluster"
@@ -212,5 +216,5 @@ async def test_review_resolve_recurring_cluster_validates_and_applies(
     assert r.status_code == 200
 
     async with sessionmaker() as session:
-        stats = await detect_recurring(session, llm=None)
+        stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
     assert stats.new_series == 1

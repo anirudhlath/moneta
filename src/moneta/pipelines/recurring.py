@@ -35,6 +35,7 @@ _TOLERANCE: dict[Cadence, int] = {
 }
 _MIN_OCCURRENCES = 3
 _AMOUNT_TOLERANCE = 0.20
+_STALE_PERIODS = 3
 _PER_MONTH: dict[Cadence, float] = {
     Cadence.weekly: 52 / 12,
     Cadence.biweekly: 26 / 12,
@@ -77,7 +78,9 @@ async def _excluded_txn_ids(session: AsyncSession) -> set[int]:
     return excluded
 
 
-async def detect_recurring(session: AsyncSession, llm: Classifier | None) -> RecurringStats:
+async def detect_recurring(
+    session: AsyncSession, llm: Classifier | None, today: date
+) -> RecurringStats:
     stats = RecurringStats()
     excluded = await _excluded_txn_ids(session)
     reviewed: set[str] = set()
@@ -156,6 +159,7 @@ async def detect_recurring(session: AsyncSession, llm: Classifier | None) -> Rec
                         stats.review += 1
                     continue
         next_on = dates[-1] + timedelta(days=CADENCE_DAYS[cadence])
+        stale = (today - dates[-1]).days > _STALE_PERIODS * CADENCE_DAYS[cadence]
         series = existing.get((merchant, direction))
         if series is None:
             series = RecurringSeries(
@@ -164,7 +168,7 @@ async def detect_recurring(session: AsyncSession, llm: Classifier | None) -> Rec
                 cadence=cadence,
                 expected_cents=expected,
                 next_expected_on=next_on,
-                status=SeriesStatus.active,
+                status=SeriesStatus.ended if stale else SeriesStatus.active,
             )
             session.add(series)
             await session.flush()
@@ -179,9 +183,22 @@ async def detect_recurring(session: AsyncSession, llm: Classifier | None) -> Rec
             stats.new_series += 1
         else:
             advanced_on = max(series.next_expected_on, next_on)
-            changed = series.next_expected_on != advanced_on or series.cadence != cadence
+            if stale:
+                status = SeriesStatus.ended
+            elif series.status == SeriesStatus.ended and group[-1].series_id is None:
+                # the newest occurrence is untagged ⇒ genuinely new since the last run: an
+                # ended series (auto- or manually) that charges again at cadence revives
+                status = SeriesStatus.active
+            else:
+                status = SeriesStatus(series.status)
+            changed = (
+                series.next_expected_on != advanced_on
+                or series.cadence != cadence
+                or series.status != status
+            )
             series.cadence = cadence
             series.next_expected_on = advanced_on
+            series.status = status
             if changed:
                 stats.updated += 1
         for t in group:

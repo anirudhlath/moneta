@@ -48,7 +48,7 @@ async def run_sync(
     ingest = await ingest_snapshot(session, snap)
     normalized = await normalize_merchants(session, llm)
     transfers = await link_transfers(session, llm)
-    recurring = await detect_recurring(session, llm)
+    recurring = await detect_recurring(session, llm, today)
     events = await emit_series_events(session, today)
     return SyncReport(
         ingest=ingest,
