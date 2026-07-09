@@ -1,3 +1,4 @@
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime
@@ -124,10 +125,24 @@ def create_app(
         yield
 
     async def check_auth(authorization: Annotated[str | None, Header()] = None) -> None:
-        if api_token is not None and authorization != f"Bearer {api_token}":
+        if api_token is None:
+            return
+        expected = f"Bearer {api_token}"
+        if authorization is None or not secrets.compare_digest(
+            authorization.encode(), expected.encode()
+        ):
             raise HTTPException(status_code=401, detail="missing or invalid bearer token")
 
-    app = FastAPI(title="moneta", lifespan=lifespan, dependencies=[Depends(check_auth)])
+    # app-level dependencies don't guard /docs//openapi.json — disable them when locked
+    public = api_token is None
+    app = FastAPI(
+        title="moneta",
+        lifespan=lifespan,
+        dependencies=[Depends(check_auth)],
+        docs_url="/docs" if public else None,
+        redoc_url="/redoc" if public else None,
+        openapi_url="/openapi.json" if public else None,
+    )
 
     async def get_session() -> AsyncIterator[AsyncSession]:
         async with sessionmaker() as session:
@@ -204,6 +219,9 @@ def create_app(
         ).scalar_one_or_none()
         if series is None:
             raise HTTPException(status_code=404, detail="series not found")
+        if body.status == SeriesStatus.active and series.status != SeriesStatus.active:
+            # forward-only bump: reactivating must not resurrect ancient missed windows
+            series.next_expected_on = max(series.next_expected_on, date.today())
         series.status = body.status
         await session.commit()
         return {"ok": True}
@@ -300,6 +318,7 @@ def create_app(
         async with engine.connect() as conn:
             ac = await conn.execution_options(isolation_level="AUTOCOMMIT")
             await ac.exec_driver_sql("VACUUM INTO ?", (str(dest),))
+        dest.chmod(0o600)  # the backup is the full financial DB
         return {"path": str(dest)}
 
     @app.post("/normalize/rerun")

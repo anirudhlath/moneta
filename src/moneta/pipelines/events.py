@@ -4,21 +4,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.models import (
-    Cadence,
     EventKind,
     RecurringSeries,
     SeriesEvent,
     SeriesStatus,
     Transaction,
 )
-from moneta.pipelines.recurring import advance_expected_on
+from moneta.pipelines.recurring import GRACE_DAYS, advance_expected_on
 
-_GRACE: dict[Cadence, int] = {
-    Cadence.weekly: 3,
-    Cadence.biweekly: 4,
-    Cadence.monthly: 7,
-    Cadence.annual: 30,
-}
 _PRICE_CHANGE_THRESHOLD = 0.05
 
 
@@ -34,7 +27,7 @@ async def emit_series_events(session: AsyncSession, today: date) -> int:
         .all()
     )
     for s in series_list:
-        grace = timedelta(days=_GRACE[s.cadence])
+        grace = timedelta(days=GRACE_DAYS[s.cadence])
 
         while today > s.next_expected_on + grace:
             window_hit = (

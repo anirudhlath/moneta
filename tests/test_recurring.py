@@ -531,3 +531,43 @@ def test_advance_annual_and_fixed_cadences() -> None:
     assert advance_expected_on(date(2026, 2, 28), Cadence.annual) == date(2027, 2, 28)
     assert advance_expected_on(date(2026, 7, 1), Cadence.weekly) == date(2026, 7, 8)
     assert advance_expected_on(date(2026, 7, 1), Cadence.biweekly) == date(2026, 7, 15)
+
+
+async def test_foreign_currency_txns_never_form_series(session: AsyncSession) -> None:
+    await make_account(session, type=AccountType.checking)  # USD majority (tie → USD)
+    eur = await make_account(session, type=AccountType.checking, currency="EUR")
+    for month in (4, 5, 6):
+        await make_txn(
+            session, eur, amount_cents=-999, merchant="Spotify", posted_on=date(2026, month, 15)
+        )
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.new_series == 0 and stats.review == 0
+
+
+async def test_resumed_series_backfills_skipped_missed_windows(session: AsyncSession) -> None:
+    acct = await _seed_monthly(session, (1, 2, 3))
+    await detect_recurring(session, llm=None, today=date(2026, 3, 20))
+    s = (await _series(session))[0]
+    assert s.next_expected_on == date(2026, 4, 15)
+
+    # April's charge never arrives; the series resumes May–July before the next sync,
+    # so detection leaps next_expected_on from 4/15 to 8/15 over the empty April window
+    # (a resumed run needs 3 occurrences before cadence re-establishes — see _match_cadence)
+    await _seed_monthly(session, (5, 6, 7), acct=acct)
+    await detect_recurring(session, llm=None, today=date(2026, 7, 20))
+    missed = (
+        (await session.execute(select(SeriesEvent).where(SeriesEvent.kind == EventKind.missed)))
+        .scalars()
+        .all()
+    )
+    assert [e.occurred_on for e in missed] == [date(2026, 4, 15)]
+    assert s.next_expected_on == date(2026, 8, 15)
+
+    # idempotent: re-running detection emits nothing new
+    await detect_recurring(session, llm=None, today=date(2026, 7, 20))
+    missed = (
+        (await session.execute(select(SeriesEvent).where(SeriesEvent.kind == EventKind.missed)))
+        .scalars()
+        .all()
+    )
+    assert len(missed) == 1

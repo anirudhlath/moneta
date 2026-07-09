@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.llm import Classifier
 from moneta.models import (
+    Account,
     AccountType,
     Cadence,
     Direction,
@@ -20,7 +21,7 @@ from moneta.models import (
     SeriesStatus,
     Transaction,
 )
-from moneta.queries import classified_links
+from moneta.queries import classified_links, primary_currency
 
 CADENCE_DAYS: dict[Cadence, int] = {
     Cadence.weekly: 7,
@@ -33,6 +34,13 @@ _TOLERANCE: dict[Cadence, int] = {
     Cadence.biweekly: 3,
     Cadence.monthly: 6,
     Cadence.annual: 20,
+}
+# days around next_expected_on within which a charge counts as "on time"
+GRACE_DAYS: dict[Cadence, int] = {
+    Cadence.weekly: 3,
+    Cadence.biweekly: 4,
+    Cadence.monthly: 7,
+    Cadence.annual: 30,
 }
 _MIN_OCCURRENCES = 3
 _AMOUNT_TOLERANCE = 0.20
@@ -154,11 +162,15 @@ async def detect_recurring(
         (s.merchant, s.direction): s
         for s in (await session.execute(select(RecurringSeries))).scalars()
     }
+    # series feed power's income/fixed-cost sums, so they must be single-currency:
+    # only the primary currency's transactions can form or update a series
+    primary = await primary_currency(session)
     txns = (
         (
             await session.execute(
                 select(Transaction)
-                .where(Transaction.merchant.is_not(None))
+                .join(Account, Transaction.account_id == Account.id)
+                .where(Transaction.merchant.is_not(None), Account.currency == primary)
                 .order_by(Transaction.posted_on, Transaction.id)
             )
         )
@@ -259,6 +271,23 @@ async def detect_recurring(
                 status = SeriesStatus.active
             else:
                 status = series.status
+            if series.status == SeriesStatus.active and status == SeriesStatus.active:
+                # a resumed series leaps next_expected_on over unexamined windows here,
+                # and events.py only walks forward from the advanced value — emit misses
+                # for any empty window the leap skips (revivals deliberately don't burst)
+                grace_days = GRACE_DAYS[cadence]
+                window = series.next_expected_on
+                while window < next_on:
+                    if not any(abs((d - window).days) <= grace_days for d in dates):
+                        session.add(
+                            SeriesEvent(
+                                series_id=series.id,
+                                kind=EventKind.missed,
+                                occurred_on=window,
+                                details={"expected_on": window.isoformat()},
+                            )
+                        )
+                    window = advance_expected_on(window, cadence)
             changed = (
                 series.next_expected_on != advanced_on
                 or series.cadence != cadence

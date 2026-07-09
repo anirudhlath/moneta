@@ -246,6 +246,26 @@ def test_status_before_any_sync(tmp_path: Path, monkeypatch) -> None:  # type: i
     assert "No sync has run yet" in result.output
 
 
+def test_status_shows_in_flight_sync_as_incomplete(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def _seed() -> None:
+        from moneta.models import SyncRun
+
+        engine, sessionmaker = make_sessionmaker(f"sqlite+aiosqlite:///{tmp_path / 'moneta.db'}")
+        await init_db(engine)
+        async with sessionmaker() as session:
+            session.add(SyncRun())  # as run_sync writes it before the stages run
+            await session.commit()
+        await engine.dispose()
+
+    asyncio.run(_seed())
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert "incomplete" in result.output
+    assert "failed" not in result.output
+
+
 def test_serve_refuses_public_bind_without_token(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     _isolate(monkeypatch, tmp_path)
     import uvicorn

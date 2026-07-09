@@ -309,6 +309,9 @@ async def test_bearer_token_enforced_when_configured(
         assert (
             await c.get("/accounts", headers={"Authorization": "Bearer s3cret"})
         ).status_code == 200
+        # app-level dependencies don't cover the docs routes — they must be disabled
+        assert (await c.get("/openapi.json")).status_code == 404
+        assert (await c.get("/docs")).status_code == 404
 
 
 async def test_backup_vacuum_into(tmp_path: Path) -> None:
@@ -322,6 +325,7 @@ async def test_backup_vacuum_into(tmp_path: Path) -> None:
         assert r.status_code == 200
         assert r.json() == {"path": str(dest)}
         assert dest.exists() and dest.stat().st_size > 0
+        assert dest.stat().st_mode & 0o777 == 0o600
         assert (await c.post("/backup", json={"dest": str(dest)})).status_code == 409
     await engine.dispose()
 
@@ -348,3 +352,23 @@ async def test_resolve_unknown_review_item_is_404(client: httpx.AsyncClient) -> 
 async def test_import_vesting_malformed_csv_is_422(client: httpx.AsyncClient) -> None:
     r = await client.post("/import/vesting", json={"csv": "ticker,vested\nACME,40\n"})
     assert r.status_code == 422
+
+
+async def test_reactivating_stale_series_bumps_next_expected_forward(
+    sessionmaker: async_sessionmaker[AsyncSession], session: AsyncSession
+) -> None:
+    from moneta.models import SeriesStatus
+    from tests.factories import make_series
+
+    s = await make_series(session, status=SeriesStatus.ended, next_expected_on=date(2026, 1, 15))
+    await session.commit()
+    series_id = s.id
+
+    app = create_app(sessionmaker, adapter=None, llm=None)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        assert (
+            await c.patch(f"/recurring/{series_id}", json={"status": "active"})
+        ).status_code == 200
+        row = next(r for r in (await c.get("/recurring")).json() if r["id"] == series_id)
+    assert date.fromisoformat(row["next_expected_on"]) >= date.today()

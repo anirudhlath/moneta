@@ -51,7 +51,12 @@ def status() -> None:
     if not r:
         console.print("No sync has run yet. Run: [bold]moneta sync[/bold]")
         return
-    outcome = "[green]ok[/green]" if r["success"] else f"[red]failed[/red] — {r['error']}"
+    if r["finished_at"] is None:
+        outcome = "[yellow]incomplete[/yellow] — still running, or the process died mid-sync"
+    elif r["success"]:
+        outcome = "[green]ok[/green]"
+    else:
+        outcome = f"[red]failed[/red] — {r['error']}"
     console.print(f"Last sync: {r['started_at']} → {outcome}")
     if r["report"]:
         rep = r["report"]
