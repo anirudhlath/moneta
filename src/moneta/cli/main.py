@@ -35,6 +35,11 @@ def sync(
     )
     if report["auto_resolved"]:
         console.print(f"LLM auto-resolved {report['auto_resolved']} review item(s).")
+    verify = report["verify"]
+    if verify["verified"] or verify["flagged"]:
+        console.print(
+            f"LLM verified {verify['verified']} series; flagged {verify['flagged']} for review."
+        )
     open_reviews = request("GET", "/review")
     if open_reviews:
         console.print(f"[yellow]{len(open_reviews)} items need review:[/yellow] moneta review")
