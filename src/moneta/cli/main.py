@@ -17,9 +17,16 @@ console = Console()
 
 
 @app.command()
-def sync() -> None:
+def sync(
+    full: Annotated[
+        bool,
+        typer.Option(
+            "--full", help="Re-pull all available history (e.g. after linking a new account)."
+        ),
+    ] = False,
+) -> None:
     """Pull latest data and run all pipelines."""
-    report = request("POST", "/sync")
+    report = request("POST", "/sync", params={"full": True} if full else None)
     console.print(
         f"Synced: [bold]{report['ingest']['new_transactions']}[/bold] new transactions, "
         f"{report['transfers']['linked']} transfers linked, "

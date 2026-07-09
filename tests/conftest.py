@@ -1,3 +1,4 @@
+import os
 from collections.abc import AsyncIterator
 from datetime import date
 
@@ -6,6 +7,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from moneta.aggregator.base import Snapshot
 from moneta.db import init_db, make_sessionmaker
+
+
+@pytest.fixture(autouse=True)
+def _clean_moneta_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests must be hermetic: the developer's shell may export MONETA_* vars."""
+    for key in [k for k in os.environ if k.startswith("MONETA_")]:
+        monkeypatch.delenv(key)
 
 
 @pytest.fixture
@@ -30,3 +38,14 @@ class FakeAdapter:
 
     async def fetch(self, since: date | None = None) -> Snapshot:
         return self.snapshot
+
+
+class RecordingAdapter:
+    """Records the `since` value run_sync passes to fetch."""
+
+    def __init__(self) -> None:
+        self.since: date | None | str = "never-called"
+
+    async def fetch(self, since: date | None = None) -> Snapshot:
+        self.since = since
+        return Snapshot(accounts=[], transactions=[], holdings=[])

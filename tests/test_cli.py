@@ -1,6 +1,7 @@
 import asyncio
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 from typer.testing import CliRunner
 
@@ -37,6 +38,38 @@ def test_sync_without_setup_fails_cleanly(tmp_path: Path, monkeypatch) -> None: 
     result = runner.invoke(app, ["sync"])
     assert result.exit_code == 1
     assert "SimpleFIN" in result.output
+
+
+def test_sync_full_flag_requests_full_sync(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[tuple[str, str, Any]] = []
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        calls.append((method, path, params))
+        if path == "/sync":
+            return {
+                "ingest": {"new_transactions": 0},
+                "transfers": {"linked": 0},
+                "recurring": {"new_series": 0},
+                "events": 0,
+                "auto_resolved": 0,
+            }
+        return []
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["sync", "--full"])
+    assert result.exit_code == 0
+    full_call = calls[0]
+    assert full_call == ("POST", "/sync", {"full": True})
+    calls.clear()
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 0
+    plain_call = calls[0]
+    assert plain_call == ("POST", "/sync", None)
 
 
 def test_import_vesting(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]

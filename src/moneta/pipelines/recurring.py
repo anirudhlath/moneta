@@ -2,7 +2,7 @@ import statistics
 from datetime import date, timedelta
 
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.llm import Classifier
@@ -35,6 +35,7 @@ _TOLERANCE: dict[Cadence, int] = {
 }
 _MIN_OCCURRENCES = 3
 _AMOUNT_TOLERANCE = 0.20
+_STALE_PERIODS = 3
 # charges below this fraction of the group's median are adjustments, not occurrences
 _MINOR_FRACTION = 0.25
 # cadence-miss groups only warrant a review question when timing is bill-like,
@@ -62,13 +63,28 @@ def monthly_cents(series: RecurringSeries) -> int:
     return round(series.expected_cents * _PER_MONTH[series.cadence])
 
 
-def _match_cadence(dates: list[date]) -> Cadence | None:
+def _stale(last_seen: date, cadence: Cadence, today: date) -> bool:
+    """A series is stale once its newest occurrence is over 3 cadence periods old."""
+    return (today - last_seen).days > _STALE_PERIODS * CADENCE_DAYS[cadence]
+
+
+def _match_cadence(dates: list[date]) -> tuple[Cadence, date] | None:
+    """Best cadence and the start date of the newest run matching it.
+
+    Deep history contains breaks (pauses, resubscriptions, card reissues); judging
+    cadence on the maximal recent run keeps ancient gaps from poisoning a
+    currently-clean series.
+    """
     gaps = [(b - a).days for a, b in zip(dates, dates[1:], strict=False)]
-    med = statistics.median(gaps)
     for cadence, days in CADENCE_DAYS.items():
         tol = _TOLERANCE[cadence]
-        if abs(med - days) <= tol and all(abs(g - days) <= tol * 2 for g in gaps):
-            return cadence
+        start = len(dates) - 1
+        while start > 0 and abs(gaps[start - 1] - days) <= tol * 2:
+            start -= 1
+        if len(dates) - start < _MIN_OCCURRENCES:
+            continue
+        if abs(statistics.median(gaps[start:]) - days) <= tol:
+            return cadence, dates[start]
     return None
 
 
@@ -92,7 +108,9 @@ async def _excluded_txn_ids(session: AsyncSession) -> set[int]:
     return excluded
 
 
-async def detect_recurring(session: AsyncSession, llm: Classifier | None) -> RecurringStats:
+async def detect_recurring(
+    session: AsyncSession, llm: Classifier | None, today: date
+) -> RecurringStats:
     stats = RecurringStats()
     excluded = await _excluded_txn_ids(session)
     reviewed: set[str] = set()
@@ -120,7 +138,7 @@ async def detect_recurring(session: AsyncSession, llm: Classifier | None) -> Rec
             await session.execute(
                 select(Transaction)
                 .where(Transaction.merchant.is_not(None))
-                .order_by(Transaction.posted_on)
+                .order_by(Transaction.posted_on, Transaction.id)
             )
         )
         .scalars()
@@ -138,9 +156,15 @@ async def detect_recurring(session: AsyncSession, llm: Classifier | None) -> Rec
         significant = [t for t in group if abs(t.amount_cents) >= scale * _MINOR_FRACTION]
         if len(significant) < _MIN_OCCURRENCES:
             continue
-        dates = [t.posted_on for t in significant]
-        cadence = _match_cadence(dates)
-        amounts = [abs(t.amount_cents) for t in significant]
+        dates = sorted({t.posted_on for t in significant})  # dedup: double-posts aren't 0-day gaps
+        match = _match_cadence(dates)
+        if match is None:
+            cadence, run = None, significant
+        else:
+            # stats come from the newest cadence-run so ancient price epochs don't skew them
+            cadence, run_start = match
+            run = [t for t in significant if t.posted_on >= run_start]
+        amounts = [abs(t.amount_cents) for t in run]
         med = statistics.median(amounts)
         stable = all(abs(a - med) <= med * _AMOUNT_TOLERANCE for a in amounts)
         expected = -round(med) if direction == Direction.outflow else round(med)
@@ -171,7 +195,7 @@ async def detect_recurring(session: AsyncSession, llm: Classifier | None) -> Rec
                 await llm.classify_json(
                     _LLM_PROMPT.format(
                         merchant=merchant,
-                        rows=[(t.amount_cents, t.posted_on.isoformat()) for t in significant],
+                        rows=[(t.amount_cents, t.posted_on.isoformat()) for t in run],
                     )
                 )
                 if llm
@@ -181,6 +205,7 @@ async def detect_recurring(session: AsyncSession, llm: Classifier | None) -> Rec
                 _open_review()
                 continue
         next_on = dates[-1] + timedelta(days=CADENCE_DAYS[cadence])
+        stale = _stale(dates[-1], cadence, today)
         series = existing.get((merchant, direction))
         if series is None:
             series = RecurringSeries(
@@ -189,7 +214,7 @@ async def detect_recurring(session: AsyncSession, llm: Classifier | None) -> Rec
                 cadence=cadence,
                 expected_cents=expected,
                 next_expected_on=next_on,
-                status=SeriesStatus.active,
+                status=SeriesStatus.ended if stale else SeriesStatus.active,
             )
             session.add(series)
             await session.flush()
@@ -204,12 +229,46 @@ async def detect_recurring(session: AsyncSession, llm: Classifier | None) -> Rec
             stats.new_series += 1
         else:
             advanced_on = max(series.next_expected_on, next_on)
-            changed = series.next_expected_on != advanced_on or series.cadence != cadence
+            if stale:
+                status = SeriesStatus.ended
+            elif series.status == SeriesStatus.ended and significant[-1].series_id is None:
+                # the newest occurrence is untagged ⇒ genuinely new since the last run: an
+                # ended series (auto- or manually) that charges again at cadence revives
+                # (minor adjustments are never tagged, so they can't trigger this)
+                status = SeriesStatus.active
+            else:
+                status = series.status
+            changed = (
+                series.next_expected_on != advanced_on
+                or series.cadence != cadence
+                or series.status != status
+            )
             series.cadence = cadence
             series.next_expected_on = advanced_on
+            series.status = status
             if changed:
                 stats.updated += 1
         for t in significant:
             t.series_id = series.id
+
+    # Groups that no longer match a cadence (trailing noise, shrunk by exclusions) never
+    # reach the stale check above — sweep every still-active series by its own txns.
+    newest_rows = (
+        await session.execute(
+            select(Transaction.series_id, func.max(Transaction.posted_on))
+            .where(Transaction.series_id.is_not(None))
+            .group_by(Transaction.series_id)
+        )
+    ).all()
+    newest_by_series: dict[int | None, date] = {sid: newest for sid, newest in newest_rows}
+    for series in existing.values():
+        if series.status != SeriesStatus.active:
+            continue
+        # detect_recurring tags every occurrence it matches, so an active series always
+        # has tagged txns; without any there is no evidence to judge — leave it alone.
+        last_seen = newest_by_series.get(series.id)
+        if last_seen is not None and _stale(last_seen, series.cadence, today):
+            series.status = SeriesStatus.ended
+            stats.updated += 1
     await session.commit()
     return stats

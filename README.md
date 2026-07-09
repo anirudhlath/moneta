@@ -15,6 +15,10 @@ uv run moneta sync
 uv run moneta power
 ```
 
+The first sync pulls all history your institutions retain. `moneta sync --full`
+re-pulls everything — use it after linking a new account so its history isn't
+skipped by the incremental window.
+
 No server needed — the CLI runs the app in-process. To run a server instead:
 `uv run moneta serve`, then `export MONETA_API_URL=http://127.0.0.1:8300`.
 

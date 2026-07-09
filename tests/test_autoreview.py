@@ -121,9 +121,10 @@ async def test_confident_recurring_answer_feeds_next_detection(session: AsyncSes
     # irregular-but-bill-like: stable amounts, cadence miss (gaps 10 / 45)
     for d in (date(2026, 4, 1), date(2026, 4, 11), date(2026, 5, 26)):
         await make_txn(session, acct, amount_cents=-30000, merchant="Odd Timing Co", posted_on=d)
-    await detect_recurring(session, llm=None)  # opens the review item
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))  # opens the review item
     assert len(await _open_items(session)) == 1
     llm = ScriptedLLM({"Odd Timing Co": {"is_recurring": True, "confident": True}})
     assert await autoreview_items(session, llm) == 1
-    stats = await detect_recurring(session, llm=None)  # consumes the force map
+    # consumes the force map
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
     assert stats.new_series == 1

@@ -12,7 +12,12 @@ from moneta.config import load_settings
 console = Console()
 
 
-async def _arequest(method: str, path: str, json_body: dict[str, Any] | None) -> Any:
+async def _arequest(
+    method: str,
+    path: str,
+    json_body: dict[str, Any] | None,
+    params: dict[str, Any] | None,
+) -> Any:
     settings = load_settings()
     if settings.api_url:
         transport: httpx.AsyncBaseTransport | None = None
@@ -28,7 +33,7 @@ async def _arequest(method: str, path: str, json_body: dict[str, Any] | None) ->
         transport = httpx.ASGITransport(app=build_app())
         base_url = "http://moneta.local"
     async with httpx.AsyncClient(transport=transport, base_url=base_url, timeout=120) as client:
-        resp = await client.request(method, path, json=json_body)
+        resp = await client.request(method, path, params=params, json=json_body)
     if resp.status_code >= 400:
         detail = resp.json().get("detail", resp.text) if resp.content else resp.text
         console.print(f"[red]Error:[/red] {detail}")
@@ -36,5 +41,10 @@ async def _arequest(method: str, path: str, json_body: dict[str, Any] | None) ->
     return resp.json()
 
 
-def request(method: str, path: str, json_body: dict[str, Any] | None = None) -> Any:
-    return asyncio.run(_arequest(method, path, json_body))
+def request(
+    method: str,
+    path: str,
+    json_body: dict[str, Any] | None = None,
+    params: dict[str, Any] | None = None,
+) -> Any:
+    return asyncio.run(_arequest(method, path, json_body, params))
