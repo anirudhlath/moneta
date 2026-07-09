@@ -4,6 +4,7 @@ from decimal import Decimal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.models import AccountType, Cadence, Direction, TransferLink
+from moneta.pipelines.recurring import detect_recurring
 from moneta.views.power import power_report
 from tests.factories import make_account, make_series, make_txn
 
@@ -75,6 +76,18 @@ async def test_credit_payment_series_excluded_from_fixed(session: AsyncSession) 
     await session.flush()
     report = await power_report(session, today=date(2026, 7, 7))
     assert report.total_fixed == Decimal("0")  # CC payment series filtered out
+
+
+async def test_stale_series_never_appears_in_fixed_costs(session: AsyncSession) -> None:
+    acct = await make_account(session, type=AccountType.checking)
+    for month in (1, 2, 3):
+        await make_txn(
+            session, acct, amount_cents=-4999, merchant="Dead Gym", posted_on=date(2025, month, 15)
+        )
+    await detect_recurring(session, llm=None, today=date(2026, 7, 8))
+    report = await power_report(session, today=date(2026, 7, 8))
+    assert report.fixed_costs == []
+    assert report.total_fixed == Decimal(0)
 
 
 async def test_loan_payment_series_stays_in_fixed(session: AsyncSession) -> None:
