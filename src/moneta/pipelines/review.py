@@ -155,6 +155,18 @@ async def apply_resolution(
                 method=LinkMethod.manual if resolved_by == "manual" else LinkMethod.llm,
             )
         )
+    elif item.kind == ReviewKind.recurring_cluster and resolution.get("is_recurring") is False:
+        # detection's force map suppresses future runs; end the live series now so
+        # fixed costs stop counting it immediately instead of after the stale sweep
+        stmt = select(RecurringSeries).where(
+            RecurringSeries.merchant == item.payload.get("merchant"),
+            RecurringSeries.status == SeriesStatus.active,
+        )
+        direction = item.payload.get("direction")
+        if direction is not None:
+            stmt = stmt.where(RecurringSeries.direction == direction)
+        for series in (await session.execute(stmt)).scalars():
+            series.status = SeriesStatus.ended
     item.status = ReviewStatus.resolved
     item.resolution = {**resolution, "resolved_by": resolved_by}
 

@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.models import (
     AccountType,
+    Direction,
     MerchantAlias,
     RecurringSeries,
     ReviewItem,
@@ -16,7 +17,12 @@ from moneta.models import (
     TransferLink,
 )
 from moneta.pipelines.recurring import detect_recurring
-from moneta.pipelines.review import VerifyStats, autoreview_items, verify_series
+from moneta.pipelines.review import (
+    VerifyStats,
+    apply_resolution,
+    autoreview_items,
+    verify_series,
+)
 from tests.factories import make_account, make_series, make_txn
 
 
@@ -229,3 +235,32 @@ async def test_autoreview_skips_llm_flagged_items(session: AsyncSession) -> None
     assert await autoreview_items(session, llm) == 0
     assert llm.prompts == []  # the LLM already looked once; re-asking is circular
     assert len(await _open_items(session)) == 1
+
+
+async def test_not_recurring_resolution_ends_live_series(session: AsyncSession) -> None:
+    series = await make_series(session, merchant="Costco")
+    item = ReviewItem(
+        kind=ReviewKind.recurring_cluster,
+        question="Is 'Costco' a recurring bill?",
+        payload={"merchant": "Costco", "direction": "outflow"},
+    )
+    session.add(item)
+    await session.flush()
+    await apply_resolution(session, item, {"is_recurring": False})
+    assert series.status == SeriesStatus.ended
+    assert item.status == ReviewStatus.resolved
+
+
+async def test_not_recurring_resolution_leaves_other_direction_alone(
+    session: AsyncSession,
+) -> None:
+    series = await make_series(session, merchant="Costco", direction=Direction.inflow)
+    item = ReviewItem(
+        kind=ReviewKind.recurring_cluster,
+        question="Is 'Costco' a recurring bill?",
+        payload={"merchant": "Costco", "direction": "outflow"},
+    )
+    session.add(item)
+    await session.flush()
+    await apply_resolution(session, item, {"is_recurring": False})
+    assert series.status == SeriesStatus.active
