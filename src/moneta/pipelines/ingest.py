@@ -25,6 +25,7 @@ def infer_account_type(name: str, org_name: str) -> AccountType:
 class IngestStats(BaseModel):
     new_accounts: int = 0
     new_transactions: int = 0
+    updated_transactions: int = 0
     holdings: int = 0
 
 
@@ -54,51 +55,56 @@ async def ingest_snapshot(session: AsyncSession, snap: Snapshot) -> IngestStats:
             existing.balance_date = dto.balance_date
         acct_ids[dto.id] = existing.id
 
-    seen = {
-        (aid, tid)
-        for aid, tid in (
-            await session.execute(select(Transaction.account_id, Transaction.aggregator_id))
-        ).all()
+    existing_txns = {
+        (t.account_id, t.aggregator_id): t
+        for t in (await session.execute(select(Transaction))).scalars()
     }
     for txn in snap.transactions:
         if txn.account_id not in acct_ids:
             continue
         key = (acct_ids[txn.account_id], txn.id)
-        if key in seen:
+        row = existing_txns.get(key)
+        if row is not None:
+            # institutions re-post corrections under the same id — take the new values
+            fields = (to_cents(txn.amount), txn.posted_on, txn.description)
+            if fields != (row.amount_cents, row.posted_on, row.description):
+                row.amount_cents, row.posted_on, row.description = fields
+                row.raw = txn.raw
+                stats.updated_transactions += 1
             continue
-        seen.add(key)
-        session.add(
-            Transaction(
-                account_id=key[0],
-                aggregator_id=txn.id,
-                posted_on=txn.posted_on,
-                amount_cents=to_cents(txn.amount),
-                description=txn.description,
-                raw=txn.raw,
-            )
+        row = Transaction(
+            account_id=key[0],
+            aggregator_id=txn.id,
+            posted_on=txn.posted_on,
+            amount_cents=to_cents(txn.amount),
+            description=txn.description,
+            raw=txn.raw,
         )
+        session.add(row)
+        existing_txns[key] = row
         stats.new_transactions += 1
 
     for h in snap.holdings:
         if h.account_id not in acct_ids:
             continue
         acct_pk = acct_ids[h.account_id]
-        row = (
+        holding = (
             await session.execute(
                 select(Holding).where(Holding.account_id == acct_pk, Holding.symbol == h.symbol)
             )
         ).scalar_one_or_none()
-        if row is None:
-            row = Holding(
-                account_id=acct_pk,
-                symbol=h.symbol,
-                quantity=h.quantity,
-                market_value_cents=to_cents(h.market_value),
+        if holding is None:
+            session.add(
+                Holding(
+                    account_id=acct_pk,
+                    symbol=h.symbol,
+                    quantity=h.quantity,
+                    market_value_cents=to_cents(h.market_value),
+                )
             )
-            session.add(row)
         else:
-            row.quantity = h.quantity
-            row.market_value_cents = to_cents(h.market_value)
+            holding.quantity = h.quantity
+            holding.market_value_cents = to_cents(h.market_value)
         stats.holdings += 1
 
     await session.commit()

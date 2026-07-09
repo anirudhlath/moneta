@@ -85,3 +85,41 @@ def test_infer_account_type() -> None:
     assert infer_account_type("CarCareONE", "Synchrony Bank") == AccountType.loan
     assert infer_account_type("Individual", "Fidelity") == AccountType.brokerage
     assert infer_account_type("Mystery", "Bank") == AccountType.unknown
+
+
+async def test_resynced_txn_with_changed_fields_is_updated(session: AsyncSession) -> None:
+    acct = AccountDTO(
+        id="A-1",
+        name="Checking",
+        org_name="Chase",
+        currency="USD",
+        balance=Decimal("100.00"),
+        balance_date=date(2026, 7, 1),
+    )
+
+    def snap(amount: str, desc: str) -> Snapshot:
+        return Snapshot(
+            accounts=[acct],
+            transactions=[
+                TransactionDTO(
+                    id="T-1",
+                    account_id="A-1",
+                    posted_on=date(2026, 7, 1),
+                    amount=Decimal(amount),
+                    description=desc,
+                    raw={},
+                )
+            ],
+            holdings=[],
+        )
+
+    await ingest_snapshot(session, snap("-10.00", "COFFEE"))
+    stats = await ingest_snapshot(session, snap("-12.34", "COFFEE SHOP"))
+    assert stats.new_transactions == 0
+    assert stats.updated_transactions == 1
+    txn = (await session.execute(select(Transaction))).scalar_one()
+    assert txn.amount_cents == -1234
+    assert txn.description == "COFFEE SHOP"
+
+    stats = await ingest_snapshot(session, snap("-12.34", "COFFEE SHOP"))
+    assert stats.updated_transactions == 0  # identical re-sync is a no-op
