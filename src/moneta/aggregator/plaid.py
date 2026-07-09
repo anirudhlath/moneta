@@ -10,11 +10,16 @@ Two moneta-specific inversions (see the design spec §2):
 import asyncio
 import json
 import time
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import httpx
 from pydantic import BaseModel
+
+from moneta.aggregator.base import AccountDTO, Snapshot
+from moneta.models import AccountType
 
 _BASE_URLS = {
     "sandbox": "https://sandbox.plaid.com",
@@ -122,3 +127,62 @@ async def poll_link_result(
 async def exchange_public_token(client: PlaidClient, public_token: str) -> tuple[str, str]:
     data = await client.post("/item/public_token/exchange", {"public_token": public_token})
     return data["access_token"], data["item_id"]
+
+
+_LIABILITY_PLAID_TYPES = {"credit", "loan"}
+_PLAID_TYPE_MAP = {
+    "credit": AccountType.credit,
+    "loan": AccountType.loan,
+    "investment": AccountType.brokerage,
+}
+
+
+def _map_type(plaid_type: str, subtype: str | None) -> AccountType | None:
+    if plaid_type == "depository":
+        return AccountType.checking if subtype == "checking" else AccountType.savings
+    return _PLAID_TYPE_MAP.get(plaid_type)
+
+
+def _to_decimal(value: Any) -> Decimal:
+    return Decimal(str(value))
+
+
+def _parse_account(acct: dict[str, Any], org_name: str) -> AccountDTO:
+    balances = acct.get("balances") or {}
+    current = balances.get("current")
+    if current is None:
+        current = balances.get("available") or 0
+    balance = _to_decimal(current)
+    if acct.get("type") in _LIABILITY_PLAID_TYPES:
+        balance = -balance
+    updated = balances.get("last_updated_datetime")
+    balance_date = datetime.fromisoformat(updated).date() if updated else date.today()
+    return AccountDTO(
+        id=acct["account_id"],
+        name=acct.get("name") or acct.get("official_name") or "Account",
+        org_name=org_name,
+        currency=balances.get("iso_currency_code") or "USD",
+        balance=balance,
+        balance_date=balance_date,
+        type_hint=_map_type(acct.get("type", ""), acct.get("subtype")),
+    )
+
+
+class PlaidAdapter:
+    def __init__(self, client: PlaidClient, items: list[PlaidItem]) -> None:
+        self._client = client
+        self._items = items
+
+    async def fetch(self, since: date | None = None) -> Snapshot:
+        # `since` is deliberately ignored: /transactions/sync replays from an empty
+        # cursor every run (history capped at 730 days by the link token), and
+        # ingest dedup absorbs the overlap. See design spec §3.
+        snap = Snapshot(accounts=[], transactions=[], holdings=[])
+        for item in self._items:
+            await self._fetch_item(item, snap)
+        return snap
+
+    async def _fetch_item(self, item: PlaidItem, snap: Snapshot) -> None:
+        data = await self._client.post("/accounts/get", {"access_token": item.access_token})
+        org = (data.get("item") or {}).get("institution_name") or item.institution_name
+        snap.accounts.extend(_parse_account(a, org) for a in data.get("accounts", []))

@@ -10,6 +10,7 @@ import pytest
 
 from moneta.aggregator.base import AccountDTO, AggregatorAdapter, MergedAdapter, Snapshot
 from moneta.aggregator.plaid import (
+    PlaidAdapter,
     PlaidClient,
     PlaidError,
     PlaidItem,
@@ -20,6 +21,7 @@ from moneta.aggregator.plaid import (
     poll_link_result,
     save_items,
 )
+from moneta.models import AccountType
 
 
 def _snap(account_id: str) -> Snapshot:
@@ -207,3 +209,95 @@ async def test_exchange_public_token() -> None:
 
     client = _plaid_client(handle)
     assert await exchange_public_token(client, "public-1") == ("access-1", "it-1")
+
+
+_ACCOUNTS_PAYLOAD = {
+    "accounts": [
+        {
+            "account_id": "acc-chk",
+            "name": "Plaid Checking",
+            "official_name": "Plaid Gold Standard Checking",
+            "mask": "0000",
+            "type": "depository",
+            "subtype": "checking",
+            "balances": {
+                "current": 110.94,
+                "available": 100.0,
+                "iso_currency_code": "USD",
+                "last_updated_datetime": "2026-07-08T22:00:00Z",
+            },
+        },
+        {
+            "account_id": "acc-card",
+            "name": "Plaid Credit Card",
+            "type": "credit",
+            "subtype": "credit card",
+            "balances": {"current": 410.0, "iso_currency_code": "USD"},
+        },
+        {
+            "account_id": "acc-brok",
+            "name": "Plaid Brokerage",
+            "type": "investment",
+            "subtype": "brokerage",
+            "balances": {"current": None, "available": 320.76},
+        },
+    ],
+    "item": {"item_id": "it-1", "institution_id": "ins_3", "institution_name": "Chase"},
+}
+
+
+def _item(products: list[str] | None = None) -> PlaidItem:
+    return PlaidItem(item_id="it-1", access_token="access-1", products=products or [])
+
+
+async def test_fetch_parses_accounts() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/accounts/get"
+        return httpx.Response(200, json=_ACCOUNTS_PAYLOAD)
+
+    adapter = PlaidAdapter(_plaid_client(handle), [_item()])
+    snap = await adapter.fetch()
+    chk, card, brok = snap.accounts
+    assert chk.id == "acc-chk"
+    assert chk.name == "Plaid Checking"
+    assert chk.org_name == "Chase"
+    assert chk.balance == Decimal("110.94")
+    assert chk.balance_date == date(2026, 7, 8)
+    assert chk.type_hint == AccountType.checking
+    # liability balances negated: Plaid positive-owed -> moneta negative
+    assert card.balance == Decimal("-410.00")
+    assert card.type_hint == AccountType.credit
+    # current missing -> available fallback; investment -> brokerage
+    assert brok.balance == Decimal("320.76")
+    assert brok.type_hint == AccountType.brokerage
+    assert snap.transactions == []
+    assert snap.holdings == []
+
+
+async def test_depository_non_checking_maps_to_savings_and_other_to_none() -> None:
+    payload = {
+        "accounts": [
+            {
+                "account_id": "acc-mm",
+                "name": "Money Market",
+                "type": "depository",
+                "subtype": "money market",
+                "balances": {"current": 5.0},
+            },
+            {
+                "account_id": "acc-other",
+                "name": "Mystery",
+                "type": "other",
+                "subtype": None,
+                "balances": {"current": 5.0},
+            },
+        ],
+        "item": {"institution_name": "Bank"},
+    }
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    snap = await PlaidAdapter(_plaid_client(handle), [_item()]).fetch()
+    assert snap.accounts[0].type_hint == AccountType.savings
+    assert snap.accounts[1].type_hint is None
