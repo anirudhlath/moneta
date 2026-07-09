@@ -19,7 +19,7 @@ import httpx
 from loguru import logger
 from pydantic import BaseModel
 
-from moneta.aggregator.base import AccountDTO, Snapshot, TransactionDTO
+from moneta.aggregator.base import AccountDTO, HoldingDTO, Snapshot, TransactionDTO
 from moneta.models import AccountType
 
 _BASE_URLS = {
@@ -182,7 +182,16 @@ class PlaidAdapter:
         # ingest dedup absorbs the overlap. See design spec §3.
         snap = Snapshot(accounts=[], transactions=[], holdings=[])
         for item in self._items:
-            await self._fetch_item(item, snap)
+            try:
+                await self._fetch_item(item, snap)
+            except PlaidError as exc:
+                if exc.error_code != "ITEM_LOGIN_REQUIRED":
+                    raise
+                logger.warning(
+                    "Plaid item {} needs re-linking (run: moneta setup plaid-link): {}",
+                    item.institution_name or item.item_id,
+                    exc,
+                )
         return snap
 
     async def _fetch_item(self, item: PlaidItem, snap: Snapshot) -> None:
@@ -191,6 +200,38 @@ class PlaidAdapter:
         snap.accounts.extend(_parse_account(a, org) for a in data.get("accounts", []))
         if "transactions" in item.products:
             snap.transactions.extend(await self._fetch_transactions(item))
+        if "investments" in item.products:
+            snap.holdings.extend(await self._fetch_holdings(item))
+
+    async def _fetch_holdings(self, item: PlaidItem) -> list[HoldingDTO]:
+        try:
+            data = await self._client.post(
+                "/investments/holdings/get", {"access_token": item.access_token}
+            )
+        except PlaidError as exc:
+            if exc.error_code in ("PRODUCTS_NOT_SUPPORTED", "NO_INVESTMENT_ACCOUNTS"):
+                logger.warning(
+                    "Plaid item {}: no investment data ({})",
+                    item.institution_name or item.item_id,
+                    exc.error_code,
+                )
+                return []
+            raise
+        securities: dict[str, dict[str, Any]] = {
+            s["security_id"]: s for s in data.get("securities", [])
+        }
+        holdings: list[HoldingDTO] = []
+        for h in data.get("holdings", []):
+            sec = securities.get(h.get("security_id"), {})
+            holdings.append(
+                HoldingDTO(
+                    account_id=h["account_id"],
+                    symbol=sec.get("ticker_symbol") or sec.get("name") or "?",
+                    quantity=float(h.get("quantity", 0)),
+                    market_value=_to_decimal(h.get("institution_value") or 0),
+                )
+            )
+        return holdings
 
     async def _fetch_transactions(self, item: PlaidItem) -> list[TransactionDTO]:
         for attempt in range(_MUTATION_RETRIES):

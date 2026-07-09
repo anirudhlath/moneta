@@ -407,3 +407,95 @@ async def test_not_ready_status_is_not_fatal() -> None:
     adapter = PlaidAdapter(_plaid_client(_accounts_then_sync(pages)), [_item(["transactions"])])
     snap = await adapter.fetch()
     assert snap.transactions == []
+
+
+_HOLDINGS_PAYLOAD = {
+    "holdings": [
+        {
+            "account_id": "acc-brok",
+            "security_id": "sec-1",
+            "quantity": 10.5,
+            "institution_value": 2000.0,
+        },
+        {
+            "account_id": "acc-brok",
+            "security_id": "sec-2",
+            "quantity": 1.0,
+            "institution_value": 50.0,
+        },
+    ],
+    "securities": [
+        {"security_id": "sec-1", "ticker_symbol": "AAPL", "name": "Apple Inc"},
+        {"security_id": "sec-2", "ticker_symbol": None, "name": "Mystery Fund"},
+    ],
+}
+
+
+async def test_fetch_holdings_with_security_lookup() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/accounts/get":
+            return httpx.Response(200, json=_ACCOUNTS_PAYLOAD)
+        assert request.url.path == "/investments/holdings/get"
+        return httpx.Response(200, json=_HOLDINGS_PAYLOAD)
+
+    adapter = PlaidAdapter(_plaid_client(handle), [_item(["investments"])])
+    snap = await adapter.fetch()
+    assert [(h.symbol, h.quantity) for h in snap.holdings] == [
+        ("AAPL", 10.5),
+        ("Mystery Fund", 1.0),
+    ]
+    assert snap.holdings[0].market_value == Decimal("2000")
+    assert snap.holdings[0].account_id == "acc-brok"
+
+
+async def test_holdings_product_errors_degrade_to_empty() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/accounts/get":
+            return httpx.Response(200, json=_ACCOUNTS_PAYLOAD)
+        return httpx.Response(
+            400,
+            json={
+                "error_type": "ITEM_ERROR",
+                "error_code": "NO_INVESTMENT_ACCOUNTS",
+                "error_message": "none",
+            },
+        )
+
+    snap = await PlaidAdapter(_plaid_client(handle), [_item(["investments"])]).fetch()
+    assert snap.holdings == []
+    assert len(snap.accounts) == 3  # accounts still ingested
+
+
+async def test_item_login_required_skips_item_but_not_sync() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        token = json.loads(request.content)["access_token"]
+        if token == "access-dead":
+            return httpx.Response(
+                400,
+                json={
+                    "error_type": "ITEM_ERROR",
+                    "error_code": "ITEM_LOGIN_REQUIRED",
+                    "error_message": "re-link",
+                },
+            )
+        return httpx.Response(200, json=_ACCOUNTS_PAYLOAD)
+
+    dead = PlaidItem(item_id="it-dead", access_token="access-dead", institution_name="Old Bank")
+    alive = PlaidItem(item_id="it-1", access_token="access-1", products=[])
+    snap = await PlaidAdapter(_plaid_client(handle), [dead, alive]).fetch()
+    assert len(snap.accounts) == 3  # only the healthy item's accounts
+
+
+async def test_other_plaid_errors_propagate() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "error_type": "INVALID_INPUT",
+                "error_code": "INVALID_API_KEYS",
+                "error_message": "bad keys",
+            },
+        )
+
+    with pytest.raises(PlaidError):
+        await PlaidAdapter(_plaid_client(handle), [_item()]).fetch()
