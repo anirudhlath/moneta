@@ -4,6 +4,8 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel
 
+from moneta.models import AccountType
+
 
 class AccountDTO(BaseModel):
     id: str
@@ -12,6 +14,7 @@ class AccountDTO(BaseModel):
     currency: str
     balance: Decimal
     balance_date: date
+    type_hint: AccountType | None = None
 
 
 class TransactionDTO(BaseModel):
