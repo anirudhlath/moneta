@@ -60,3 +60,25 @@ async def test_provider_error_returns_none(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr(litellm, "acompletion", boom)
     assert await LiteLLMClassifier("openrouter/x").classify_json("prompt") is None
+
+
+async def test_trailing_prose_after_json_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        litellm,
+        "acompletion",
+        _fake_acompletion('{"is_recurring": true, "confident": true}\n\nThis is clearly a bill.'),
+    )
+    result = await LiteLLMClassifier("openrouter/x").classify_json("prompt")
+    assert result == {"is_recurring": True, "confident": True}
+
+
+async def test_leading_prose_before_json_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        litellm,
+        "acompletion",
+        _fake_acompletion(
+            'Here is my answer:\n```json\n{"merchant": "Acme"}\n```\nHope that helps!'
+        ),
+    )
+    result = await LiteLLMClassifier("openrouter/x").classify_json("prompt")
+    assert result == {"merchant": "Acme"}
