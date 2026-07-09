@@ -7,7 +7,9 @@ Two moneta-specific inversions (see the design spec §2):
   stores owed balances negative (SimpleFIN convention).
 """
 
+import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -83,3 +85,40 @@ def save_items(path: Path, items: list[PlaidItem]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps([i.model_dump() for i in items], indent=2) + "\n")
     path.chmod(0o600)
+
+
+async def create_hosted_link(
+    client: PlaidClient, products: list[str], days_requested: int = 730
+) -> tuple[str, str]:
+    payload: dict[str, Any] = {
+        "client_name": "moneta",
+        "user": {"client_user_id": "moneta"},
+        "products": products,
+        "country_codes": ["US"],
+        "language": "en",
+        "hosted_link": {},
+    }
+    if "transactions" in products:
+        payload["transactions"] = {"days_requested": days_requested}
+    data = await client.post("/link/token/create", payload)
+    return data["link_token"], data["hosted_link_url"]
+
+
+async def poll_link_result(
+    client: PlaidClient, link_token: str, timeout: float = 900.0, interval: float = 3.0
+) -> tuple[str, str]:
+    deadline = time.monotonic() + timeout
+    while True:
+        data = await client.post("/link/token/get", {"link_token": link_token})
+        for session in data.get("link_sessions", []):
+            for result in (session.get("results") or {}).get("item_add_results", []):
+                institution = result.get("institution") or {}
+                return result["public_token"], institution.get("name", "")
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Plaid Link not completed in time — re-run: moneta setup plaid-link")
+        await asyncio.sleep(interval)
+
+
+async def exchange_public_token(client: PlaidClient, public_token: str) -> tuple[str, str]:
+    data = await client.post("/item/public_token/exchange", {"public_token": public_token})
+    return data["access_token"], data["item_id"]

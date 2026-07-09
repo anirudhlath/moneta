@@ -13,8 +13,11 @@ from moneta.aggregator.plaid import (
     PlaidClient,
     PlaidError,
     PlaidItem,
+    create_hosted_link,
+    exchange_public_token,
     items_path,
     load_items,
+    poll_link_result,
     save_items,
 )
 
@@ -118,3 +121,89 @@ def test_items_roundtrip_and_permissions(tmp_path: Path) -> None:
     save_items(path, items)
     assert load_items(path) == items
     assert (path.stat().st_mode & 0o777) == 0o600
+
+
+_LINK_PENDING = {"link_token": "lt-1", "link_sessions": []}
+_LINK_DONE = {
+    "link_token": "lt-1",
+    "link_sessions": [
+        {
+            "finished_at": "2026-07-09T00:00:00Z",
+            "results": {
+                "item_add_results": [
+                    {
+                        "public_token": "public-1",
+                        "institution": {"institution_id": "ins_3", "name": "Chase"},
+                    }
+                ]
+            },
+        }
+    ],
+}
+
+
+async def test_create_hosted_link_payload_and_result() -> None:
+    seen: dict[str, Any] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "link_token": "lt-1",
+                "hosted_link_url": "https://hosted.plaid.com/link/abc",
+                "expiration": "2026-07-09T04:00:00Z",
+            },
+        )
+
+    client = _plaid_client(handle)
+    link_token, url = await create_hosted_link(client, ["transactions"])
+    assert (link_token, url) == ("lt-1", "https://hosted.plaid.com/link/abc")
+    body = seen["body"]
+    assert body["client_name"] == "moneta"
+    assert body["user"] == {"client_user_id": "moneta"}
+    assert body["products"] == ["transactions"]
+    assert body["country_codes"] == ["US"]
+    assert body["hosted_link"] == {}
+    assert body["transactions"] == {"days_requested": 730}
+
+
+async def test_create_hosted_link_omits_days_without_transactions_product() -> None:
+    seen: dict[str, Any] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"link_token": "lt", "hosted_link_url": "u"})
+
+    await create_hosted_link(_plaid_client(handle), ["investments"])
+    assert "transactions" not in seen["body"]
+
+
+async def test_poll_link_result_waits_for_completion() -> None:
+    responses = [_LINK_PENDING, _LINK_PENDING, _LINK_DONE]
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=responses.pop(0))
+
+    client = _plaid_client(handle)
+    public_token, institution = await poll_link_result(client, "lt-1", interval=0.0)
+    assert (public_token, institution) == ("public-1", "Chase")
+    assert responses == []
+
+
+async def test_poll_link_result_times_out() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_LINK_PENDING)
+
+    client = _plaid_client(handle)
+    with pytest.raises(TimeoutError):
+        await poll_link_result(client, "lt-1", timeout=0.0, interval=0.0)
+
+
+async def test_exchange_public_token() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content)["public_token"] == "public-1"
+        return httpx.Response(200, json={"access_token": "access-1", "item_id": "it-1"})
+
+    client = _plaid_client(handle)
+    assert await exchange_public_token(client, "public-1") == ("access-1", "it-1")
