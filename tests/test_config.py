@@ -28,3 +28,18 @@ def test_save_and_reload(tmp_path: Path, monkeypatch) -> None:  # type: ignore[n
 
 def test_settings_is_pydantic() -> None:
     assert issubclass(Settings, BaseSettings)
+
+
+def test_plaid_settings_default_and_override(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("MONETA_CONFIG_DIR", str(tmp_path))
+    s = load_settings()
+    assert s.plaid_client_id is None
+    assert s.plaid_secret is None
+    assert s.plaid_env == "production"
+    save_config_value("plaid_client_id", "cid")
+    save_config_value("plaid_secret", "sec")
+    save_config_value("plaid_env", "sandbox")
+    s = load_settings()
+    assert (s.plaid_client_id, s.plaid_secret, s.plaid_env) == ("cid", "sec", "sandbox")
+    monkeypatch.setenv("MONETA_PLAID_ENV", "production")
+    assert load_settings().plaid_env == "production"
