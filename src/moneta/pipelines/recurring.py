@@ -58,13 +58,24 @@ def monthly_cents(series: RecurringSeries) -> int:
     return round(series.expected_cents * _PER_MONTH[series.cadence])
 
 
-def _match_cadence(dates: list[date]) -> Cadence | None:
-    gaps = [(b - a).days for a, b in zip(dates, dates[1:], strict=False)]
-    med = statistics.median(gaps)
+def _match_cadence(dates: list[date]) -> tuple[Cadence, int] | None:
+    """Best cadence and the start index of the newest run matching it.
+
+    Deep history contains breaks (pauses, resubscriptions, card reissues); judging
+    cadence on the maximal recent run keeps ancient gaps from poisoning a
+    currently-clean series.
+    """
     for cadence, days in CADENCE_DAYS.items():
         tol = _TOLERANCE[cadence]
-        if abs(med - days) <= tol and all(abs(g - days) <= tol * 2 for g in gaps):
-            return cadence
+        start = len(dates) - 1
+        while start > 0 and abs((dates[start] - dates[start - 1]).days - days) <= tol * 2:
+            start -= 1
+        run = dates[start:]
+        if len(run) < _MIN_OCCURRENCES:
+            continue
+        gaps = [(b - a).days for a, b in zip(run, run[1:], strict=False)]
+        if abs(statistics.median(gaps) - days) <= tol:
+            return cadence, start
     return None
 
 
@@ -125,10 +136,12 @@ async def detect_recurring(
         if len(group) < _MIN_OCCURRENCES:
             continue
         dates = [t.posted_on for t in group]
-        cadence = _match_cadence(dates)
-        if cadence is None:
+        match = _match_cadence(dates)
+        if match is None:
             continue
-        amounts = [abs(t.amount_cents) for t in group]
+        cadence, start = match
+        run = group[start:]
+        amounts = [abs(t.amount_cents) for t in run]
         med = statistics.median(amounts)
         stable = all(abs(a - med) <= med * _AMOUNT_TOLERANCE for a in amounts)
         expected = -round(med) if direction == Direction.outflow else round(med)

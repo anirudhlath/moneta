@@ -352,6 +352,46 @@ async def test_backfilled_old_txns_do_not_reactivate_ended_series(
     assert s.status == SeriesStatus.ended
 
 
+async def test_historical_gap_does_not_poison_current_cadence(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    # an old run at one price, a long break, then a current run at a new price
+    for month in (1, 2, 3):
+        await make_txn(
+            session, acct, amount_cents=-1599, merchant="Netflix", posted_on=date(2025, month, 15)
+        )
+    for month in (4, 5, 6):
+        await make_txn(
+            session, acct, amount_cents=-1799, merchant="Netflix", posted_on=date(2026, month, 15)
+        )
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.new_series == 1
+    s = (await _series(session))[0]
+    assert s.status == SeriesStatus.active
+    assert s.expected_cents == -1799  # median of the current run, not the whole history
+    assert s.next_expected_on == date(2026, 7, 15)
+
+
+async def test_auto_ended_series_reactivates_when_cadence_reestablished(
+    session: AsyncSession,
+) -> None:
+    acct = await make_account(session)
+    for month in (1, 2, 3):
+        await make_txn(
+            session, acct, amount_cents=-1599, merchant="Hulu", posted_on=date(2025, month, 15)
+        )
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    s = (await _series(session))[0]
+    assert s.status == SeriesStatus.ended  # auto-ended: stale history
+    # resubscribed: three fresh occurrences re-establish the cadence
+    for day in (date(2026, 5, 1), date(2026, 6, 1), date(2026, 7, 1)):
+        await make_txn(session, acct, amount_cents=-1899, merchant="Hulu", posted_on=day)
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 2))
+    assert stats.updated == 1
+    s = (await _series(session))[0]
+    assert s.status == SeriesStatus.active
+    assert s.next_expected_on == date(2026, 7, 31)
+
+
 def test_monthly_cents_normalization() -> None:
     s = RecurringSeries(
         merchant="X",
