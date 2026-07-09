@@ -77,6 +77,22 @@ def advance_expected_on(d: date, cadence: Cadence) -> date:
             return _add_months(d, 12)
 
 
+def missed_event(series_id: int, window: date) -> SeriesEvent:
+    """The one shape of a missed-payment event — emitted here and by events.py."""
+    return SeriesEvent(
+        series_id=series_id,
+        kind=EventKind.missed,
+        occurred_on=window,
+        details={"expected_on": window.isoformat()},
+    )
+
+
+def reactivate_series(series: RecurringSeries, today: date) -> None:
+    """Forward-only bump: reactivating must not resurrect ancient missed windows."""
+    series.next_expected_on = max(series.next_expected_on, today)
+    series.status = SeriesStatus.active
+
+
 _LLM_PROMPT = """Is this group of bank transactions one recurring bill/subscription?
 Merchant: {merchant!r}; amounts (cents) and dates: {rows}
 Respond with JSON: {{"is_recurring": true/false}}"""
@@ -279,14 +295,7 @@ async def detect_recurring(
                 window = series.next_expected_on
                 while window < next_on:
                     if not any(abs((d - window).days) <= grace_days for d in dates):
-                        session.add(
-                            SeriesEvent(
-                                series_id=series.id,
-                                kind=EventKind.missed,
-                                occurred_on=window,
-                                details={"expected_on": window.isoformat()},
-                            )
-                        )
+                        session.add(missed_event(series.id, window))
                     window = advance_expected_on(window, cadence)
             changed = (
                 series.next_expected_on != advanced_on

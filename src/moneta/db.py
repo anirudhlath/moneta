@@ -1,8 +1,6 @@
 from pathlib import Path
 from typing import Any
 
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import Connection, event, inspect
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -13,6 +11,9 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import StaticPool
 
 _BASELINE = "0001"
+# newest revision in migrations/versions/ — bump alongside each new migration;
+# tests/test_migrations.py pins this against the script directory
+_HEAD = "0002"
 
 
 def make_sessionmaker(db_url: str) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
@@ -35,10 +36,18 @@ def make_sessionmaker(db_url: str) -> tuple[AsyncEngine, async_sessionmaker[Asyn
 
 
 def _upgrade(conn: Connection) -> None:
+    insp = inspect(conn)
+    if insp.has_table("alembic_version"):
+        current = conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
+        if current == _HEAD:
+            return  # common case (every CLI command) — skip the alembic machinery
+
+    from alembic import command  # deferred: only imported when migrations actually run
+    from alembic.config import Config
+
     cfg = Config()
     cfg.set_main_option("script_location", str(Path(__file__).parent / "migrations"))
     cfg.attributes["connection"] = conn
-    insp = inspect(conn)
     if insp.has_table("accounts") and not insp.has_table("alembic_version"):
         command.stamp(cfg, _BASELINE)  # adopt a pre-Alembic database at the baseline
     command.upgrade(cfg, "head")

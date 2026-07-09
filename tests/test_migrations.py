@@ -50,3 +50,16 @@ async def test_init_db_is_idempotent() -> None:
     await init_db(engine)
     await init_db(engine)
     await engine.dispose()
+
+
+def test_head_constant_matches_script_directory() -> None:
+    from pathlib import Path
+
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    import moneta.db
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(Path(moneta.db.__file__).parent / "migrations"))
+    assert ScriptDirectory.from_config(cfg).get_current_head() == moneta.db._HEAD

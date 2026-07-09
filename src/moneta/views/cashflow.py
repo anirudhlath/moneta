@@ -19,11 +19,13 @@ async def accrual_spend(
     start: date,
     end: date,
     links: list[ClassifiedLink] | None = None,
+    primary: str | None = None,
 ) -> Decimal:
     if links is None:
         links = await classified_links(session)
     excluded = linked_txn_ids(links)
-    primary = await primary_currency(session)
+    if primary is None:
+        primary = await primary_currency(session)
     txns = (
         (
             await session.execute(
@@ -50,11 +52,13 @@ async def cash_out(
     start: date,
     end: date,
     links: list[ClassifiedLink] | None = None,
+    primary: str | None = None,
 ) -> Decimal:
     if links is None:
         links = await classified_links(session)
     by_outflow = {link.outflow_id: link for link in links}
-    primary = await primary_currency(session)
+    if primary is None:
+        primary = await primary_currency(session)
     txns = (
         (
             await session.execute(

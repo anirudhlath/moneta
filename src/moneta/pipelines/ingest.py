@@ -57,7 +57,7 @@ async def ingest_snapshot(session: AsyncSession, snap: Snapshot) -> IngestStats:
             existing.balance_date = dto.balance_date
         acct_ids[dto.id] = existing.id
 
-    # comparison columns only — materializing every historical row per sync doesn't scale
+    # comparison columns as plain tuples — ORM rows are only fetched for the rare correction
     existing_txns: dict[tuple[int, str], tuple[int, int, date, str]] = {
         (aid, agg): (tid, cents, posted, desc)
         for tid, aid, agg, cents, posted, desc in (
@@ -92,7 +92,7 @@ async def ingest_snapshot(session: AsyncSession, snap: Snapshot) -> IngestStats:
                 # and detection (which run right after ingest) re-derive them
                 row.merchant = None
                 row.series_id = None
-            if (to_cents(txn.amount), txn.posted_on) != (old_cents, old_posted):
+            if fields[:2] != (old_cents, old_posted):
                 relinked_ids.add(tid)  # amount/date matches behind a TransferLink are void
             row.amount_cents, row.posted_on, row.description = fields
             row.raw = txn.raw

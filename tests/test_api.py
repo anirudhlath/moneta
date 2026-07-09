@@ -1,10 +1,12 @@
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from moneta.aggregator.base import AccountDTO, Snapshot, TransactionDTO
@@ -45,13 +47,18 @@ SNAP = Snapshot(
 )
 
 
+@asynccontextmanager
+async def _client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
 @pytest.fixture
 async def client(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> AsyncIterator[httpx.AsyncClient]:
-    app = create_app(sessionmaker, adapter=FakeAdapter(SNAP), llm=None)
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+    async with _client(create_app(sessionmaker, adapter=FakeAdapter(SNAP), llm=None)) as c:
         yield c
 
 
@@ -97,9 +104,7 @@ async def test_sync_full_param_forces_epoch_pull(
     await make_txn(session, acct, posted_on=date(2026, 7, 5))
     await session.commit()
     adapter = RecordingAdapter()
-    app = create_app(sessionmaker, adapter=adapter, llm=None)
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+    async with _client(create_app(sessionmaker, adapter=adapter, llm=None)) as c:
         assert (await c.post("/sync")).status_code == 200
         assert adapter.since == date(2026, 7, 5) - timedelta(days=RESYNC_OVERLAP_DAYS)
         assert (await c.post("/sync", params={"full": "true"})).status_code == 200
@@ -109,9 +114,7 @@ async def test_sync_full_param_forces_epoch_pull(
 async def test_sync_without_adapter_is_400(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    app = create_app(sessionmaker, adapter=None, llm=None)
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+    async with _client(create_app(sessionmaker, adapter=None, llm=None)) as c:
         r = await c.post("/sync")
         assert r.status_code == 400
         assert "SimpleFIN" in r.json()["detail"]
@@ -266,10 +269,7 @@ async def test_review_context_enrichment(
         )
         await session.commit()
 
-    app = create_app(sessionmaker, adapter=None, llm=None)
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with _client(create_app(sessionmaker, adapter=None, llm=None)) as client:
         items = (await client.get("/review")).json()
 
     tp = next(i for i in items if i["kind"] == "transfer_pair")
@@ -299,9 +299,7 @@ async def test_sync_last_endpoint(client: httpx.AsyncClient) -> None:
 async def test_bearer_token_enforced_when_configured(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    app = create_app(sessionmaker, adapter=None, llm=None, api_token="s3cret")
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+    async with _client(create_app(sessionmaker, adapter=None, llm=None, api_token="s3cret")) as c:
         assert (await c.get("/accounts")).status_code == 401
         assert (
             await c.get("/accounts", headers={"Authorization": "Bearer wrong"})
@@ -317,10 +315,8 @@ async def test_bearer_token_enforced_when_configured(
 async def test_backup_vacuum_into(tmp_path: Path) -> None:
     engine, sm = make_sessionmaker(f"sqlite+aiosqlite:///{tmp_path / 'm.db'}")
     await init_db(engine)
-    app = create_app(sm, adapter=None, llm=None, engine=engine)
-    transport = httpx.ASGITransport(app=app)
     dest = tmp_path / "out.db"
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+    async with _client(create_app(sm, adapter=None, llm=None, engine=engine)) as c:
         r = await c.post("/backup", json={"dest": str(dest)})
         assert r.status_code == 200
         assert r.json() == {"path": str(dest)}
@@ -333,9 +329,8 @@ async def test_backup_vacuum_into(tmp_path: Path) -> None:
 async def test_backup_requires_file_backed_db(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    app = create_app(sessionmaker, adapter=None, llm=None)  # no engine → nothing to back up
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+    # no engine → nothing to back up
+    async with _client(create_app(sessionmaker, adapter=None, llm=None)) as c:
         assert (await c.post("/backup", json={})).status_code == 400
 
 
@@ -364,9 +359,7 @@ async def test_reactivating_stale_series_bumps_next_expected_forward(
     await session.commit()
     series_id = s.id
 
-    app = create_app(sessionmaker, adapter=None, llm=None)
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+    async with _client(create_app(sessionmaker, adapter=None, llm=None)) as c:
         assert (
             await c.patch(f"/recurring/{series_id}", json={"status": "active"})
         ).status_code == 200

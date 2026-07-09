@@ -15,6 +15,20 @@ def _config_dir() -> Path:
     return Path.home() / ".config" / "moneta"
 
 
+def ensure_private_dir(path: Path) -> Path:
+    """Everything under the config dir is financial data — owner-only (0700)."""
+    path.mkdir(parents=True, exist_ok=True)
+    path.chmod(0o700)
+    return path
+
+
+def make_private(file: Path) -> Path:
+    """Owner-only (0600) file — credentials, database snapshots, logs."""
+    file.touch(mode=0o600, exist_ok=True)
+    file.chmod(0o600)
+    return file
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="MONETA_", extra="ignore")
 
@@ -44,12 +58,7 @@ def load_settings() -> Settings:
 
 
 def save_config_value(key: str, value: str) -> None:
-    config_dir = _config_dir()
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config_dir.chmod(0o700)  # the config file holds bank credentials
-    path = config_dir / "config.toml"
+    config_dir = ensure_private_dir(_config_dir())  # the config file holds bank credentials
     values = _read_config_file(config_dir)
     values[key] = value
-    path.touch(mode=0o600, exist_ok=True)
-    path.write_text(tomli_w.dumps(values))
-    path.chmod(0o600)
+    make_private(config_dir / "config.toml").write_text(tomli_w.dumps(values))

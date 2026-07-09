@@ -10,7 +10,7 @@ from moneta.models import (
     SeriesStatus,
     Transaction,
 )
-from moneta.pipelines.recurring import GRACE_DAYS, advance_expected_on
+from moneta.pipelines.recurring import GRACE_DAYS, advance_expected_on, missed_event
 
 _PRICE_CHANGE_THRESHOLD = 0.05
 
@@ -42,14 +42,7 @@ async def emit_series_events(session: AsyncSession, today: date) -> int:
                 )
             ).scalar_one_or_none()
             if window_hit is None:
-                session.add(
-                    SeriesEvent(
-                        series_id=s.id,
-                        kind=EventKind.missed,
-                        occurred_on=s.next_expected_on,
-                        details={"expected_on": s.next_expected_on.isoformat()},
-                    )
-                )
+                session.add(missed_event(s.id, s.next_expected_on))
                 emitted += 1
             s.next_expected_on = advance_expected_on(s.next_expected_on, s.cadence)
 

@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from moneta.aggregator.base import AggregatorAdapter
 from moneta.aggregator.simplefin import SimpleFINAdapter
-from moneta.config import load_settings
+from moneta.config import load_settings, make_private
 from moneta.db import init_db, make_sessionmaker
 from moneta.llm import Classifier, build_classifier
 from moneta.logs import configure_logging
@@ -29,9 +29,10 @@ from moneta.models import (
     SyncRun,
 )
 from moneta.pipelines.normalize import renormalize_merchants
+from moneta.pipelines.recurring import reactivate_series
 from moneta.pipelines.review import apply_resolution, review_context
 from moneta.pipelines.run import SyncReport, run_sync
-from moneta.queries import classified_links
+from moneta.queries import classified_links, primary_currency
 from moneta.vesting import apply_vesting, parse_vesting_csv
 from moneta.views.cashflow import accrual_spend, cash_out
 from moneta.views.financing import Obligation, compute_obligations
@@ -186,11 +187,14 @@ def create_app(
         range_start = start or today.replace(day=1)
         range_end = end or today
         links = await classified_links(session)
+        primary = await primary_currency(session)
         return CashflowReport(
             start=range_start,
             end=range_end,
-            accrual=await accrual_spend(session, range_start, range_end, links=links),
-            cash_out=await cash_out(session, range_start, range_end, links=links),
+            accrual=await accrual_spend(
+                session, range_start, range_end, links=links, primary=primary
+            ),
+            cash_out=await cash_out(session, range_start, range_end, links=links, primary=primary),
         )
 
     @app.get("/recurring")
@@ -220,9 +224,9 @@ def create_app(
         if series is None:
             raise HTTPException(status_code=404, detail="series not found")
         if body.status == SeriesStatus.active and series.status != SeriesStatus.active:
-            # forward-only bump: reactivating must not resurrect ancient missed windows
-            series.next_expected_on = max(series.next_expected_on, date.today())
-        series.status = body.status
+            reactivate_series(series, today=date.today())
+        else:
+            series.status = body.status
         await session.commit()
         return {"ok": True}
 
@@ -305,8 +309,10 @@ def create_app(
 
     @app.post("/backup")
     async def backup(body: BackupIn) -> dict[str, str]:
-        db_file = engine.url.database if engine is not None else None
-        if engine is None or not db_file or db_file == ":memory:":
+        if engine is None:
+            raise HTTPException(status_code=400, detail="backup requires a file-backed database")
+        db_file = engine.url.database
+        if not db_file or db_file == ":memory:":
             raise HTTPException(status_code=400, detail="backup requires a file-backed database")
         dest = (
             Path(body.dest).expanduser()
@@ -318,7 +324,7 @@ def create_app(
         async with engine.connect() as conn:
             ac = await conn.execution_options(isolation_level="AUTOCOMMIT")
             await ac.exec_driver_sql("VACUUM INTO ?", (str(dest),))
-        dest.chmod(0o600)  # the backup is the full financial DB
+        make_private(dest)  # the backup is the full financial DB
         return {"path": str(dest)}
 
     @app.post("/normalize/rerun")
