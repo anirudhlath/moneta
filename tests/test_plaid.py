@@ -301,3 +301,109 @@ async def test_depository_non_checking_maps_to_savings_and_other_to_none() -> No
     snap = await PlaidAdapter(_plaid_client(handle), [_item()]).fetch()
     assert snap.accounts[0].type_hint == AccountType.savings
     assert snap.accounts[1].type_hint is None
+
+
+def _txn(txn_id: str, amount: float, pending: bool = False) -> dict[str, Any]:
+    return {
+        "transaction_id": txn_id,
+        "account_id": "acc-chk",
+        "amount": amount,
+        "iso_currency_code": "USD",
+        "date": "2026-07-01",
+        "name": f"RAW DESCRIPTOR {txn_id}",
+        "merchant_name": "Clean Name",
+        "pending": pending,
+    }
+
+
+def _sync_page(
+    added: list[dict[str, Any]], has_more: bool, status: str = "HISTORICAL_UPDATE_COMPLETE"
+) -> dict[str, Any]:
+    return {
+        "added": added,
+        "modified": [],
+        "removed": [],
+        "next_cursor": "cur-next",
+        "has_more": has_more,
+        "transactions_update_status": status,
+    }
+
+
+def _accounts_then_sync(
+    sync_responses: list[httpx.Response],
+) -> Callable[[httpx.Request], httpx.Response]:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/accounts/get":
+            return httpx.Response(200, json=_ACCOUNTS_PAYLOAD)
+        assert request.url.path == "/transactions/sync"
+        return sync_responses.pop(0)
+
+    return handle
+
+
+async def test_fetch_transactions_paginates_negates_and_skips_pending() -> None:
+    pages = [
+        httpx.Response(
+            200, json=_sync_page([_txn("t1", 12.5), _txn("t2", 3.0, pending=True)], True)
+        ),
+        httpx.Response(200, json=_sync_page([_txn("t3", -1000.0)], False)),
+    ]
+    cursors: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/accounts/get":
+            return httpx.Response(200, json=_ACCOUNTS_PAYLOAD)
+        body = json.loads(request.content)
+        cursors.append(body["cursor"])
+        assert body["count"] == 500
+        return pages.pop(0)
+
+    adapter = PlaidAdapter(_plaid_client(handle), [_item(["transactions"])])
+    snap = await adapter.fetch()
+    assert [t.id for t in snap.transactions] == ["t1", "t3"]
+    # Plaid positive = outflow -> moneta negative; deposits flip positive
+    assert snap.transactions[0].amount == Decimal("-12.5")
+    assert snap.transactions[1].amount == Decimal("1000")
+    assert snap.transactions[0].description == "RAW DESCRIPTOR t1"
+    assert snap.transactions[0].posted_on == date(2026, 7, 1)
+    assert snap.transactions[0].raw["merchant_name"] == "Clean Name"
+    assert cursors == ["", "cur-next"]
+
+
+def _mutation_error() -> httpx.Response:
+    return httpx.Response(
+        400,
+        json={
+            "error_type": "TRANSACTIONS_ERROR",
+            "error_code": "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION",
+            "error_message": "restart pagination",
+        },
+    )
+
+
+async def test_mutation_during_pagination_restarts_cleanly() -> None:
+    pages = [
+        httpx.Response(200, json=_sync_page([_txn("t1", 1.0)], True)),
+        _mutation_error(),
+        httpx.Response(200, json=_sync_page([_txn("t1", 1.0)], True)),
+        httpx.Response(200, json=_sync_page([_txn("t2", 2.0)], False)),
+    ]
+    adapter = PlaidAdapter(_plaid_client(_accounts_then_sync(pages)), [_item(["transactions"])])
+    snap = await adapter.fetch()
+    # restart discarded the partial first attempt: no duplicate t1
+    assert [t.id for t in snap.transactions] == ["t1", "t2"]
+
+
+async def test_mutation_forever_raises_after_bounded_retries() -> None:
+    pages = [_mutation_error(), _mutation_error(), _mutation_error()]
+    adapter = PlaidAdapter(_plaid_client(_accounts_then_sync(pages)), [_item(["transactions"])])
+    with pytest.raises(PlaidError):
+        await adapter.fetch()
+    assert pages == []
+
+
+async def test_not_ready_status_is_not_fatal() -> None:
+    pages = [httpx.Response(200, json=_sync_page([], False, status="NOT_READY"))]
+    adapter = PlaidAdapter(_plaid_client(_accounts_then_sync(pages)), [_item(["transactions"])])
+    snap = await adapter.fetch()
+    assert snap.transactions == []

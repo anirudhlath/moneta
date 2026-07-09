@@ -16,9 +16,10 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from loguru import logger
 from pydantic import BaseModel
 
-from moneta.aggregator.base import AccountDTO, Snapshot
+from moneta.aggregator.base import AccountDTO, Snapshot, TransactionDTO
 from moneta.models import AccountType
 
 _BASE_URLS = {
@@ -129,6 +130,8 @@ async def exchange_public_token(client: PlaidClient, public_token: str) -> tuple
     return data["access_token"], data["item_id"]
 
 
+_SYNC_PAGE_SIZE = 500
+_MUTATION_RETRIES = 3
 _LIABILITY_PLAID_TYPES = {"credit", "loan"}
 _PLAID_TYPE_MAP = {
     "credit": AccountType.credit,
@@ -186,3 +189,47 @@ class PlaidAdapter:
         data = await self._client.post("/accounts/get", {"access_token": item.access_token})
         org = (data.get("item") or {}).get("institution_name") or item.institution_name
         snap.accounts.extend(_parse_account(a, org) for a in data.get("accounts", []))
+        if "transactions" in item.products:
+            snap.transactions.extend(await self._fetch_transactions(item))
+
+    async def _fetch_transactions(self, item: PlaidItem) -> list[TransactionDTO]:
+        for attempt in range(_MUTATION_RETRIES):
+            try:
+                return await self._sync_pages(item)
+            except PlaidError as exc:
+                retryable = exc.error_code == "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION"
+                if not retryable or attempt == _MUTATION_RETRIES - 1:
+                    raise
+        raise AssertionError("unreachable")
+
+    async def _sync_pages(self, item: PlaidItem) -> list[TransactionDTO]:
+        txns: list[TransactionDTO] = []
+        cursor = ""
+        while True:
+            data = await self._client.post(
+                "/transactions/sync",
+                {"access_token": item.access_token, "cursor": cursor, "count": _SYNC_PAGE_SIZE},
+            )
+            for txn in data.get("added", []):
+                if txn.get("pending"):
+                    continue
+                txns.append(
+                    TransactionDTO(
+                        id=txn["transaction_id"],
+                        account_id=txn["account_id"],
+                        posted_on=date.fromisoformat(txn["date"]),
+                        # Plaid: positive = money out; moneta: negative = outflow
+                        amount=-_to_decimal(txn["amount"]),
+                        description=txn.get("name") or "",
+                        raw=txn,
+                    )
+                )
+            cursor = data.get("next_cursor", "")
+            if not data.get("has_more"):
+                break
+        if data.get("transactions_update_status") == "NOT_READY":
+            logger.info(
+                "Plaid item {}: transaction history still preparing; next sync picks it up",
+                item.institution_name or item.item_id,
+            )
+        return txns
