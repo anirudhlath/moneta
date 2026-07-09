@@ -1,9 +1,17 @@
 """LLM boundary. Classification only — never arithmetic, never the money path."""
 
 import json
+import re
 from typing import Any, Protocol
 
 from loguru import logger
+
+# Some providers (notably OpenRouter routes) ignore response_format and fence the JSON.
+_FENCE = re.compile(r"^```[a-z]*\s*|\s*```$")
+
+
+def _strip_fences(text: str) -> str:
+    return _FENCE.sub("", text.strip())
 
 
 class Classifier(Protocol):
@@ -25,7 +33,7 @@ class LiteLLMClassifier:
                 temperature=0,
             )
             content = resp.choices[0].message.content
-            result: dict[str, Any] = json.loads(content)
+            result: dict[str, Any] = json.loads(_strip_fences(content))
             return result
         except Exception as exc:  # noqa: BLE001 — degrade to review queue, never crash sync
             logger.warning("LLM classification failed: {}", exc)
