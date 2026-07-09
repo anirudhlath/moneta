@@ -12,6 +12,7 @@ from moneta.models import (
     Holding,
     from_cents,
 )
+from moneta.queries import primary_currency
 
 
 class NetWorthReport(BaseModel):
@@ -21,17 +22,31 @@ class NetWorthReport(BaseModel):
     net_worth: Decimal
     unvested_potential: Decimal
     unknown_accounts: int
+    foreign_accounts: int
 
 
 async def net_worth_report(session: AsyncSession) -> NetWorthReport:
+    primary = await primary_currency(session)
     accounts = (await session.execute(select(Account))).scalars().all()
-    liquid = sum(a.balance_cents for a in accounts if a.type in LIQUID_ACCOUNT_TYPES)
-    liabilities = sum(abs(a.balance_cents) for a in accounts if a.type in LIABILITY_ACCOUNT_TYPES)
-    unknown = sum(1 for a in accounts if a.type == AccountType.unknown)
+    domestic = [a for a in accounts if a.currency == primary]
+    liquid = sum(a.balance_cents for a in domestic if a.type in LIQUID_ACCOUNT_TYPES)
+    liabilities = sum(abs(a.balance_cents) for a in domestic if a.type in LIABILITY_ACCOUNT_TYPES)
+    unknown = sum(1 for a in domestic if a.type == AccountType.unknown)
 
     vested_cents = 0
     unvested_cents = 0
-    for h in (await session.execute(select(Holding))).scalars():
+    holdings = (
+        (
+            await session.execute(
+                select(Holding)
+                .join(Account, Holding.account_id == Account.id)
+                .where(Account.currency == primary)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for h in holdings:
         if h.vested_quantity is None or h.quantity <= 0:
             vested_cents += h.market_value_cents
             continue
@@ -47,4 +62,5 @@ async def net_worth_report(session: AsyncSession) -> NetWorthReport:
         net_worth=from_cents(liquid + vested_cents - liabilities),
         unvested_potential=from_cents(unvested_cents),
         unknown_accounts=unknown,
+        foreign_accounts=len(accounts) - len(domestic),
     )

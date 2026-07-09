@@ -61,3 +61,11 @@ async def test_vested_fraction_over_one_is_clamped(session: AsyncSession) -> Non
     r = await net_worth_report(session)
     assert r.vested_holdings == Decimal("10000")  # clamped to full market value, not 15000
     assert r.net_worth == Decimal("10000")
+
+
+async def test_foreign_currency_accounts_excluded(session: AsyncSession) -> None:
+    await make_account(session, type=AccountType.checking, balance_cents=100_000)
+    await make_account(session, type=AccountType.checking, balance_cents=55_500, currency="EUR")
+    r = await net_worth_report(session)
+    assert r.liquid == Decimal("1000.00")
+    assert r.foreign_accounts == 1

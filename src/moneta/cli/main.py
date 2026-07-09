@@ -75,6 +75,11 @@ def networth() -> None:
             f"[yellow]{r['unknown_accounts']} account(s) have unknown type and are "
             f"excluded — fix with: moneta accounts --set-type ID TYPE[/yellow]"
         )
+    if r["foreign_accounts"]:
+        console.print(
+            f"[yellow]{r['foreign_accounts']} account(s) in a non-primary currency are "
+            f"excluded from these totals[/yellow]"
+        )
 
 
 @app.command()

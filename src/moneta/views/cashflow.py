@@ -11,7 +11,7 @@ from moneta.models import (
     Transaction,
     from_cents,
 )
-from moneta.queries import ClassifiedLink, classified_links, linked_txn_ids
+from moneta.queries import ClassifiedLink, classified_links, linked_txn_ids, primary_currency
 
 
 async def accrual_spend(
@@ -23,6 +23,7 @@ async def accrual_spend(
     if links is None:
         links = await classified_links(session)
     excluded = linked_txn_ids(links)
+    primary = await primary_currency(session)
     txns = (
         (
             await session.execute(
@@ -33,6 +34,7 @@ async def accrual_spend(
                     Transaction.posted_on >= start,
                     Transaction.posted_on <= end,
                     Account.type.in_(SPEND_ACCOUNT_TYPES),
+                    Account.currency == primary,
                 )
             )
         )
@@ -52,6 +54,7 @@ async def cash_out(
     if links is None:
         links = await classified_links(session)
     by_outflow = {link.outflow_id: link for link in links}
+    primary = await primary_currency(session)
     txns = (
         (
             await session.execute(
@@ -62,6 +65,7 @@ async def cash_out(
                     Transaction.posted_on >= start,
                     Transaction.posted_on <= end,
                     Account.type.in_(LIQUID_ACCOUNT_TYPES),
+                    Account.currency == primary,
                 )
             )
         )
