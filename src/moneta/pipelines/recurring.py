@@ -37,6 +37,9 @@ _MIN_OCCURRENCES = 3
 _AMOUNT_TOLERANCE = 0.20
 # charges below this fraction of the group's median are adjustments, not occurrences
 _MINOR_FRACTION = 0.25
+# cadence-miss groups only warrant a review question when timing is bill-like,
+# not habitual spending (coffee, rideshare) with sub-weekly bursts
+_MIN_REVIEW_GAP_DAYS = 10
 _PER_MONTH: dict[Cadence, float] = {
     Cadence.weekly: 52 / 12,
     Cadence.biweekly: 26 / 12,
@@ -69,9 +72,13 @@ def _match_cadence(dates: list[date]) -> Cadence | None:
     return None
 
 
-def _closest_cadence(dates: list[date]) -> Cadence:
+def _median_gap(dates: list[date]) -> float:
     gaps = [(b - a).days for a, b in zip(dates, dates[1:], strict=False)]
-    med = statistics.median(gaps)
+    return float(statistics.median(gaps))
+
+
+def _closest_cadence(dates: list[date]) -> Cadence:
+    med = _median_gap(dates)
     return min(CADENCE_DAYS, key=lambda c: abs(CADENCE_DAYS[c] - med))
 
 
@@ -154,7 +161,9 @@ async def detect_recurring(session: AsyncSession, llm: Classifier | None) -> Rec
 
         if cadence is None:
             if forced is not True:  # irregular timing needs a human, not the LLM
-                _open_review()
+                # only ask when it plausibly IS a bill: steady amounts at bill-like intervals
+                if stable and _median_gap(dates) >= _MIN_REVIEW_GAP_DAYS:
+                    _open_review()
                 continue
             cadence = _closest_cadence(dates)
         elif not stable and forced is not True:
