@@ -193,6 +193,17 @@ async def detect_recurring(
         .scalars()
         .all()
     )
+    # a description correction can re-derive a txn's merchant away from the series it
+    # was tagged to — untag it so the old series doesn't keep stale occurrences and the
+    # new group sees it; same-merchant corrections stay tagged (so they never look
+    # "genuinely new" to the ended-series revival check below)
+    series_by_id = {s.id: s for s in existing.values()}
+    for t in txns:
+        if t.series_id is not None:
+            owner = series_by_id.get(t.series_id)
+            if owner is not None and owner.merchant != t.merchant:
+                t.series_id = None
+
     groups: dict[tuple[str, Direction], list[Transaction]] = {}
     for t in txns:
         if t.id in excluded or t.merchant is None:
@@ -290,10 +301,12 @@ async def detect_recurring(
             if series.status == SeriesStatus.active and status == SeriesStatus.active:
                 # a resumed series leaps next_expected_on over unexamined windows here,
                 # and events.py only walks forward from the advanced value — emit misses
-                # for any empty window the leap skips (revivals deliberately don't burst)
+                # for any empty window the leap skips (revivals deliberately don't burst).
+                # bound at the newest charge: windows past it were re-anchored by that
+                # charge and belong to events.py's future-guarded loop, not this one
                 grace_days = GRACE_DAYS[cadence]
                 window = series.next_expected_on
-                while window < next_on:
+                while window < dates[-1]:
                     if not any(abs((d - window).days) <= grace_days for d in dates):
                         session.add(missed_event(series.id, window))
                     window = advance_expected_on(window, cadence)

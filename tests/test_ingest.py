@@ -125,8 +125,9 @@ async def test_resynced_txn_with_changed_fields_is_updated(session: AsyncSession
     assert stats.updated_transactions == 0  # identical re-sync is a no-op
 
 
-async def test_description_correction_clears_merchant_and_series(session: AsyncSession) -> None:
+async def test_description_correction_clears_merchant_keeps_series(session: AsyncSession) -> None:
     from moneta.pipelines.normalize import normalize_merchants
+    from tests.factories import make_series
 
     acct = AccountDTO(
         id="A-1",
@@ -157,11 +158,14 @@ async def test_description_correction_clears_merchant_and_series(session: AsyncS
     await normalize_merchants(session, llm=None)
     txn = (await session.execute(select(Transaction))).scalar_one()
     assert txn.merchant == "Netflix.Com"
-    txn.series_id = None  # (no real series needed — just pin the clearing behavior)
+    series = await make_series(session, merchant="Netflix.Com")
+    txn.series_id = series.id
+    await session.commit()
 
     await ingest_snapshot(session, snap("SPOTIFY USA"))
     txn = (await session.execute(select(Transaction))).scalar_one()
     assert txn.merchant is None  # stale merchant cleared; normalize re-derives next
+    assert txn.series_id == series.id  # untagging is detection's call, not ingest's
     await normalize_merchants(session, llm=None)
     await session.refresh(txn)
     assert txn.merchant == "Spotify Usa"

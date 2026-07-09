@@ -36,7 +36,11 @@ async def _arequest(
     async with httpx.AsyncClient(transport=transport, base_url=base_url, timeout=120) as client:
         resp = await client.request(method, path, params=params, json=json_body, headers=headers)
     if resp.status_code >= 400:
-        detail = resp.json().get("detail", resp.text) if resp.content else resp.text
+        try:  # proxies and unhandled 500s return plaintext/HTML, not FastAPI's JSON
+            body = resp.json()
+            detail = body.get("detail", resp.text) if isinstance(body, dict) else resp.text
+        except ValueError:
+            detail = resp.text
         console.print(f"[red]Error:[/red] {detail}")
         raise typer.Exit(1)
     return resp.json()

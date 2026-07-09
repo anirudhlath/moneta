@@ -51,12 +51,11 @@ def status() -> None:
     if not r:
         console.print("No sync has run yet. Run: [bold]moneta sync[/bold]")
         return
-    if r["finished_at"] is None:
-        outcome = "[yellow]incomplete[/yellow] — still running, or the process died mid-sync"
-    elif r["success"]:
-        outcome = "[green]ok[/green]"
-    else:
-        outcome = f"[red]failed[/red] — {r['error']}"
+    outcome = {
+        "ok": "[green]ok[/green]",
+        "failed": f"[red]failed[/red] — {r['error']}",
+        "incomplete": "[yellow]incomplete[/yellow] — still running, or the process died mid-sync",
+    }[r["status"]]
     console.print(f"Last sync: {r['started_at']} → {outcome}")
     if r["report"]:
         rep = r["report"]
@@ -97,7 +96,7 @@ def networth() -> None:
             f"[yellow]{r['unknown_accounts']} account(s) have unknown type and are "
             f"excluded — fix with: moneta accounts --set-type ID TYPE[/yellow]"
         )
-    if r["foreign_accounts"]:
+    if r.get("foreign_accounts"):  # .get: tolerate an older server in remote mode
         console.print(
             f"[yellow]{r['foreign_accounts']} account(s) in a non-primary currency are "
             f"excluded from these totals[/yellow]"

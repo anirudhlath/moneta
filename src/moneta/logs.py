@@ -7,14 +7,16 @@ from loguru import logger
 
 from moneta.config import ensure_private_dir, make_private
 
-_configured = False
+_configured_dir: Path | None = None
 
 
 def configure_logging(config_dir: Path) -> None:
-    global _configured
-    if _configured:  # build_app runs once per server but per-command in-process
+    """Idempotent per directory: build_app runs once per server but per-command
+    in-process, and tests point each case at a fresh config dir."""
+    global _configured_dir
+    if _configured_dir == config_dir:
         return
-    _configured = True
+    _configured_dir = config_dir
     log_file = make_private(ensure_private_dir(config_dir) / "moneta.log")
     logger.remove()
     logger.add(sys.stderr, level="WARNING")

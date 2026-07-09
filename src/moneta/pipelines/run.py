@@ -47,7 +47,7 @@ async def run_sync(
     today: date,
     full: bool = False,
 ) -> SyncReport:
-    run = SyncRun(started_at=datetime.now())
+    run = SyncRun()
     session.add(run)
     await session.commit()
     try:

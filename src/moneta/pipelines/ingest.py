@@ -88,10 +88,12 @@ async def ingest_snapshot(session: AsyncSession, snap: Snapshot) -> IngestStats:
                 continue
             row = await session.get_one(Transaction, tid)
             if txn.description != old_desc:
-                # merchant/series derive from the description — clear so normalize
-                # and detection (which run right after ingest) re-derive them
+                # the merchant derives from the description — clear it so normalize
+                # (which runs right after ingest) re-derives it. series_id stays:
+                # detection untags only if the re-derived merchant actually moved,
+                # so a same-merchant correction can't fake a "genuinely new" txn
+                # and revive an ended series
                 row.merchant = None
-                row.series_id = None
             if fields[:2] != (old_cents, old_posted):
                 relinked_ids.add(tid)  # amount/date matches behind a TransferLink are void
             row.amount_cents, row.posted_on, row.description = fields

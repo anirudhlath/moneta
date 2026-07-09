@@ -175,7 +175,9 @@ class SyncRun(Base):
     __tablename__ = "sync_runs"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    # naive local time, matching the app's local-calendar-day convention; a server
+    # default would be CURRENT_TIMESTAMP (UTC) and silently mix the two
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     success: Mapped[bool] = mapped_column(default=False)
     error: Mapped[str | None] = mapped_column(default=None)

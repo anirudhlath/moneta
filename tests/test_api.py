@@ -292,6 +292,7 @@ async def test_sync_last_endpoint(client: httpx.AsyncClient) -> None:
     assert (await client.get("/sync/last")).json() is None
     await client.post("/sync")
     body = (await client.get("/sync/last")).json()
+    assert body["status"] == "ok"
     assert body["success"] is True
     assert body["report"]["ingest"]["new_transactions"] == 3
 

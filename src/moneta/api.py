@@ -1,10 +1,11 @@
+import os
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
@@ -101,6 +102,7 @@ class CashflowReport(BaseModel):
 
 
 class SyncRunOut(BaseModel):
+    status: Literal["ok", "failed", "incomplete"]
     started_at: datetime
     finished_at: datetime | None
     success: bool
@@ -165,7 +167,22 @@ def create_app(
         row = (
             await session.execute(select(SyncRun).order_by(SyncRun.id.desc()).limit(1))
         ).scalar_one_or_none()
-        return SyncRunOut.model_validate(row, from_attributes=True) if row else None
+        if row is None:
+            return None
+        # the outcome rule lives here, not in each consumer: an unfinished row means
+        # the sync is still running or the process died mid-sync
+        if row.finished_at is None:
+            status: Literal["ok", "failed", "incomplete"] = "incomplete"
+        else:
+            status = "ok" if row.success else "failed"
+        return SyncRunOut(
+            status=status,
+            started_at=row.started_at,
+            finished_at=row.finished_at,
+            success=row.success,
+            error=row.error,
+            report=row.report,
+        )
 
     @app.get("/power")
     async def power(session: Session) -> PowerReport:
@@ -309,10 +326,8 @@ def create_app(
 
     @app.post("/backup")
     async def backup(body: BackupIn) -> dict[str, str]:
-        if engine is None:
-            raise HTTPException(status_code=400, detail="backup requires a file-backed database")
-        db_file = engine.url.database
-        if not db_file or db_file == ":memory:":
+        db_file = engine.url.database if engine is not None else None
+        if engine is None or not db_file or db_file == ":memory:":
             raise HTTPException(status_code=400, detail="backup requires a file-backed database")
         dest = (
             Path(body.dest).expanduser()
@@ -321,9 +336,13 @@ def create_app(
         )
         if dest.exists():
             raise HTTPException(status_code=409, detail=f"destination already exists: {dest}")
-        async with engine.connect() as conn:
-            ac = await conn.execution_options(isolation_level="AUTOCOMMIT")
-            await ac.exec_driver_sql("VACUUM INTO ?", (str(dest),))
+        old_umask = os.umask(0o077)  # VACUUM INTO creates dest itself — never world-readable
+        try:
+            async with engine.connect() as conn:
+                ac = await conn.execution_options(isolation_level="AUTOCOMMIT")
+                await ac.exec_driver_sql("VACUUM INTO ?", (str(dest),))
+        finally:
+            os.umask(old_umask)
         make_private(dest)  # the backup is the full financial DB
         return {"path": str(dest)}
 

@@ -571,3 +571,54 @@ async def test_resumed_series_backfills_skipped_missed_windows(session: AsyncSes
         .all()
     )
     assert len(missed) == 1
+
+
+async def test_backfill_never_emits_future_windows(session: AsyncSession) -> None:
+    await _seed_monthly(session, (1, 2, 3), day=1)
+    await detect_recurring(session, llm=None, today=date(2026, 3, 2))
+    s = (await _series(session))[0]
+    assert s.next_expected_on == date(2026, 4, 1)
+
+    # the next charge posts 8 days late, re-anchoring the grid to the 9th
+    acct = (await session.execute(select(Account))).scalars().first()
+    assert acct is not None
+    await make_txn(
+        session, acct, amount_cents=-1599, merchant="Netflix", posted_on=date(2026, 4, 9)
+    )
+    await detect_recurring(session, llm=None, today=date(2026, 4, 10))
+    missed = (
+        (await session.execute(select(SeriesEvent).where(SeriesEvent.kind == EventKind.missed)))
+        .scalars()
+        .all()
+    )
+    # the 4/1 window genuinely had no charge within grace; 5/1 hasn't happened yet
+    assert [e.occurred_on for e in missed] == [date(2026, 4, 1)]
+
+
+async def test_detection_untags_txns_whose_merchant_moved(session: AsyncSession) -> None:
+    await _seed_monthly(session, (4, 5, 6))
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    s = (await _series(session))[0]
+    newest = (
+        await session.execute(select(Transaction).order_by(Transaction.posted_on.desc()).limit(1))
+    ).scalar_one()
+    assert newest.series_id == s.id
+    newest.merchant = "Spotify Usa"  # a description correction re-derived the merchant
+
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    await session.refresh(newest)
+    assert newest.series_id != s.id  # no longer feeds the Netflix series' stats
+
+
+async def test_same_merchant_tagged_txn_never_revives_ended_series(session: AsyncSession) -> None:
+    await _seed_monthly(session, (4, 5, 6))
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    s = (await _series(session))[0]
+    s.status = SeriesStatus.ended  # user cancels it
+    await session.commit()
+
+    # a description-only upstream correction leaves the txn tagged (see ingest.py);
+    # detection must not read it as a genuinely-new occurrence and revive the series
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    await session.refresh(s)
+    assert s.status == SeriesStatus.ended
