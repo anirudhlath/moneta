@@ -41,11 +41,16 @@ def test_sync_without_setup_fails_cleanly(tmp_path: Path, monkeypatch) -> None: 
 
 
 def test_sync_full_flag_requests_full_sync(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    calls: list[tuple[str, str]] = []
+    calls: list[tuple[str, str, Any]] = []
 
-    def fake_request(method: str, path: str, json_body: dict[str, Any] | None = None) -> Any:
-        calls.append((method, path))
-        if path.startswith("/sync"):
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        calls.append((method, path, params))
+        if path == "/sync":
             return {
                 "ingest": {"new_transactions": 0},
                 "transfers": {"linked": 0},
@@ -57,11 +62,13 @@ def test_sync_full_flag_requests_full_sync(monkeypatch) -> None:  # type: ignore
     monkeypatch.setattr("moneta.cli.main.request", fake_request)
     result = runner.invoke(app, ["sync", "--full"])
     assert result.exit_code == 0
-    assert calls[0] == ("POST", "/sync?full=true")
+    full_call = calls[0]
+    assert full_call == ("POST", "/sync", {"full": True})
     calls.clear()
     result = runner.invoke(app, ["sync"])
     assert result.exit_code == 0
-    assert calls[0] == ("POST", "/sync")
+    plain_call = calls[0]
+    assert plain_call == ("POST", "/sync", None)
 
 
 def test_import_vesting(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]

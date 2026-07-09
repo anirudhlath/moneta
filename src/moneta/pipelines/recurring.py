@@ -58,24 +58,28 @@ def monthly_cents(series: RecurringSeries) -> int:
     return round(series.expected_cents * _PER_MONTH[series.cadence])
 
 
-def _match_cadence(dates: list[date]) -> tuple[Cadence, int] | None:
-    """Best cadence and the start index of the newest run matching it.
+def _stale(last_seen: date, cadence: Cadence, today: date) -> bool:
+    """A series is stale once its newest occurrence is over 3 cadence periods old."""
+    return (today - last_seen).days > _STALE_PERIODS * CADENCE_DAYS[cadence]
+
+
+def _match_cadence(dates: list[date]) -> tuple[Cadence, date] | None:
+    """Best cadence and the start date of the newest run matching it.
 
     Deep history contains breaks (pauses, resubscriptions, card reissues); judging
     cadence on the maximal recent run keeps ancient gaps from poisoning a
     currently-clean series.
     """
+    gaps = [(b - a).days for a, b in zip(dates, dates[1:], strict=False)]
     for cadence, days in CADENCE_DAYS.items():
         tol = _TOLERANCE[cadence]
         start = len(dates) - 1
-        while start > 0 and abs((dates[start] - dates[start - 1]).days - days) <= tol * 2:
+        while start > 0 and abs(gaps[start - 1] - days) <= tol * 2:
             start -= 1
-        run = dates[start:]
-        if len(run) < _MIN_OCCURRENCES:
+        if len(dates) - start < _MIN_OCCURRENCES:
             continue
-        gaps = [(b - a).days for a, b in zip(run, run[1:], strict=False)]
-        if abs(statistics.median(gaps) - days) <= tol:
-            return cadence, start
+        if abs(statistics.median(gaps[start:]) - days) <= tol:
+            return cadence, dates[start]
     return None
 
 
@@ -139,8 +143,8 @@ async def detect_recurring(
         match = _match_cadence(dates)
         if match is None:
             continue
-        cadence, start = match
-        run = [t for t in group if t.posted_on >= dates[start]]
+        cadence, run_start = match
+        run = [t for t in group if t.posted_on >= run_start]
         amounts = [abs(t.amount_cents) for t in run]
         med = statistics.median(amounts)
         stable = all(abs(a - med) <= med * _AMOUNT_TOLERANCE for a in amounts)
@@ -172,7 +176,7 @@ async def detect_recurring(
                         stats.review += 1
                     continue
         next_on = dates[-1] + timedelta(days=CADENCE_DAYS[cadence])
-        stale = (today - dates[-1]).days > _STALE_PERIODS * CADENCE_DAYS[cadence]
+        stale = _stale(dates[-1], cadence, today)
         series = existing.get((merchant, direction))
         if series is None:
             series = RecurringSeries(
@@ -203,7 +207,7 @@ async def detect_recurring(
                 # ended series (auto- or manually) that charges again at cadence revives
                 status = SeriesStatus.active
             else:
-                status = SeriesStatus(series.status)
+                status = series.status
             changed = (
                 series.next_expected_on != advanced_on
                 or series.cadence != cadence
@@ -219,17 +223,21 @@ async def detect_recurring(
 
     # Groups that no longer match a cadence (trailing noise, shrunk by exclusions) never
     # reach the stale check above — sweep every still-active series by its own txns.
+    newest_rows = (
+        await session.execute(
+            select(Transaction.series_id, func.max(Transaction.posted_on))
+            .where(Transaction.series_id.is_not(None))
+            .group_by(Transaction.series_id)
+        )
+    ).all()
+    newest_by_series: dict[int | None, date] = {sid: newest for sid, newest in newest_rows}
     for series in existing.values():
         if series.status != SeriesStatus.active:
             continue
-        newest = (
-            await session.execute(
-                select(func.max(Transaction.posted_on)).where(Transaction.series_id == series.id)
-            )
-        ).scalar_one_or_none()
-        period = CADENCE_DAYS[series.cadence]
-        last_seen = newest or series.next_expected_on - timedelta(days=period)
-        if (today - last_seen).days > _STALE_PERIODS * period:
+        # detect_recurring tags every occurrence it matches, so an active series always
+        # has tagged txns; without any there is no evidence to judge — leave it alone.
+        last_seen = newest_by_series.get(series.id)
+        if last_seen is not None and _stale(last_seen, series.cadence, today):
             series.status = SeriesStatus.ended
             stats.updated += 1
     await session.commit()

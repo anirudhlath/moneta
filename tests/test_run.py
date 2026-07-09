@@ -2,20 +2,9 @@ from datetime import date, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.aggregator.base import Snapshot
 from moneta.pipelines.run import RESYNC_OVERLAP_DAYS, run_sync
+from tests.conftest import RecordingAdapter
 from tests.factories import make_account, make_txn
-
-
-class RecordingAdapter:
-    """Records the `since` value run_sync passes to fetch."""
-
-    def __init__(self) -> None:
-        self.since: date | None | str = "never-called"
-
-    async def fetch(self, since: date | None = None) -> Snapshot:
-        self.since = since
-        return Snapshot(accounts=[], transactions=[], holdings=[])
 
 
 async def test_first_sync_requests_all_history(session: AsyncSession) -> None:

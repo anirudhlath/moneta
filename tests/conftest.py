@@ -38,3 +38,14 @@ class FakeAdapter:
 
     async def fetch(self, since: date | None = None) -> Snapshot:
         return self.snapshot
+
+
+class RecordingAdapter:
+    """Records the `since` value run_sync passes to fetch."""
+
+    def __init__(self) -> None:
+        self.since: date | None | str = "never-called"
+
+    async def fetch(self, since: date | None = None) -> Snapshot:
+        self.since = since
+        return Snapshot(accounts=[], transactions=[], holdings=[])

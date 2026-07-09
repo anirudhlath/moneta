@@ -10,7 +10,7 @@ from moneta.aggregator.base import AccountDTO, Snapshot, TransactionDTO
 from moneta.api import create_app
 from moneta.pipelines.recurring import detect_recurring
 from moneta.pipelines.run import RESYNC_OVERLAP_DAYS
-from tests.conftest import FakeAdapter
+from tests.conftest import FakeAdapter, RecordingAdapter
 from tests.factories import make_account, make_txn
 
 # The /sync and /power endpoints resolve date.today() at request time, so snapshot
@@ -86,15 +86,6 @@ async def test_patch_account(client: httpx.AsyncClient) -> None:
     updated = (await client.get("/accounts")).json()[0]
     assert updated["type"] == "savings"
     assert updated["promo_expires_on"] == "2026-12-31"
-
-
-class RecordingAdapter:
-    def __init__(self) -> None:
-        self.since: date | None = None
-
-    async def fetch(self, since: date | None = None) -> Snapshot:
-        self.since = since
-        return Snapshot(accounts=[], transactions=[], holdings=[])
 
 
 async def test_sync_full_param_forces_epoch_pull(

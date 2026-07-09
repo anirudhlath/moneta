@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.models import (
+    Account,
     AccountType,
     Cadence,
     Direction,
@@ -26,12 +27,27 @@ async def _series(session: AsyncSession) -> list[RecurringSeries]:
     return list((await session.execute(select(RecurringSeries))).scalars().all())
 
 
-async def test_monthly_subscription_detected(session: AsyncSession) -> None:
-    acct = await make_account(session)
-    for month in (4, 5, 6):
+async def _seed_monthly(
+    session: AsyncSession,
+    months: tuple[int, ...],
+    *,
+    acct: Account | None = None,
+    year: int = 2026,
+    day: int = 15,
+    merchant: str = "Netflix",
+    cents: int = -1599,
+) -> Account:
+    """One txn per month on the given day — the standard monthly-series seeding."""
+    acct = acct or await make_account(session)
+    for month in months:
         await make_txn(
-            session, acct, amount_cents=-1599, merchant="Netflix", posted_on=date(2026, month, 15)
+            session, acct, amount_cents=cents, merchant=merchant, posted_on=date(year, month, day)
         )
+    return acct
+
+
+async def test_monthly_subscription_detected(session: AsyncSession) -> None:
+    await _seed_monthly(session, (4, 5, 6))
     stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
     assert stats.new_series == 1
     s = (await _series(session))[0]
@@ -129,11 +145,7 @@ async def test_internal_transfers_excluded_loan_payments_kept(session: AsyncSess
 
 
 async def test_rerun_updates_not_duplicates(session: AsyncSession) -> None:
-    acct = await make_account(session)
-    for month in (4, 5, 6):
-        await make_txn(
-            session, acct, amount_cents=-1599, merchant="Netflix", posted_on=date(2026, month, 15)
-        )
+    acct = await _seed_monthly(session, (4, 5, 6))
     await detect_recurring(session, llm=None, today=date(2026, 7, 1))
     await make_txn(
         session, acct, amount_cents=-1599, merchant="Netflix", posted_on=date(2026, 7, 15)
@@ -178,11 +190,7 @@ async def test_llm_rejects_group_creates_review_no_series(session: AsyncSession)
 
 
 async def test_resync_does_not_duplicate_missed_events(session: AsyncSession) -> None:
-    acct = await make_account(session)
-    for month, day in ((1, 15), (2, 15), (3, 15)):
-        await make_txn(
-            session, acct, amount_cents=-1599, merchant="Netflix", posted_on=date(2026, month, day)
-        )
+    await _seed_monthly(session, (1, 2, 3))
     today = date(2026, 5, 1)
 
     await detect_recurring(session, llm=None, today=today)
@@ -268,11 +276,7 @@ async def test_recurring_cluster_still_open_no_series_no_duplicate_review(
 
 
 async def test_stale_history_creates_ended_series(session: AsyncSession) -> None:
-    acct = await make_account(session)
-    for month in (1, 2, 3):
-        await make_txn(
-            session, acct, amount_cents=-1599, merchant="Netflix", posted_on=date(2025, month, 15)
-        )
+    await _seed_monthly(session, (1, 2, 3), year=2025)
     stats = await detect_recurring(session, llm=None, today=date(2026, 7, 8))
     assert stats.new_series == 1
     s = (await _series(session))[0]
@@ -281,11 +285,7 @@ async def test_stale_history_creates_ended_series(session: AsyncSession) -> None
 
 
 async def test_active_series_auto_ends_when_stale(session: AsyncSession) -> None:
-    acct = await make_account(session)
-    for month in (4, 5, 6):
-        await make_txn(
-            session, acct, amount_cents=-1599, merchant="Netflix", posted_on=date(2026, month, 15)
-        )
+    await _seed_monthly(session, (4, 5, 6))
     await detect_recurring(session, llm=None, today=date(2026, 7, 1))
     s = (await _series(session))[0]
     assert s.status == SeriesStatus.active
@@ -298,11 +298,7 @@ async def test_active_series_auto_ends_when_stale(session: AsyncSession) -> None
 async def test_manually_ended_series_stays_ended_without_new_activity(
     session: AsyncSession,
 ) -> None:
-    acct = await make_account(session)
-    for month in (4, 5, 6):
-        await make_txn(
-            session, acct, amount_cents=-1599, merchant="Netflix", posted_on=date(2026, month, 15)
-        )
+    await _seed_monthly(session, (4, 5, 6))
     await detect_recurring(session, llm=None, today=date(2026, 7, 1))
     s = (await _series(session))[0]
     s.status = SeriesStatus.ended  # what PATCH /recurring/{id} does
@@ -314,11 +310,7 @@ async def test_manually_ended_series_stays_ended_without_new_activity(
 async def test_manually_ended_series_reactivates_on_new_occurrence(
     session: AsyncSession,
 ) -> None:
-    acct = await make_account(session)
-    for month in (4, 5, 6):
-        await make_txn(
-            session, acct, amount_cents=-1599, merchant="Netflix", posted_on=date(2026, month, 15)
-        )
+    acct = await _seed_monthly(session, (4, 5, 6))
     await detect_recurring(session, llm=None, today=date(2026, 7, 1))
     s = (await _series(session))[0]
     s.status = SeriesStatus.ended
@@ -335,11 +327,7 @@ async def test_manually_ended_series_reactivates_on_new_occurrence(
 async def test_backfilled_old_txns_do_not_reactivate_ended_series(
     session: AsyncSession,
 ) -> None:
-    acct = await make_account(session)
-    for month in (4, 5, 6):
-        await make_txn(
-            session, acct, amount_cents=-1599, merchant="Netflix", posted_on=date(2026, month, 15)
-        )
+    acct = await _seed_monthly(session, (4, 5, 6))
     await detect_recurring(session, llm=None, today=date(2026, 7, 1))
     s = (await _series(session))[0]
     s.status = SeriesStatus.ended
@@ -353,16 +341,9 @@ async def test_backfilled_old_txns_do_not_reactivate_ended_series(
 
 
 async def test_historical_gap_does_not_poison_current_cadence(session: AsyncSession) -> None:
-    acct = await make_account(session)
     # an old run at one price, a long break, then a current run at a new price
-    for month in (1, 2, 3):
-        await make_txn(
-            session, acct, amount_cents=-1599, merchant="Netflix", posted_on=date(2025, month, 15)
-        )
-    for month in (4, 5, 6):
-        await make_txn(
-            session, acct, amount_cents=-1799, merchant="Netflix", posted_on=date(2026, month, 15)
-        )
+    acct = await _seed_monthly(session, (1, 2, 3), year=2025)
+    await _seed_monthly(session, (4, 5, 6), acct=acct, cents=-1799)
     stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
     assert stats.new_series == 1
     s = (await _series(session))[0]
@@ -374,17 +355,12 @@ async def test_historical_gap_does_not_poison_current_cadence(session: AsyncSess
 async def test_auto_ended_series_reactivates_when_cadence_reestablished(
     session: AsyncSession,
 ) -> None:
-    acct = await make_account(session)
-    for month in (1, 2, 3):
-        await make_txn(
-            session, acct, amount_cents=-1599, merchant="Hulu", posted_on=date(2025, month, 15)
-        )
+    acct = await _seed_monthly(session, (1, 2, 3), year=2025, merchant="Hulu")
     await detect_recurring(session, llm=None, today=date(2026, 7, 1))
     s = (await _series(session))[0]
     assert s.status == SeriesStatus.ended  # auto-ended: stale history
     # resubscribed: three fresh occurrences re-establish the cadence
-    for day in (date(2026, 5, 1), date(2026, 6, 1), date(2026, 7, 1)):
-        await make_txn(session, acct, amount_cents=-1899, merchant="Hulu", posted_on=day)
+    await _seed_monthly(session, (5, 6, 7), acct=acct, day=1, merchant="Hulu", cents=-1899)
     stats = await detect_recurring(session, llm=None, today=date(2026, 7, 2))
     assert stats.updated == 1
     s = (await _series(session))[0]
@@ -393,11 +369,7 @@ async def test_auto_ended_series_reactivates_when_cadence_reestablished(
 
 
 async def test_series_with_trailing_noise_still_auto_ends(session: AsyncSession) -> None:
-    acct = await make_account(session)
-    for month in (4, 5, 6):
-        await make_txn(
-            session, acct, amount_cents=-1599, merchant="Gym", posted_on=date(2026, month, 15)
-        )
+    acct = await _seed_monthly(session, (4, 5, 6), merchant="Gym")
     await detect_recurring(session, llm=None, today=date(2026, 7, 1))
     # a one-off purchase at the same merchant breaks the cadence run...
     await make_txn(session, acct, amount_cents=-2500, merchant="Gym", posted_on=date(2026, 7, 2))
@@ -411,11 +383,7 @@ async def test_series_with_trailing_noise_still_auto_ends(session: AsyncSession)
 async def test_duplicate_same_day_charge_does_not_break_detection(
     session: AsyncSession,
 ) -> None:
-    acct = await make_account(session)
-    for month in (4, 5, 6):
-        await make_txn(
-            session, acct, amount_cents=-1599, merchant="Netflix", posted_on=date(2026, month, 15)
-        )
+    acct = await _seed_monthly(session, (4, 5, 6))
     # double-posted/retried charge on the newest date
     await make_txn(
         session, acct, amount_cents=-1599, merchant="Netflix", posted_on=date(2026, 6, 15)
@@ -431,11 +399,7 @@ async def test_stale_newer_backfill_does_not_reactivate_ended_series(
     session: AsyncSession,
 ) -> None:
     """Pins that staleness takes precedence over the untagged-newest reactivation check."""
-    acct = await make_account(session)
-    for month in (1, 2, 3):
-        await make_txn(
-            session, acct, amount_cents=-1599, merchant="Netflix", posted_on=date(2025, month, 15)
-        )
+    acct = await _seed_monthly(session, (1, 2, 3), year=2025)
     await detect_recurring(session, llm=None, today=date(2026, 7, 1))
     s = (await _series(session))[0]
     assert s.status == SeriesStatus.ended  # auto-ended: stale history
