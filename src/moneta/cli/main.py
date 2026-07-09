@@ -313,6 +313,15 @@ def setup_simplefin(token: str) -> None:
 
 
 @app.command()
+def backup(
+    dest: Annotated[str | None, typer.Argument(help="Destination file (server-side path).")] = None,
+) -> None:
+    """Snapshot the database with SQLite VACUUM INTO (safe while running)."""
+    r = request("POST", "/backup", {"dest": dest} if dest else {})
+    console.print(f"Backup written to [bold]{r['path']}[/bold]")
+
+
+@app.command()
 def renormalize() -> None:
     """Re-apply improved merchant-naming rules to already-synced transactions."""
     result = request("POST", "/normalize/rerun")

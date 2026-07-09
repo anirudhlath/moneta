@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 from datetime import date, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import httpx
 import pytest
@@ -8,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from moneta.aggregator.base import AccountDTO, Snapshot, TransactionDTO
 from moneta.api import create_app
+from moneta.db import init_db, make_sessionmaker
 from moneta.pipelines.recurring import detect_recurring
 from moneta.pipelines.run import RESYNC_OVERLAP_DAYS
 from tests.conftest import FakeAdapter, RecordingAdapter
@@ -307,3 +309,27 @@ async def test_bearer_token_enforced_when_configured(
         assert (
             await c.get("/accounts", headers={"Authorization": "Bearer s3cret"})
         ).status_code == 200
+
+
+async def test_backup_vacuum_into(tmp_path: Path) -> None:
+    engine, sm = make_sessionmaker(f"sqlite+aiosqlite:///{tmp_path / 'm.db'}")
+    await init_db(engine)
+    app = create_app(sm, adapter=None, llm=None, engine=engine)
+    transport = httpx.ASGITransport(app=app)
+    dest = tmp_path / "out.db"
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.post("/backup", json={"dest": str(dest)})
+        assert r.status_code == 200
+        assert r.json() == {"path": str(dest)}
+        assert dest.exists() and dest.stat().st_size > 0
+        assert (await c.post("/backup", json={"dest": str(dest)})).status_code == 409
+    await engine.dispose()
+
+
+async def test_backup_requires_file_backed_db(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    app = create_app(sessionmaker, adapter=None, llm=None)  # no engine → nothing to back up
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        assert (await c.post("/backup", json={})).status_code == 400

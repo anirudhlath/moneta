@@ -275,3 +275,12 @@ def test_in_process_cli_works_with_token_configured(tmp_path: Path, monkeypatch)
     (tmp_path / "config.toml").write_text('api_token = "t0k3n"\n')
     result = runner.invoke(app, ["networth"])  # client must attach the bearer header
     assert result.exit_code == 0
+
+
+def test_backup_command(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    runner.invoke(app, ["networth"])  # forces DB creation
+    dest = tmp_path / "snap.db"
+    result = runner.invoke(app, ["backup", str(dest)])
+    assert result.exit_code == 0
+    assert dest.exists()

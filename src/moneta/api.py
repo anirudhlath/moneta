@@ -2,6 +2,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -103,6 +104,10 @@ class SyncRunOut(BaseModel):
     success: bool
     error: str | None
     report: dict[str, Any] | None
+
+
+class BackupIn(BaseModel):
+    dest: str | None = None
 
 
 def create_app(
@@ -279,6 +284,23 @@ def create_app(
         await apply_resolution(session, item, body.resolution, resolved_by="manual")
         await session.commit()
         return {"ok": True}
+
+    @app.post("/backup")
+    async def backup(body: BackupIn) -> dict[str, str]:
+        db_file = engine.url.database if engine is not None else None
+        if engine is None or not db_file or db_file == ":memory:":
+            raise HTTPException(status_code=400, detail="backup requires a file-backed database")
+        dest = (
+            Path(body.dest).expanduser()
+            if body.dest
+            else Path(db_file).with_name(f"moneta-backup-{datetime.now():%Y%m%d-%H%M%S}.db")
+        )
+        if dest.exists():
+            raise HTTPException(status_code=409, detail=f"destination already exists: {dest}")
+        async with engine.connect() as conn:
+            ac = await conn.execution_options(isolation_level="AUTOCOMMIT")
+            await ac.exec_driver_sql("VACUUM INTO ?", (str(dest),))
+        return {"path": str(dest)}
 
     @app.post("/normalize/rerun")
     async def normalize_rerun(session: Session) -> dict[str, int]:
