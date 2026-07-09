@@ -1,5 +1,5 @@
 from collections.abc import AsyncIterator
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import httpx
@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from moneta.aggregator.base import AccountDTO, Snapshot, TransactionDTO
 from moneta.api import create_app
 from moneta.pipelines.recurring import detect_recurring
+from moneta.pipelines.run import RESYNC_OVERLAP_DAYS
 from tests.conftest import FakeAdapter
 from tests.factories import make_account, make_txn
 
@@ -81,6 +82,31 @@ async def test_patch_account(client: httpx.AsyncClient) -> None:
     updated = (await client.get("/accounts")).json()[0]
     assert updated["type"] == "savings"
     assert updated["promo_expires_on"] == "2026-12-31"
+
+
+class RecordingAdapter:
+    def __init__(self) -> None:
+        self.since: date | None = None
+
+    async def fetch(self, since: date | None = None) -> Snapshot:
+        self.since = since
+        return Snapshot(accounts=[], transactions=[], holdings=[])
+
+
+async def test_sync_full_param_forces_epoch_pull(
+    sessionmaker: async_sessionmaker[AsyncSession], session: AsyncSession
+) -> None:
+    acct = await make_account(session)
+    await make_txn(session, acct, posted_on=date(2026, 7, 5))
+    await session.commit()
+    adapter = RecordingAdapter()
+    app = create_app(sessionmaker, adapter=adapter, llm=None)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        assert (await c.post("/sync")).status_code == 200
+        assert adapter.since == date(2026, 7, 5) - timedelta(days=RESYNC_OVERLAP_DAYS)
+        assert (await c.post("/sync", params={"full": "true"})).status_code == 200
+        assert adapter.since == date(1970, 1, 1)
 
 
 async def test_sync_without_adapter_is_400(

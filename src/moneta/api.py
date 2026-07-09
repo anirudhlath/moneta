@@ -118,13 +118,13 @@ def create_app(
     Session = Annotated[AsyncSession, Depends(get_session)]
 
     @app.post("/sync")
-    async def sync(session: Session) -> SyncReport:
+    async def sync(session: Session, full: bool = False) -> SyncReport:
         if adapter is None:
             raise HTTPException(
                 status_code=400,
                 detail="No SimpleFIN aggregator configured. Run: moneta setup simplefin <token>",
             )
-        return await run_sync(session, adapter, llm, today=date.today())
+        return await run_sync(session, adapter, llm, today=date.today(), full=full)
 
     @app.get("/power")
     async def power(session: Session) -> PowerReport:
