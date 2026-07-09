@@ -16,6 +16,7 @@ Run it: `uv run moneta --help` (CLI, no server needed — in-process ASGI) or `u
 
 - **Money is integer cents everywhere** (`*_cents: int`); `Decimal` only at boundaries via `to_cents`/`from_cents` (models.py). Never float for money. Share quantities on `Holding` are float — shares aren't money.
 - **Sign convention:** negative = outflow, positive = inflow (SimpleFIN's convention, kept end-to-end).
+- **Plaid inverts both signs** (aggregator/plaid.py): Plaid amounts are positive when money leaves the account and liability balances are positive-owed; the adapter negates both so stored data follows the SimpleFIN convention. `PlaidAdapter.fetch` ignores `since` — it replays `/transactions/sync` from an empty cursor every run (≤730 days; ingest dedup absorbs the overlap), so `sync --full` is a no-op for Plaid.
 - **Enum columns load as plain `str`**, not enum instances (columns are `String`-typed). Compare with `==` (StrEnum equals its value); never `is`, never `.name` on loaded values.
 - **Pipelines commit; views don't.** `pipelines/*` own their transaction boundary (`session.commit()` inside); `views/*` are pure reads. `vesting.apply_vesting` commits (it's an import pipeline).
 - **Pipeline order is load-bearing:** `run_sync` = ingest → normalize → transfers → auto-review (LLM, when configured) → recurring → events. Auto-review runs before detection so confident LLM answers to open review items shape this run's series/exclusions; recurring detection reads transfer links; events read series. `detect_recurring` must never rewind `next_expected_on` (it takes `max`) — rewinding re-fires missed events on every sync.
@@ -26,7 +27,7 @@ Run it: `uv run moneta --help` (CLI, no server needed — in-process ASGI) or `u
 
 ## Layout
 
-- `aggregator/` — adapter protocol + SimpleFIN; DTOs stop at `pipelines/ingest.py`
+- `aggregator/` — adapter protocol + SimpleFIN + Plaid (+ `MergedAdapter` when several are configured); DTOs stop at `pipelines/ingest.py`
 - `pipelines/` — ingest, normalize, transfers, review (LLM auto-review), recurring, events, run (orchestrator)
 - `views/` — power (flagship), cashflow, networth, financing (obligations are derived, not stored)
 - `api.py` — all endpoints; `cli/` — thin client, zero business logic
@@ -36,5 +37,5 @@ Run it: `uv run moneta --help` (CLI, no server needed — in-process ASGI) or `u
 
 - `httpx.ASGITransport` never fires FastAPI lifespan — the CLI's in-process path runs `init_db` itself (cli/client.py); a real `moneta serve` gets it from lifespan.
 - Endpoints resolve `date.today()` at request time; test data must be date-relative (see tests/test_e2e.py's anchoring comment).
-- SimpleFIN gives no account types — they're inferred from name/org keywords (`pipelines/ingest.py`); user overrides via `moneta accounts --set-type` survive re-sync.
+- SimpleFIN gives no account types — they're inferred from name/org keywords (`pipelines/ingest.py`); Plaid supplies real types via `AccountDTO.type_hint`, which beats inference; user overrides via `moneta accounts --set-type` survive re-sync.
 - Backlog convention: `docs/backlog/<priority>/<kebab-case>.md`; QA items in `docs/qa-backlog/`.

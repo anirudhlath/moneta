@@ -15,9 +15,22 @@ uv run moneta sync
 uv run moneta power
 ```
 
+Prefer Plaid (or need an institution SimpleFIN lacks)? Both can be configured at
+once — one `moneta sync` pulls from every configured source:
+
+```bash
+uv run moneta setup plaid <CLIENT_ID> <SECRET>   # keys from https://dashboard.plaid.com
+uv run moneta setup plaid-link                   # prints a URL; finish linking in the browser
+uv run moneta sync
+```
+
+`plaid-link` links one institution per run (re-run it for each bank);
+`moneta setup plaid-list` / `plaid-unlink <item-id>` manage linked banks.
+
 The first sync pulls all history your institutions retain. `moneta sync --full`
-re-pulls everything — use it after linking a new account so its history isn't
-skipped by the incremental window.
+re-pulls everything — use it after linking a new SimpleFIN account so its history
+isn't skipped by the incremental window. Plaid replays its full history (up to
+730 days) on every sync, so plain `moneta sync` suffices after `plaid-link`.
 
 No server needed — the CLI runs the app in-process. To run a server instead:
 `uv run moneta serve`, then `export MONETA_API_URL=http://127.0.0.1:8300`.
@@ -37,9 +50,12 @@ No server needed — the CLI runs the app in-process. To run a server instead:
 ## Configuration
 
 Env vars (`MONETA_*`) override `~/.config/moneta/config.toml`:
-`MONETA_SIMPLEFIN_ACCESS_URL`, `MONETA_LLM_MODEL` (any LiteLLM model string; unset =
-no LLM, ambiguous items go to `moneta review`), `MONETA_API_URL`, `MONETA_DB_PATH`,
-`MONETA_CONFIG_DIR` (config-file location; default `~/.config/moneta`).
+`MONETA_SIMPLEFIN_ACCESS_URL`, `MONETA_PLAID_CLIENT_ID`, `MONETA_PLAID_SECRET`,
+`MONETA_PLAID_ENV` (`production` (default) or `sandbox`), `MONETA_LLM_MODEL` (any
+LiteLLM model string; unset = no LLM, ambiguous items go to `moneta review`),
+`MONETA_API_URL`, `MONETA_DB_PATH`, `MONETA_CONFIG_DIR` (config-file location;
+default `~/.config/moneta`). Linked Plaid banks (item ids + access tokens) live in
+`~/.config/moneta/plaid_items.json`.
 
 ## Design
 
