@@ -237,3 +237,10 @@ def test_renormalize_command_runs(tmp_path: Path, monkeypatch) -> None:  # type:
     result = runner.invoke(app, ["renormalize"])
     assert result.exit_code == 0
     assert "Updated 0 merchant name(s)" in result.output
+
+
+def test_status_before_any_sync(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert "No sync has run yet" in result.output

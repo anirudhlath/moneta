@@ -169,6 +169,19 @@ class MerchantAlias(Base):
     source: Mapped[AliasSource] = mapped_column(String)
 
 
+class SyncRun(Base):
+    """Audit row per run_sync invocation — the answer to 'did last night's sync work?'."""
+
+    __tablename__ = "sync_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    success: Mapped[bool] = mapped_column(default=False)
+    error: Mapped[str | None] = mapped_column(default=None)
+    report: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=None)
+
+
 class ReviewItem(Base):
     __tablename__ = "review_items"
 

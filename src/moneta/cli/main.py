@@ -45,6 +45,23 @@ def sync(
 
 
 @app.command()
+def status() -> None:
+    """Show the most recent sync run and its outcome."""
+    r = request("GET", "/sync/last")
+    if not r:
+        console.print("No sync has run yet. Run: [bold]moneta sync[/bold]")
+        return
+    outcome = "[green]ok[/green]" if r["success"] else f"[red]failed[/red] — {r['error']}"
+    console.print(f"Last sync: {r['started_at']} → {outcome}")
+    if r["report"]:
+        rep = r["report"]
+        console.print(
+            f"  {rep['ingest']['new_transactions']} new txns, "
+            f"{rep['recurring']['new_series']} new series, {rep['events']} events"
+        )
+
+
+@app.command()
 def power() -> None:
     """Monthly spending power: income - fixed costs."""
     r = request("GET", "/power")

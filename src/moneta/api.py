@@ -1,6 +1,6 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Any
 
@@ -14,6 +14,7 @@ from moneta.aggregator.simplefin import SimpleFINAdapter
 from moneta.config import load_settings
 from moneta.db import init_db, make_sessionmaker
 from moneta.llm import Classifier, build_classifier
+from moneta.logs import configure_logging
 from moneta.models import (
     Account,
     AccountType,
@@ -23,6 +24,7 @@ from moneta.models import (
     ReviewStatus,
     SeriesEvent,
     SeriesStatus,
+    SyncRun,
 )
 from moneta.pipelines.normalize import renormalize_merchants
 from moneta.pipelines.review import apply_resolution, review_context
@@ -95,6 +97,14 @@ class CashflowReport(BaseModel):
     cash_out: Decimal
 
 
+class SyncRunOut(BaseModel):
+    started_at: datetime
+    finished_at: datetime | None
+    success: bool
+    error: str | None
+    report: dict[str, Any] | None
+
+
 def create_app(
     sessionmaker: async_sessionmaker[AsyncSession],
     adapter: AggregatorAdapter | None,
@@ -123,6 +133,13 @@ def create_app(
                 detail="No SimpleFIN aggregator configured. Run: moneta setup simplefin <token>",
             )
         return await run_sync(session, adapter, llm, today=date.today(), full=full)
+
+    @app.get("/sync/last")
+    async def sync_last(session: Session) -> SyncRunOut | None:
+        row = (
+            await session.execute(select(SyncRun).order_by(SyncRun.id.desc()).limit(1))
+        ).scalar_one_or_none()
+        return SyncRunOut.model_validate(row, from_attributes=True) if row else None
 
     @app.get("/power")
     async def power(session: Session) -> PowerReport:
@@ -275,6 +292,7 @@ def create_app(
 
 def build_app() -> FastAPI:
     settings = load_settings()
+    configure_logging(settings.config_dir)
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     engine, sessionmaker = make_sessionmaker(f"sqlite+aiosqlite:///{settings.db_path}")
     adapter: AggregatorAdapter | None = (

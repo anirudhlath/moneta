@@ -33,12 +33,15 @@ async def test_migrations_match_create_all_schema() -> None:
 
 async def test_init_db_adopts_pre_migration_database() -> None:
     engine, _ = make_sessionmaker("sqlite+aiosqlite://")
+    old_tables = [t for name, t in Base.metadata.tables.items() if name != "sync_runs"]
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)  # simulates a pre-Alembic DB
-    await init_db(engine)  # must stamp, then upgrade cleanly (no "table exists" error)
+        # simulates a real pre-Alembic DB: baseline tables, nothing newer
+        await conn.run_sync(lambda c: Base.metadata.create_all(c, tables=old_tables))
+    await init_db(engine)  # must stamp 0001, then upgrade through 0002+
     async with engine.connect() as conn:
         tables = await conn.run_sync(lambda c: inspect(c).get_table_names())
     assert "alembic_version" in tables
+    assert "sync_runs" in tables
     await engine.dispose()
 
 

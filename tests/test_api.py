@@ -284,3 +284,11 @@ async def test_review_context_enrichment(
     assert len(samples) == 3
     assert samples[0]["amount"] == "45.00"  # newest first
     assert rc["context"]["direction"] == "outflow"
+
+
+async def test_sync_last_endpoint(client: httpx.AsyncClient) -> None:
+    assert (await client.get("/sync/last")).json() is None
+    await client.post("/sync")
+    body = (await client.get("/sync/last")).json()
+    assert body["success"] is True
+    assert body["report"]["ingest"]["new_transactions"] == 3
