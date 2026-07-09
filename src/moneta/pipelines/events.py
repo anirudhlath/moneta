@@ -60,26 +60,36 @@ async def emit_series_events(session: AsyncSession, today: date) -> int:
                 emitted += 1
             s.next_expected_on = advance_expected_on(s.next_expected_on, s.cadence)
 
-        latest = (
-            await session.execute(
-                select(Transaction)
-                .where(Transaction.series_id == s.id)
-                .order_by(Transaction.posted_on.desc())
-                .limit(1)
+        latest_two = (
+            (
+                await session.execute(
+                    select(Transaction)
+                    .where(Transaction.series_id == s.id)
+                    .order_by(Transaction.posted_on.desc(), Transaction.id.desc())
+                    .limit(2)
+                )
             )
-        ).scalar_one_or_none()
-        if latest is not None and s.expected_cents != 0:
-            drift = abs(latest.amount_cents - s.expected_cents) / abs(s.expected_cents)
-            if drift > _PRICE_CHANGE_THRESHOLD:
+            .scalars()
+            .all()
+        )
+        # one sample is an outlier until a second occurrence confirms the new price
+        if len(latest_two) == 2 and s.expected_cents != 0:
+            newest, prior = latest_two
+            drift = abs(newest.amount_cents - s.expected_cents) / abs(s.expected_cents)
+            settled = (
+                abs(newest.amount_cents - prior.amount_cents)
+                <= abs(newest.amount_cents) * _PRICE_CHANGE_THRESHOLD
+            )
+            if drift > _PRICE_CHANGE_THRESHOLD and settled:
                 session.add(
                     SeriesEvent(
                         series_id=s.id,
                         kind=EventKind.price_increase,
-                        occurred_on=latest.posted_on,
-                        details={"old_cents": s.expected_cents, "new_cents": latest.amount_cents},
+                        occurred_on=newest.posted_on,
+                        details={"old_cents": s.expected_cents, "new_cents": newest.amount_cents},
                     )
                 )
-                s.expected_cents = latest.amount_cents
+                s.expected_cents = newest.amount_cents
                 emitted += 1
     await session.commit()
     return emitted
