@@ -5,6 +5,7 @@ LLM answers are classifications only and are applied through the exact same
 resolution path a human answer takes, tagged resolved_by="llm" for audit.
 """
 
+from datetime import date
 from typing import Any
 
 from pydantic import BaseModel
@@ -15,12 +16,14 @@ from moneta.llm import Classifier
 from moneta.models import (
     Account,
     AliasSource,
+    EventKind,
     LinkMethod,
     MerchantAlias,
     RecurringSeries,
     ReviewItem,
     ReviewKind,
     ReviewStatus,
+    SeriesEvent,
     SeriesStatus,
     Transaction,
     TransferLink,
@@ -120,6 +123,14 @@ async def review_context(session: AsyncSession, item: ReviewItem) -> dict[str, A
             "descriptor": item.payload.get("descriptor"),
             "suggested": item.payload.get("fallback"),
         }
+    if item.kind == ReviewKind.price_change:
+        old, new = item.payload.get("old_cents"), item.payload.get("new_cents")
+        return {
+            "merchant": item.payload.get("merchant"),
+            "old_amount": f"{abs(old) / 100:.2f}" if isinstance(old, int) else None,
+            "new_amount": f"{abs(new) / 100:.2f}" if isinstance(new, int) else None,
+            "occurred_on": item.payload.get("occurred_on"),
+        }
     return {}
 
 
@@ -167,6 +178,25 @@ async def apply_resolution(
             stmt = stmt.where(RecurringSeries.direction == direction)
         for series in (await session.execute(stmt)).scalars():
             series.status = SeriesStatus.ended
+    elif item.kind == ReviewKind.price_change and resolution.get("is_price_change") is True:
+        series_row = (
+            await session.execute(
+                select(RecurringSeries).where(RecurringSeries.id == item.payload["series_id"])
+            )
+        ).scalar_one_or_none()
+        if series_row is not None:
+            session.add(
+                SeriesEvent(
+                    series_id=series_row.id,
+                    kind=EventKind.price_increase,
+                    occurred_on=date.fromisoformat(item.payload["occurred_on"]),
+                    details={
+                        "old_cents": series_row.expected_cents,
+                        "new_cents": item.payload["new_cents"],
+                    },
+                )
+            )
+            series_row.expected_cents = item.payload["new_cents"]
     item.status = ReviewStatus.resolved
     item.resolution = {**resolution, "resolved_by": resolved_by}
 

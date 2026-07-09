@@ -254,6 +254,10 @@ def create_app(
             body.resolution.get("is_recurring"), bool
         ):
             raise HTTPException(status_code=422, detail="resolution.is_recurring must be a bool")
+        if item.kind == ReviewKind.price_change and not isinstance(
+            body.resolution.get("is_price_change"), bool
+        ):
+            raise HTTPException(status_code=422, detail="resolution.is_price_change must be a bool")
         await apply_resolution(session, item, body.resolution, resolved_by="manual")
         await session.commit()
         return {"ok": True}

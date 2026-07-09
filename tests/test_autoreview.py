@@ -7,11 +7,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from moneta.models import (
     AccountType,
     Direction,
+    EventKind,
     MerchantAlias,
     RecurringSeries,
     ReviewItem,
     ReviewKind,
     ReviewStatus,
+    SeriesEvent,
     SeriesStatus,
     Transaction,
     TransferLink,
@@ -264,3 +266,45 @@ async def test_not_recurring_resolution_leaves_other_direction_alone(
     await session.flush()
     await apply_resolution(session, item, {"is_recurring": False})
     assert series.status == SeriesStatus.active
+
+
+def _price_change_item(series_id: int) -> ReviewItem:
+    return ReviewItem(
+        kind=ReviewKind.price_change,
+        question="Did 'Netflix' change price from $15.99 to $18.99?",
+        payload={
+            "series_id": series_id,
+            "merchant": "Netflix",
+            "old_cents": -1599,
+            "new_cents": -1899,
+            "occurred_on": "2026-07-15",
+            "llm_flagged": True,
+        },
+    )
+
+
+async def test_price_change_resolution_true_applies_amount(session: AsyncSession) -> None:
+    series = await make_series(session)
+    item = _price_change_item(series.id)
+    session.add(item)
+    await session.flush()
+    await apply_resolution(session, item, {"is_price_change": True})
+    assert series.expected_cents == -1899
+    ev = (await session.execute(select(SeriesEvent))).scalar_one()
+    assert ev.kind == EventKind.price_increase
+    assert ev.occurred_on == date(2026, 7, 15)
+    assert ev.details == {"old_cents": -1599, "new_cents": -1899}
+    assert item.status == ReviewStatus.resolved
+
+
+async def test_price_change_resolution_false_resolves_without_applying(
+    session: AsyncSession,
+) -> None:
+    series = await make_series(session)
+    item = _price_change_item(series.id)
+    session.add(item)
+    await session.flush()
+    await apply_resolution(session, item, {"is_price_change": False})
+    assert series.expected_cents == -1599
+    assert (await session.execute(select(SeriesEvent))).scalar_one_or_none() is None
+    assert item.status == ReviewStatus.resolved

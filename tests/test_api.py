@@ -4,14 +4,16 @@ from decimal import Decimal
 
 import httpx
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from moneta.aggregator.base import AccountDTO, Snapshot, TransactionDTO
 from moneta.api import create_app
+from moneta.models import RecurringSeries, ReviewItem
 from moneta.pipelines.recurring import detect_recurring
 from moneta.pipelines.run import RESYNC_OVERLAP_DAYS
 from tests.conftest import FakeAdapter, RecordingAdapter
-from tests.factories import make_account, make_txn
+from tests.factories import make_account, make_series, make_txn
 
 # The /sync and /power endpoints resolve date.today() at request time, so snapshot
 # dates must be relative — pinned dates would go stale as real time passes.
@@ -284,3 +286,45 @@ async def test_review_context_enrichment(
     assert len(samples) == 3
     assert samples[0]["amount"] == "45.00"  # newest first
     assert rc["context"]["direction"] == "outflow"
+
+
+async def test_review_resolve_price_change_validates_and_applies(
+    client: httpx.AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    async with sessionmaker() as session:
+        series = await make_series(session)
+        series_id = series.id
+        session.add(
+            ReviewItem(
+                kind="price_change",
+                question="Did 'Netflix' change price from $15.99 to $18.99?",
+                payload={
+                    "series_id": series_id,
+                    "merchant": "Netflix",
+                    "old_cents": -1599,
+                    "new_cents": -1899,
+                    "occurred_on": "2026-07-15",
+                    "llm_flagged": True,
+                },
+            )
+        )
+        await session.commit()
+
+    items = (await client.get("/review")).json()
+    assert len(items) == 1 and items[0]["kind"] == "price_change"
+    item_id = items[0]["id"]
+    assert items[0]["context"]["old_amount"] == "15.99"
+    assert items[0]["context"]["new_amount"] == "18.99"
+
+    r = await client.post(f"/review/{item_id}/resolve", json={"resolution": {}})
+    assert r.status_code == 422
+
+    r = await client.post(
+        f"/review/{item_id}/resolve", json={"resolution": {"is_price_change": True}}
+    )
+    assert r.status_code == 200
+    async with sessionmaker() as session:
+        refreshed = (
+            await session.execute(select(RecurringSeries).where(RecurringSeries.id == series_id))
+        ).scalar_one()
+        assert refreshed.expected_cents == -1899
