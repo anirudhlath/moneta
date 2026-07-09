@@ -194,9 +194,9 @@ async def test_resync_does_not_duplicate_missed_events(session: AsyncSession) ->
     today = date(2026, 5, 1)
 
     await detect_recurring(session, llm=None, today=today)
-    await emit_series_events(session, today=today)
+    await emit_series_events(session, llm=None, today=today)
     await detect_recurring(session, llm=None, today=today)
-    await emit_series_events(session, today=today)
+    await emit_series_events(session, llm=None, today=today)
 
     missed = (
         (await session.execute(select(SeriesEvent).where(SeriesEvent.kind == EventKind.missed)))

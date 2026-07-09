@@ -79,6 +79,7 @@ class ReviewKind(StrEnum):
     merchant = "merchant"
     transfer_pair = "transfer_pair"
     recurring_cluster = "recurring_cluster"
+    price_change = "price_change"
 
 
 class Base(DeclarativeBase):

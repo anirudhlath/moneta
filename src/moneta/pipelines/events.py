@@ -3,10 +3,14 @@ from datetime import date, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from moneta.llm import Classifier
 from moneta.models import (
     Cadence,
     EventKind,
     RecurringSeries,
+    ReviewItem,
+    ReviewKind,
+    ReviewStatus,
     SeriesEvent,
     SeriesStatus,
     Transaction,
@@ -21,9 +25,49 @@ _GRACE: dict[Cadence, int] = {
 }
 _PRICE_CHANGE_THRESHOLD = 0.05
 
+_PRICE_PROMPT = """You are double-checking a detected price change on a recurring bill.
+Series: {merchant!r}, expected ${old} {cadence}; latest charge ${new} on {posted_on}.
+Is this a genuine new price for the same bill (vs. a one-off or unrelated charge)?
+Respond with JSON: {{"is_price_change": true/false, "confident": true/false}}
+Set confident=true ONLY if you are sure either way."""
 
-async def emit_series_events(session: AsyncSession, today: date) -> int:
+
+async def _confirms_price_change(
+    llm: Classifier, series: RecurringSeries, latest: Transaction
+) -> bool:
+    answer = await llm.classify_json(
+        _PRICE_PROMPT.format(
+            merchant=series.merchant,
+            old=f"{abs(series.expected_cents) / 100:.2f}",
+            cadence=series.cadence,
+            new=f"{abs(latest.amount_cents) / 100:.2f}",
+            posted_on=latest.posted_on.isoformat(),
+        )
+    )
+    return (
+        answer is not None
+        and answer.get("is_price_change") is True
+        and answer.get("confident") is True
+    )
+
+
+async def emit_series_events(session: AsyncSession, llm: Classifier | None, today: date) -> int:
     emitted = 0
+    # price-change questions already in flight (open) or answered "no" (denied)
+    open_series: set[int] = set()
+    denied: set[tuple[int, int]] = set()
+    for item in (
+        await session.execute(select(ReviewItem).where(ReviewItem.kind == ReviewKind.price_change))
+    ).scalars():
+        sid = item.payload.get("series_id")
+        if not isinstance(sid, int):
+            continue
+        if item.status == ReviewStatus.open:
+            open_series.add(sid)
+        elif isinstance(item.resolution, dict) and item.resolution.get("is_price_change") is False:
+            new_cents = item.payload.get("new_cents")
+            if isinstance(new_cents, int):
+                denied.add((sid, new_cents))
     series_list = (
         (
             await session.execute(
@@ -71,16 +115,43 @@ async def emit_series_events(session: AsyncSession, today: date) -> int:
         ).scalar_one_or_none()
         if latest is not None and s.expected_cents != 0:
             drift = abs(latest.amount_cents - s.expected_cents) / abs(s.expected_cents)
-            if drift > _PRICE_CHANGE_THRESHOLD:
-                session.add(
-                    SeriesEvent(
-                        series_id=s.id,
-                        kind=EventKind.price_increase,
-                        occurred_on=latest.posted_on,
-                        details={"old_cents": s.expected_cents, "new_cents": latest.amount_cents},
+            if (
+                drift > _PRICE_CHANGE_THRESHOLD
+                and s.id not in open_series
+                and (s.id, latest.amount_cents) not in denied
+            ):
+                if llm is None or await _confirms_price_change(llm, s, latest):
+                    session.add(
+                        SeriesEvent(
+                            series_id=s.id,
+                            kind=EventKind.price_increase,
+                            occurred_on=latest.posted_on,
+                            details={
+                                "old_cents": s.expected_cents,
+                                "new_cents": latest.amount_cents,
+                            },
+                        )
                     )
-                )
-                s.expected_cents = latest.amount_cents
-                emitted += 1
+                    s.expected_cents = latest.amount_cents
+                    emitted += 1
+                else:
+                    session.add(
+                        ReviewItem(
+                            kind=ReviewKind.price_change,
+                            question=(
+                                f"Did {s.merchant!r} change price from "
+                                f"${abs(s.expected_cents) / 100:.2f} to "
+                                f"${abs(latest.amount_cents) / 100:.2f}?"
+                            ),
+                            payload={
+                                "series_id": s.id,
+                                "merchant": s.merchant,
+                                "old_cents": s.expected_cents,
+                                "new_cents": latest.amount_cents,
+                                "occurred_on": latest.posted_on.isoformat(),
+                                "llm_flagged": True,
+                            },
+                        )
+                    )
     await session.commit()
     return emitted

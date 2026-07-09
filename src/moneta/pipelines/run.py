@@ -57,7 +57,7 @@ async def run_sync(
     recurring = await detect_recurring(session, llm, today)
     # second opinion on what detection produced, before events fire on it
     verify = await verify_series(session, llm)
-    events = await emit_series_events(session, today)
+    events = await emit_series_events(session, llm, today)
     return SyncReport(
         ingest=ingest,
         normalized=normalized,
