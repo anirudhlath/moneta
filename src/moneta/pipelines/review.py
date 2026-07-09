@@ -190,6 +190,8 @@ async def autoreview_items(session: AsyncSession, llm: Classifier) -> int:
     )
     resolved = 0
     for item in items:
+        if item.payload.get("llm_flagged"):
+            continue  # opened because the LLM already looked — human-only
         context = await review_context(session, item)
         if item.kind == ReviewKind.merchant:
             prompt = _MERCHANT_PROMPT.format(

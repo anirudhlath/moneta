@@ -214,3 +214,18 @@ async def test_verify_without_llm_is_noop(session: AsyncSession) -> None:
     await _series_with_occurrences(session)
     assert await verify_series(session, None) == VerifyStats()
     assert (await session.execute(select(ReviewItem))).scalar_one_or_none() is None
+
+
+async def test_autoreview_skips_llm_flagged_items(session: AsyncSession) -> None:
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.recurring_cluster,
+            question="Is 'Costco' a recurring bill?",
+            payload={"merchant": "Costco", "direction": "outflow", "llm_flagged": True},
+        )
+    )
+    await session.flush()
+    llm = ScriptedLLM({"Costco": {"is_recurring": True, "confident": True}})
+    assert await autoreview_items(session, llm) == 0
+    assert llm.prompts == []  # the LLM already looked once; re-asking is circular
+    assert len(await _open_items(session)) == 1
