@@ -27,7 +27,7 @@ Run it: `uv run moneta --help` (CLI, no server needed — in-process ASGI) or `u
 ## Layout
 
 - `aggregator/` — adapter protocol + SimpleFIN; DTOs stop at `pipelines/ingest.py`
-- `pipelines/` — ingest, normalize, transfers, recurring, events, run (orchestrator)
+- `pipelines/` — ingest, normalize, transfers, review (LLM auto-review), recurring, events, run (orchestrator)
 - `views/` — power (flagship), cashflow, networth, financing (obligations are derived, not stored)
 - `api.py` — all endpoints; `cli/` — thin client, zero business logic
 - `queries.py` — shared cross-table lookups (`classified_links`, `account_type_map`)
