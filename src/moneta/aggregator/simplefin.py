@@ -15,9 +15,10 @@ from moneta.aggregator.base import AccountDTO, HoldingDTO, Snapshot, Transaction
 # trailing 90 days of the range and recommends ≤45 ("in the future, this may be
 # capped") — so a deep `since` must be fetched as a backward walk of ≤45-day windows.
 _WINDOW_DAYS = 45
-# Deep walks (since=epoch) stop after ~1 year of windows with no txns in any account,
-# rather than walking to 1970: institutions hand the bridge a bounded history.
-_MAX_EMPTY_WINDOWS = 8
+# A windowed walk stops after >1 year (9×45=405 days) of consecutive windows yielding no
+# new txns, rather than walking to `since` (which may be 1970): institutions hand the
+# bridge a bounded history. >365 so an annual-only cadence can't terminate the walk.
+_MAX_EMPTY_WINDOWS = 9
 
 
 def _split_auth(access_url: str) -> tuple[str, tuple[str, str]]:
@@ -61,8 +62,13 @@ class SimpleFINAdapter:
             if since is None:
                 return _parse_snapshot(await self._get(own, {"pending": 1}))
             snap: Snapshot | None = None
+            known: set[tuple[str, str]] = set()
             empty_streak = 0
-            end = date.today() + timedelta(days=1)  # end-date is exclusive; include today
+            # UTC date, not local: bridge timestamps are UTC, and a local evening date
+            # would put the exclusive end-date in the past, clipping today's txns.
+            # max(…, since) guarantees at least one window even for a future `since`,
+            # so account balances always refresh.
+            end = max(datetime.now(UTC).date(), since) + timedelta(days=1)
             while end > since and empty_streak < _MAX_EMPTY_WINDOWS:
                 start = max(since, end - timedelta(days=_WINDOW_DAYS))
                 window = _parse_snapshot(
@@ -75,14 +81,14 @@ class SimpleFINAdapter:
                         },
                     )
                 )
+                fresh = [t for t in window.transactions if (t.account_id, t.id) not in known]
+                known.update((t.account_id, t.id) for t in fresh)
                 if snap is None:
                     snap = window  # freshest window wins: current accounts/balances/holdings
+                    snap.transactions = fresh
                 else:
-                    known = {(t.account_id, t.id) for t in snap.transactions}
-                    snap.transactions.extend(
-                        t for t in window.transactions if (t.account_id, t.id) not in known
-                    )
-                empty_streak = 0 if window.transactions else empty_streak + 1
+                    snap.transactions.extend(fresh)
+                empty_streak = 0 if fresh else empty_streak + 1
                 end = start
             return snap or Snapshot(accounts=[], transactions=[], holdings=[])
         finally:
