@@ -36,7 +36,7 @@ async def emit_series_events(session: AsyncSession, today: date) -> int:
     for s in series_list:
         grace = timedelta(days=_GRACE[s.cadence])
 
-        if today > s.next_expected_on + grace:
+        while today > s.next_expected_on + grace:
             window_hit = (
                 await session.execute(
                     select(Transaction.id)
