@@ -1,7 +1,8 @@
 import base64
 import json
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import httpx
 
@@ -87,6 +88,93 @@ async def test_fetch_since_sends_start_date() -> None:
     )
     await adapter.fetch(since=date(2026, 4, 1))
     assert "start-date" in seen and int(seen["start-date"]) > 0
+
+
+def _ts(d: date) -> int:
+    return int(datetime(d.year, d.month, d.day, tzinfo=UTC).timestamp())
+
+
+def _windowed_bridge(
+    txn_days_ago: list[int], balances: list[str]
+) -> tuple[httpx.AsyncClient, list[tuple[int, int]]]:
+    """Fake bridge holding one account whose txns sit at the given days-ago offsets.
+
+    Serves only the txns inside each request's [start-date, end-date) window and
+    records every requested window. Balance comes from `balances` per request
+    (first response = freshest), repeating the last entry once exhausted.
+    """
+    today = date.today()
+    requests: list[tuple[int, int]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        start, end = int(params["start-date"]), int(params["end-date"])
+        requests.append((start, end))
+        txns = [
+            {
+                "id": f"TRN-{days}",
+                "posted": _ts(today - timedelta(days=days)),
+                "amount": "-10.00",
+                "description": f"CHARGE {days}",
+                "pending": False,
+            }
+            for days in txn_days_ago
+            if start <= _ts(today - timedelta(days=days)) < end
+        ]
+        balance = balances[min(len(requests) - 1, len(balances) - 1)]
+        payload: dict[str, Any] = {
+            "errors": [],
+            "accounts": [
+                {
+                    "org": {"name": "Chase"},
+                    "id": "ACT-1",
+                    "name": "Checking",
+                    "currency": "USD",
+                    "balance": balance,
+                    "balance-date": _ts(today),
+                    "transactions": txns,
+                }
+            ],
+        }
+        return httpx.Response(200, json=payload)
+
+    return _mock_client(httpx.MockTransport(handle)), requests
+
+
+async def test_deep_since_windows_requests_and_merges() -> None:
+    """The bridge caps ranges at 90d (recommends 45d); a deep pull must walk windows."""
+    client, requests = _windowed_bridge([10, 60, 100], balances=["100.00", "999.99"])
+    adapter = SimpleFINAdapter("https://u:p@bridge.example/simplefin", client=client)
+    today = date.today()
+    snap = await adapter.fetch(since=today - timedelta(days=120))
+    # all three txns retrieved even though they span >90 days
+    assert sorted(t.id for t in snap.transactions) == ["TRN-10", "TRN-100", "TRN-60"]
+    # windows: [t-44, t+1), [t-89, t-44), [t-120, t-89) — each ≤45 days, walking back to since
+    assert len(requests) == 3
+    assert requests[0] == (_ts(today - timedelta(days=44)), _ts(today + timedelta(days=1)))
+    assert requests[1] == (_ts(today - timedelta(days=89)), _ts(today - timedelta(days=44)))
+    assert requests[2] == (_ts(today - timedelta(days=120)), _ts(today - timedelta(days=89)))
+    # accounts/balances come from the first (freshest) window
+    assert snap.accounts[0].balance == Decimal("100.00")
+    assert len(snap.accounts) == 1
+
+
+async def test_epoch_since_stops_after_empty_window_streak() -> None:
+    """An epoch pull must not walk to 1970 — stop once a year of windows comes back empty."""
+    client, requests = _windowed_bridge([10], balances=["100.00"])
+    adapter = SimpleFINAdapter("https://u:p@bridge.example/simplefin", client=client)
+    snap = await adapter.fetch(since=date(1970, 1, 1))
+    assert [t.id for t in snap.transactions] == ["TRN-10"]
+    assert len(requests) == 9  # 1 window with data + 8 empty (~1 year) → stop
+
+
+async def test_recent_since_is_a_single_request() -> None:
+    client, requests = _windowed_bridge([3], balances=["100.00"])
+    adapter = SimpleFINAdapter("https://u:p@bridge.example/simplefin", client=client)
+    today = date.today()
+    snap = await adapter.fetch(since=today - timedelta(days=7))
+    assert [t.id for t in snap.transactions] == ["TRN-3"]
+    assert requests == [(_ts(today - timedelta(days=7)), _ts(today + timedelta(days=1)))]
 
 
 async def test_claim_setup_token() -> None:
