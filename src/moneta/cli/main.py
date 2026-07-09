@@ -1,12 +1,16 @@
 from datetime import date
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from moneta.cli.client import request
+
+if TYPE_CHECKING:
+    from moneta.aggregator.plaid import PlaidClient
+    from moneta.config import Settings
 
 app = typer.Typer(no_args_is_help=True, help="moneta — personal finance, one honest number.")
 import_app = typer.Typer(no_args_is_help=True)
@@ -284,6 +288,116 @@ def setup_simplefin(token: str) -> None:
     access_url = asyncio.run(claim_setup_token(token))
     save_config_value("simplefin_access_url", access_url)
     console.print("[green]SimpleFIN connected.[/green] Run: moneta sync")
+
+
+def _plaid_client() -> tuple["PlaidClient", "Settings"]:
+    from moneta.aggregator.plaid import PlaidClient
+    from moneta.config import load_settings
+
+    settings = load_settings()
+    if not (settings.plaid_client_id and settings.plaid_secret):
+        console.print(
+            "[red]Error:[/red] Plaid credentials not set. "
+            "Run: moneta setup plaid <client_id> <secret>"
+        )
+        raise typer.Exit(1)
+    return (
+        PlaidClient(settings.plaid_client_id, settings.plaid_secret, settings.plaid_env),
+        settings,
+    )
+
+
+@setup_app.command("plaid")
+def setup_plaid(
+    client_id: str,
+    secret: str,
+    env: Annotated[str, typer.Option("--env", help="production or sandbox")] = "production",
+) -> None:
+    """Save Plaid API credentials (get them at https://dashboard.plaid.com)."""
+    from moneta.config import save_config_value
+
+    if env not in ("production", "sandbox"):
+        console.print(f"[red]Error:[/red] --env must be production or sandbox, got {env!r}")
+        raise typer.Exit(1)
+    save_config_value("plaid_client_id", client_id)
+    save_config_value("plaid_secret", secret)
+    save_config_value("plaid_env", env)
+    console.print("[green]Plaid credentials saved.[/green] Link a bank: moneta setup plaid-link")
+
+
+@setup_app.command("plaid-link")
+def setup_plaid_link(
+    product: Annotated[
+        list[str] | None,
+        typer.Option("--product", help="Repeat to add products (default: transactions)."),
+    ] = None,
+) -> None:
+    """Link a bank via Plaid Hosted Link: prints a URL, waits for you to finish."""
+    import asyncio
+
+    from moneta.aggregator import plaid
+
+    client, settings = _plaid_client()
+    products = product or ["transactions"]
+
+    async def _link() -> str:
+        link_token, url = await plaid.create_hosted_link(client, products)
+        console.print(f"Open this link in your browser to connect your bank:\n[bold]{url}[/bold]")
+        console.print("Waiting for you to finish (Ctrl-C aborts)…")
+        public_token, institution = await plaid.poll_link_result(client, link_token)
+        access_token, item_id = await plaid.exchange_public_token(client, public_token)
+        path = plaid.items_path(settings.config_dir)
+        items = plaid.load_items(path)
+        items.append(
+            plaid.PlaidItem(
+                item_id=item_id,
+                access_token=access_token,
+                institution_name=institution,
+                products=products,
+            )
+        )
+        plaid.save_items(path, items)
+        return institution or item_id
+
+    name = asyncio.run(_link())
+    console.print(f"[green]Linked {name}.[/green] Run: moneta sync")
+
+
+@setup_app.command("plaid-list")
+def setup_plaid_list() -> None:
+    """List linked Plaid institutions."""
+    from moneta.aggregator.plaid import items_path, load_items
+    from moneta.config import load_settings
+
+    items = load_items(items_path(load_settings().config_dir))
+    if not items:
+        console.print("No Plaid items linked. Run: moneta setup plaid-link")
+        return
+    table = Table("Institution", "Item ID", "Products")
+    for it in items:
+        table.add_row(it.institution_name or "?", it.item_id, ", ".join(it.products))
+    console.print(table)
+
+
+@setup_app.command("plaid-unlink")
+def setup_plaid_unlink(item_id: str) -> None:
+    """Unlink a Plaid item (stops Plaid billing for it); synced data stays in the db."""
+    import asyncio
+
+    from moneta.aggregator.plaid import items_path, load_items, save_items
+
+    client, settings = _plaid_client()
+    path = items_path(settings.config_dir)
+    items = load_items(path)
+    match = next((it for it in items if it.item_id == item_id), None)
+    if match is None:
+        console.print(
+            f"[red]Error:[/red] no linked item {item_id!r} (see: moneta setup plaid-list)"
+        )
+        raise typer.Exit(1)
+    asyncio.run(client.post("/item/remove", {"access_token": match.access_token}))
+    save_items(path, [it for it in items if it.item_id != item_id])
+    console.print(f"[green]Unlinked {match.institution_name or item_id}.[/green]")
 
 
 @app.command()
