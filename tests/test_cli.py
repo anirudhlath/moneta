@@ -284,3 +284,106 @@ def test_backup_command(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no
     result = runner.invoke(app, ["backup", str(dest)])
     assert result.exit_code == 0
     assert dest.exists()
+
+
+def test_obligations_renders_deferred_interest_warning(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def _seed() -> None:
+        # /obligations resolves date.today() at request time — seed relative dates
+        from datetime import date as _date
+        from datetime import timedelta as _timedelta
+
+        from moneta.models import AccountType, TransferLink
+        from tests.factories import make_account, make_txn
+
+        today = _date.today()
+        engine, sessionmaker = make_sessionmaker(f"sqlite+aiosqlite:///{tmp_path / 'moneta.db'}")
+        await init_db(engine)
+        async with sessionmaker() as session:
+            checking = await make_account(session, type=AccountType.checking)
+            loan = await make_account(
+                session,
+                type=AccountType.loan,
+                name="Synchrony CarCare",
+                balance_cents=-121500,
+                promo_expires_on=today + _timedelta(days=60),
+            )
+            series = await make_series(
+                session,
+                merchant="Synchrony Bank",
+                expected_cents=-13500,
+                next_expected_on=today + _timedelta(days=27),
+            )
+            for days_ago in (65, 35, 4):
+                out = await make_txn(
+                    session,
+                    checking,
+                    amount_cents=-13500,
+                    merchant="Synchrony Bank",
+                    posted_on=today - _timedelta(days=days_ago),
+                    series_id=series.id,
+                )
+                inn = await make_txn(
+                    session,
+                    loan,
+                    amount_cents=13500,
+                    merchant="Synchrony Bank",
+                    posted_on=today - _timedelta(days=days_ago),
+                )
+                session.add(
+                    TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule")
+                )
+            await session.commit()
+        await engine.dispose()
+
+    asyncio.run(_seed())
+    result = runner.invoke(app, ["obligations"])
+    assert result.exit_code == 0
+    assert "Synchrony" in result.output  # rich may wrap the full name across cell lines
+    assert "deferred interest" in result.output  # payoff ~9mo out > promo ~2mo out
+    assert "Traceback" not in result.output
+
+
+def test_recurring_events_flag_renders_table(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def _seed() -> None:
+        from moneta.models import EventKind, SeriesEvent
+
+        engine, sessionmaker = make_sessionmaker(f"sqlite+aiosqlite:///{tmp_path / 'moneta.db'}")
+        await init_db(engine)
+        async with sessionmaker() as session:
+            series = await make_series(session)
+            session.add(
+                SeriesEvent(
+                    series_id=series.id,
+                    kind=EventKind.missed,
+                    occurred_on=date(2026, 6, 15),
+                    details={"expected_on": "2026-06-15"},
+                )
+            )
+            await session.commit()
+        await engine.dispose()
+
+    asyncio.run(_seed())
+    result = runner.invoke(app, ["recurring", "--events"])
+    assert result.exit_code == 0
+    assert "missed" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_setup_simplefin_saves_access_url(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def fake_claim(token: str) -> str:
+        assert token == "TOKEN"
+        return "https://u:p@bridge.example/simplefin"
+
+    monkeypatch.setattr("moneta.aggregator.simplefin.claim_setup_token", fake_claim)
+    result = runner.invoke(app, ["setup", "simplefin", "TOKEN"])
+    assert result.exit_code == 0
+    assert "connected" in result.output.lower()
+    from moneta.config import load_settings
+
+    assert load_settings().simplefin_access_url == "https://u:p@bridge.example/simplefin"

@@ -1,5 +1,7 @@
+import tomllib
 from pathlib import Path
 
+import pytest
 from pydantic_settings import BaseSettings
 
 from moneta.config import Settings, load_settings, save_config_value
@@ -42,3 +44,10 @@ def test_save_config_value_restricts_permissions(tmp_path: Path, monkeypatch) ->
     save_config_value("llm_model", "gpt")
     assert (tmp_path / "config.toml").stat().st_mode & 0o777 == 0o600
     assert tmp_path.stat().st_mode & 0o777 == 0o700
+
+
+def test_malformed_config_file_raises_toml_error(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("MONETA_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.toml").write_text("not = = valid\n")
+    with pytest.raises(tomllib.TOMLDecodeError):
+        load_settings()

@@ -333,3 +333,18 @@ async def test_backup_requires_file_backed_db(
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         assert (await c.post("/backup", json={})).status_code == 400
+
+
+async def test_patch_unknown_account_is_404(client: httpx.AsyncClient) -> None:
+    r = await client.patch("/accounts/999999", json={"type": "savings"})
+    assert r.status_code == 404
+
+
+async def test_resolve_unknown_review_item_is_404(client: httpx.AsyncClient) -> None:
+    r = await client.post("/review/999999/resolve", json={"resolution": {}})
+    assert r.status_code == 404
+
+
+async def test_import_vesting_malformed_csv_is_422(client: httpx.AsyncClient) -> None:
+    r = await client.post("/import/vesting", json={"csv": "ticker,vested\nACME,40\n"})
+    assert r.status_code == 422
