@@ -187,8 +187,8 @@ def cashflow(
     }
     r = request("GET", "/cashflow", params=params or None)
     table = Table(title=f"Cashflow — {r['start']} to {r['end']}", show_header=False)
-    table.add_row("Accrual spend", f"${r['accrual']}")
-    table.add_row("Cash out", f"${r['cash_out']}")
+    table.add_row("Accrual spend", fmt_money(r["accrual_cents"]))
+    table.add_row("Cash out", fmt_money(r["cash_out_cents"]))
     console.print(table)
 
 

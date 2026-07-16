@@ -200,13 +200,18 @@ def test_cashflow_date_flags_pass_params(monkeypatch) -> None:  # type: ignore[n
         params: dict[str, Any] | None = None,
     ) -> Any:
         calls.append((method, path, params))
-        return {"start": "2026-01-01", "end": "2026-06-30", "accrual": "12.34", "cash_out": "5.00"}
+        return {
+            "start": "2026-01-01",
+            "end": "2026-06-30",
+            "accrual_cents": 1234,
+            "cash_out_cents": 500,
+        }
 
     monkeypatch.setattr("moneta.cli.main.request", fake_request)
     result = runner.invoke(app, ["cashflow", "--start", "2026-01-01", "--end", "2026-06-30"])
     assert result.exit_code == 0
     assert calls == [("GET", "/cashflow", {"start": "2026-01-01", "end": "2026-06-30"})]
-    assert "12.34" in result.output
+    assert "$12.34" in result.output
 
 
 def test_cashflow_invalid_date_fails_cleanly(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]

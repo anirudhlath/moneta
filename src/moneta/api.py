@@ -3,7 +3,6 @@ import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime
-from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -107,8 +106,8 @@ class VestingIn(BaseModel):
 class CashflowReport(BaseModel):
     start: date
     end: date
-    accrual: Decimal
-    cash_out: Decimal
+    accrual_cents: int
+    cash_out_cents: int
 
 
 class SyncRunOut(BaseModel):
@@ -222,10 +221,12 @@ def create_app(
         return CashflowReport(
             start=range_start,
             end=range_end,
-            accrual=await accrual_spend(
+            accrual_cents=await accrual_spend(
                 session, range_start, range_end, links=links, primary=primary
             ),
-            cash_out=await cash_out(session, range_start, range_end, links=links, primary=primary),
+            cash_out_cents=await cash_out(
+                session, range_start, range_end, links=links, primary=primary
+            ),
         )
 
     @app.get("/recurring")
