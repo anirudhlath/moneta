@@ -126,7 +126,7 @@ Sourced from `docs/backlog/` (one file per ticket — see each for context and a
 
 **High**
 - Distinguish fixed obligations from habitual discretionary spending (a weekly restaurant is "recurring" but not a fixed cost — prompts and amount-stability signal must separate them).
-- Real Synchrony financing accounts infer as `credit` (org says "Credit Cards"), hiding their payments from power/obligations — the marquee financing use case fails on real data.
+- Detect financing-mode credit cards from behavior (no purchases + equal periodic payments + owed balance) and give them loan semantics — real Synchrony store cards type as `credit`, hiding their payments from power/obligations.
 - Loan payments must derive from per-account transfer links, not merchant strings (banks collapse multiple cards' payments into one descriptor).
 - Brokerage accounts without holdings are invisible to net worth.
 - Fidelity NetBenefits CSV mapping (direct export → vesting import).
