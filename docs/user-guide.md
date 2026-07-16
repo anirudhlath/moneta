@@ -148,7 +148,9 @@ ledger a bill/habit/not-recurring answer would (`resolved_by: "manual"`), so a w
 detection verdict is always human-correctable: `--not-a-bill` ends the series immediately and
 suppresses it from every future sync; `--habit` flips it to discretionary spending and
 reactivates it if it had ended; `--re-review` reopens the ledger item so it reappears in
-`moneta review` (and a fresh answer can supersede the old one).
+`moneta review` (and a fresh answer can supersede the old one). `--re-review` only reopens
+the question — it never changes the series itself, so an ended series stays ended until you
+answer `h` (habit, reactivates) or bump it back with the API's status PATCH.
 
 ### `moneta obligations`
 

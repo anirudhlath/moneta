@@ -255,9 +255,9 @@ def obligations() -> None:
 
 
 def _parse_bool_flag(value: str) -> bool:
-    if value == "true":
+    if value.lower() == "true":
         return True
-    if value == "false":
+    if value.lower() == "false":
         return False
     console.print(f"[red]Error:[/red] invalid value {value!r} (expected true|false)")
     raise typer.Exit(1)
