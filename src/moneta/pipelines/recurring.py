@@ -52,9 +52,15 @@ def reactivate_series(series: RecurringSeries, today: date) -> None:
     series.status = SeriesStatus.active
 
 
-_LLM_PROMPT = """Is this group of bank transactions one recurring bill/subscription?
-Merchant: {merchant!r}; amounts (cents) and dates: {rows}
-Respond with JSON: {{"is_recurring": true/false}}"""
+_LLM_PROMPT = """Classify this group of bank transactions from one merchant.
+- "bill": a fixed obligation — subscription, rent, insurance, loan or membership payment; \
+roughly stable amount; there are consequences if unpaid.
+- "habit": recurring discretionary spending — restaurants, coffee, bars, groceries, \
+rideshare; variable amounts; a fresh choice each time.
+- "not_recurring": neither — coincidental repetition.
+Merchant: {merchant!r}; amount cents min/median/max: {lo}/{med}/{hi}
+Amounts (cents) and dates: {rows}
+Respond with JSON: {{"classification": "bill" | "habit" | "not_recurring"}}"""
 
 
 class RecurringStats(BaseModel):
@@ -102,7 +108,7 @@ async def detect_recurring(
     stats = RecurringStats()
     excluded, loan_payment_outflows = await _excluded_txn_ids(session)
     reviewed: set[tuple[str, str]] = set()
-    force: dict[tuple[str, str], bool] = {}
+    force: dict[tuple[str, str], tuple[bool, bool]] = {}
     for item in (
         await session.execute(
             select(ReviewItem).where(ReviewItem.kind == ReviewKind.recurring_cluster)
@@ -117,7 +123,10 @@ async def detect_recurring(
         elif isinstance(item.resolution, dict) and isinstance(
             item.resolution.get("is_recurring"), bool
         ):
-            force[key] = item.resolution["is_recurring"]
+            force[key] = (
+                item.resolution["is_recurring"],
+                bool(item.resolution.get("discretionary")),
+            )
     existing = {
         (s.merchant, s.direction): s
         for s in (await session.execute(select(RecurringSeries))).scalars()
@@ -183,8 +192,9 @@ async def detect_recurring(
         stable = all(abs(a - med) <= med * _AMOUNT_TOLERANCE for a in amounts)
         expected = -round(med) if direction == Direction.outflow else round(med)
         forced = force.get((merchant, str(direction)))
-        if forced is False:
+        if forced is not None and forced[0] is False:
             continue  # user-resolved as not recurring — suppress silently, forever
+        discretionary = forced[1] if forced is not None else False
 
         def _open_review(merchant: str = merchant, direction: Direction = direction) -> None:
             if (merchant, str(direction)) not in reviewed:
@@ -198,24 +208,30 @@ async def detect_recurring(
                 stats.review += 1
 
         if cadence is None:
-            if forced is not True:  # irregular timing needs a human, not the LLM
+            if forced is None or forced[0] is not True:  # irregular timing needs a human
                 # only ask when it plausibly IS a bill: steady amounts at bill-like intervals
                 if stable and _median_gap(dates) >= _MIN_REVIEW_GAP_DAYS:
                     _open_review()
                 continue
             cadence = _closest_cadence(dates)
-        elif not stable and forced is not True:
+        elif not stable and (forced is None or forced[0] is not True):
             answer = (
                 await llm.classify_json(
                     _LLM_PROMPT.format(
                         merchant=merchant,
+                        lo=min(amounts),
+                        med=round(med),
+                        hi=max(amounts),
                         rows=[(t.amount_cents, t.posted_on.isoformat()) for t in run],
                     )
                 )
                 if llm
                 else None
             )
-            if not (answer and answer.get("is_recurring")):
+            classification = answer.get("classification") if answer else None
+            if classification == "habit":
+                discretionary = True
+            elif classification != "bill":
                 _open_review()
                 continue
         next_on = advance_expected_on(dates[-1], cadence)
@@ -229,6 +245,7 @@ async def detect_recurring(
                 expected_cents=expected,
                 next_expected_on=next_on,
                 status=SeriesStatus.ended if stale else SeriesStatus.active,
+                discretionary=discretionary,
             )
             session.add(series)
             await session.flush()
@@ -268,10 +285,12 @@ async def detect_recurring(
                 series.next_expected_on != advanced_on
                 or series.cadence != cadence
                 or series.status != status
+                or series.discretionary != discretionary
             )
             series.cadence = cadence
             series.next_expected_on = advanced_on
             series.status = status
+            series.discretionary = discretionary
             if changed:
                 stats.updated += 1
         for t in significant:

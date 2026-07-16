@@ -12,6 +12,7 @@ from moneta.models import (
     EventKind,
     RecurringSeries,
     ReviewItem,
+    ReviewKind,
     ReviewStatus,
     SeriesEvent,
     SeriesStatus,
@@ -291,7 +292,7 @@ async def test_llm_gates_but_never_sets_expected_amount(session: AsyncSession) -
         await make_txn(
             session, acct, amount_cents=cents, merchant="Util Co", posted_on=date(2026, month, 10)
         )
-    llm = _UnstableLLM({"is_recurring": True, "expected_amount_cents": 999999})
+    llm = _UnstableLLM({"classification": "bill", "expected_amount_cents": 999999})
     stats = await detect_recurring(session, llm=llm, today=date(2026, 7, 1))
     assert stats.new_series == 1
     s = (await _series(session))[0]
@@ -304,10 +305,93 @@ async def test_llm_rejects_group_creates_review_no_series(session: AsyncSession)
         await make_txn(
             session, acct, amount_cents=cents, merchant="Util Co", posted_on=date(2026, month, 10)
         )
-    llm = _UnstableLLM({"is_recurring": False})
+    llm = _UnstableLLM({"classification": "not_recurring"})
     stats = await detect_recurring(session, llm=llm, today=date(2026, 7, 1))
     assert stats.new_series == 0 and stats.review == 1
     assert (await _series(session)) == []
+
+
+async def _seed_weekly_unstable(
+    session: AsyncSession, merchant: str = "Neighborhood Bistro"
+) -> None:
+    """4 weekly-cadence charges with a >2x amount spread — cadence matches, amount doesn't,
+    so detection must ask the three-way bill/habit/not_recurring question."""
+    acct = await make_account(session)
+    for d, cents in (
+        (date(2026, 6, 1), -2176),
+        (date(2026, 6, 8), -12035),
+        (date(2026, 6, 15), -3886),
+        (date(2026, 6, 22), -4100),
+    ):
+        await make_txn(session, acct, amount_cents=cents, merchant=merchant, posted_on=d)
+
+
+async def test_unstable_llm_habit_becomes_discretionary(session: AsyncSession) -> None:
+    await _seed_weekly_unstable(session)
+    llm = _UnstableLLM({"classification": "habit"})
+    stats = await detect_recurring(session, llm=llm, today=date(2026, 7, 1))
+    assert stats.new_series == 1
+    s = (await _series(session))[0]
+    assert s.cadence == Cadence.weekly
+    assert s.discretionary is True
+
+
+async def test_unstable_llm_bill_stays_fixed(session: AsyncSession) -> None:
+    await _seed_weekly_unstable(session)
+    llm = _UnstableLLM({"classification": "bill"})
+    stats = await detect_recurring(session, llm=llm, today=date(2026, 7, 1))
+    assert stats.new_series == 1
+    s = (await _series(session))[0]
+    assert s.cadence == Cadence.weekly
+    assert s.discretionary is False
+
+
+async def test_unstable_llm_not_recurring_opens_review(session: AsyncSession) -> None:
+    await _seed_weekly_unstable(session)
+    llm = _UnstableLLM({"classification": "not_recurring"})
+    stats = await detect_recurring(session, llm=llm, today=date(2026, 7, 1))
+    assert stats.new_series == 0 and stats.review == 1
+    assert (await _series(session)) == []
+
+
+async def test_unstable_no_llm_opens_review(session: AsyncSession) -> None:
+    """Unchanged behavior: with no LLM configured, an unstable-amount group still
+    degrades to a human review item rather than guessing bill vs. habit."""
+    await _seed_weekly_unstable(session)
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.new_series == 0 and stats.review == 1
+    assert (await _series(session)) == []
+
+
+async def test_stable_subscription_unchanged(session: AsyncSession) -> None:
+    await _seed_monthly(session, (4, 5, 6))
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.new_series == 1
+    s = (await _series(session))[0]
+    assert s.discretionary is False
+
+
+async def test_force_map_habit_applies_on_update(session: AsyncSession) -> None:
+    await _seed_monthly(session, (4, 5, 6), merchant="Habit Co")
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    s = (await _series(session))[0]
+    assert s.discretionary is False
+
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.recurring_cluster,
+            status=ReviewStatus.resolved,
+            question="Is 'Habit Co' a recurring bill?",
+            payload={"merchant": "Habit Co", "direction": Direction.outflow},
+            resolution={"is_recurring": True, "discretionary": True},
+        )
+    )
+    await session.commit()
+
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.updated == 1
+    s = (await _series(session))[0]
+    assert s.discretionary is True
 
 
 async def test_resync_does_not_duplicate_missed_events(session: AsyncSession) -> None:
@@ -370,7 +454,7 @@ async def test_recurring_cluster_resolved_false_suppresses_series_forever(
 
     # An LLM that would say "yes" proves force=False suppresses without even
     # consulting the LLM — distinguishing this from the pre-fix behavior.
-    llm = _UnstableLLM({"is_recurring": True})
+    llm = _UnstableLLM({"classification": "bill"})
     stats2 = await detect_recurring(session, llm=llm, today=date(2026, 7, 1))
     assert stats2.new_series == 0 and stats2.review == 0
     assert (await _series(session)) == []
