@@ -4,13 +4,12 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.models import Account, AccountType, Transaction, from_cents, to_cents
+from moneta.models import Account, AccountType, Transaction, to_cents
 
 
 def test_cents_roundtrip() -> None:
     assert to_cents(Decimal("-42.50")) == -4250
-    assert from_cents(-4250) == Decimal("-42.5")
-    assert to_cents(from_cents(123456789)) == 123456789
+    assert to_cents(Decimal("1234567.89")) == 123456789
 
 
 async def test_account_and_transaction_roundtrip(session: AsyncSession) -> None:

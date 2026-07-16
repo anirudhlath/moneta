@@ -26,5 +26,5 @@ and normalization all become auditable.
   [--merchant NAME]` renders a rich table; excluded rows visibly marked
   (dim/label), not hidden.
 - Read-only view: no commits (views don't commit).
-- Money values follow whatever convention the API-money-normalization ticket
-  lands on (`docs/backlog/medium/normalize-api-money-representation.md`).
+- Money values are integer cents (`*_cents`), per the established API
+  convention — no Decimal-as-string, no pre-formatted display strings.

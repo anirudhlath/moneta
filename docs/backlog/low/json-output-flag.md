@@ -8,15 +8,14 @@ widgets, cron checks) without a web frontend.
 
 ## Context / motivation
 The CLI is a thin client over JSON endpoints, so this is nearly free: emit
-the already-received payload instead of a table. It becomes much more useful
-once money fields are machine-friendly — do it together with (or after)
-`docs/backlog/medium/normalize-api-money-representation.md`, since today's
-mix of Decimal-as-string and pre-formatted display strings is awkward for
-consumers.
+the already-received payload instead of a table. Money fields are already
+machine-friendly (integer cents, `*_cents`, no Decimal-as-string or
+pre-formatted display strings), so this needs no coordination with other
+work.
 
 ## Acceptance criteria
 - Every read command accepts `--json` and prints the API response as JSON to
   stdout (no rich markup, suitable for piping to `jq`).
 - Exit codes unchanged; errors still go to stderr as today.
-- Money representation follows the normalization ticket's convention.
+- Money fields are integer cents (`*_cents`), matching every other API response.
 - One test per command asserting valid JSON parses from stdout.
