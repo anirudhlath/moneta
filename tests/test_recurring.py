@@ -20,7 +20,7 @@ from moneta.models import (
 )
 from moneta.pipelines.events import emit_series_events
 from moneta.pipelines.recurring import advance_expected_on, detect_recurring, monthly_cents
-from tests.factories import make_account, make_txn
+from tests.factories import make_account, make_series, make_txn
 
 
 async def _series(session: AsyncSession) -> list[RecurringSeries]:
@@ -96,7 +96,11 @@ async def test_non_recurring_ignored(session: AsyncSession) -> None:
     assert stats.new_series == 0 and stats.review == 0
 
 
-async def test_internal_transfers_excluded_loan_payments_kept(session: AsyncSession) -> None:
+async def test_internal_transfers_and_loan_payments_excluded(session: AsyncSession) -> None:
+    """Internal transfers were always excluded from merchant grouping. Wave-2 Task 8
+    changed loan-linked payment outflows from "kept" to also excluded — their
+    per-account cadence/amount is now derived in queries.loan_payment_stats instead
+    of forming their own merchant series (design 2026-07-16 §3)."""
     checking = await make_account(session, type=AccountType.checking)
     savings = await make_account(session, type=AccountType.savings)
     loan = await make_account(session, type=AccountType.loan)
@@ -119,7 +123,7 @@ async def test_internal_transfers_excluded_loan_payments_kept(session: AsyncSess
         session.add(
             TransferLink(outflow_id=out_s.id, inflow_id=in_s.id, confidence=1.0, method="rule")
         )
-        # loan payment checking->loan: kept as a series
+        # loan payment checking->loan: excluded from grouping too (Task 8)
         out_l = await make_txn(
             session,
             checking,
@@ -139,9 +143,126 @@ async def test_internal_transfers_excluded_loan_payments_kept(session: AsyncSess
         )
     await session.flush()
     stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
-    assert stats.new_series == 1
-    s = (await _series(session))[0]
-    assert s.merchant == "Synchrony Bank" and s.expected_cents == -13500
+    assert stats.new_series == 0
+    assert (await _series(session)) == []
+
+
+async def test_loan_linked_payments_form_no_series(session: AsyncSession) -> None:
+    """Three monthly outflows to the same merchant, each transfer-linked to a loan
+    account inflow, must never form a merchant series — loan_payment_stats owns
+    their per-account derivation instead."""
+    checking = await make_account(session, type=AccountType.checking)
+    loan = await make_account(session, type=AccountType.loan)
+    for month in (4, 5, 6):
+        out = await make_txn(
+            session,
+            checking,
+            amount_cents=-13500,
+            merchant="Synchrony Bank",
+            posted_on=date(2026, month, 5),
+        )
+        inn = await make_txn(session, loan, amount_cents=13500, posted_on=date(2026, month, 5))
+        session.add(
+            TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule")
+        )
+    await session.flush()
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.new_series == 0
+    assert (await _series(session)) == []
+
+
+async def test_existing_merged_payment_series_ends(session: AsyncSession) -> None:
+    """A series that existed before Task 8 shipped, whose occurrences are entirely
+    loan-linked payment outflows, gets untagged and ended on the first run after."""
+    checking = await make_account(session, type=AccountType.checking)
+    loan = await make_account(session, type=AccountType.loan)
+    series = await make_series(
+        session,
+        merchant="Synchrony Bank",
+        expected_cents=-13500,
+        next_expected_on=date(2026, 7, 5),
+    )
+    outflow_ids: list[int] = []
+    for month in (4, 5, 6):
+        out = await make_txn(
+            session,
+            checking,
+            amount_cents=-13500,
+            merchant="Synchrony Bank",
+            posted_on=date(2026, month, 5),
+            series_id=series.id,
+        )
+        inn = await make_txn(session, loan, amount_cents=13500, posted_on=date(2026, month, 5))
+        session.add(
+            TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule")
+        )
+        outflow_ids.append(out.id)
+    await session.flush()
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 8))
+    assert stats.new_series == 0
+    assert series.status == SeriesStatus.ended
+    untagged = (
+        (await session.execute(select(Transaction).where(Transaction.id.in_(outflow_ids))))
+        .scalars()
+        .all()
+    )
+    assert all(t.series_id is None for t in untagged)
+
+
+async def test_partial_untag_keeps_series(session: AsyncSession) -> None:
+    """A series with both loan-linked and genuine occurrences loses only the
+    loan-linked ones; the genuine occurrences keep it active."""
+    checking = await make_account(session, type=AccountType.checking)
+    loan = await make_account(session, type=AccountType.loan)
+    series = await make_series(
+        session,
+        merchant="Synchrony Bank",
+        expected_cents=-13500,
+        next_expected_on=date(2026, 3, 5),
+    )
+    # two old occurrences, already tagged, that turn out to be loan-linked payments
+    old_ids: list[int] = []
+    for month in (1, 2):
+        out = await make_txn(
+            session,
+            checking,
+            amount_cents=-13500,
+            merchant="Synchrony Bank",
+            posted_on=date(2026, month, 5),
+            series_id=series.id,
+        )
+        inn = await make_txn(session, loan, amount_cents=13500, posted_on=date(2026, month, 5))
+        session.add(
+            TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule")
+        )
+        old_ids.append(out.id)
+    # three genuine, unlinked occurrences under the same merchant
+    genuine_ids: list[int] = []
+    for month in (4, 5, 6):
+        t = await make_txn(
+            session,
+            checking,
+            amount_cents=-13500,
+            merchant="Synchrony Bank",
+            posted_on=date(2026, month, 5),
+        )
+        genuine_ids.append(t.id)
+    await session.flush()
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 8))
+    assert stats.new_series == 0
+    assert series.status == SeriesStatus.active
+    old = (
+        (await session.execute(select(Transaction).where(Transaction.id.in_(old_ids))))
+        .scalars()
+        .all()
+    )
+    assert all(t.series_id is None for t in old)
+    genuine = (
+        (await session.execute(select(Transaction).where(Transaction.id.in_(genuine_ids))))
+        .scalars()
+        .all()
+    )
+    assert all(t.series_id == series.id for t in genuine)
 
 
 async def test_rerun_updates_not_duplicates(session: AsyncSession) -> None:

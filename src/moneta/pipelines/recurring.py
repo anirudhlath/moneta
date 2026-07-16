@@ -12,7 +12,6 @@ from moneta.cadence import match_cadence, monthlyize
 from moneta.llm import Classifier
 from moneta.models import (
     Account,
-    AccountType,
     Cadence,
     Direction,
     EventKind,
@@ -83,21 +82,25 @@ def _closest_cadence(dates: list[date]) -> Cadence:
     return min(CADENCE_DAYS, key=lambda c: abs(CADENCE_DAYS[c] - med))
 
 
-async def _excluded_txn_ids(session: AsyncSession) -> set[int]:
-    """Transfer-linked txns are excluded UNLESS the link pays into a loan account."""
+async def _excluded_txn_ids(session: AsyncSession) -> tuple[set[int], set[int]]:
+    """All transfer-linked txns are excluded from merchant grouping. Loan-like payment
+    outflows are additionally untagged — their per-account derivation lives in
+    queries.loan_payment_stats, not in a merchant series (design 2026-07-16 §3)."""
     excluded: set[int] = set()
+    loan_payment_outflows: set[int] = set()
     for link in await classified_links(session):
-        excluded.add(link.inflow_id)  # inflow side is never a spend/income signal
-        if link.inflow_account_type != AccountType.loan:
-            excluded.add(link.outflow_id)
-    return excluded
+        excluded.add(link.inflow_id)
+        excluded.add(link.outflow_id)
+        if link.inflow_is_loan_like:
+            loan_payment_outflows.add(link.outflow_id)
+    return excluded, loan_payment_outflows
 
 
 async def detect_recurring(
     session: AsyncSession, llm: Classifier | None, today: date
 ) -> RecurringStats:
     stats = RecurringStats()
-    excluded = await _excluded_txn_ids(session)
+    excluded, loan_payment_outflows = await _excluded_txn_ids(session)
     reviewed: set[tuple[str, str]] = set()
     force: dict[tuple[str, str], bool] = {}
     for item in (
@@ -144,6 +147,16 @@ async def detect_recurring(
             owner = series_by_id.get(t.series_id)
             if owner is not None and owner.merchant != t.merchant:
                 t.series_id = None
+
+    # loan-like payment outflows no longer belong to a merchant series — their
+    # per-account cadence/amount is derived in queries.loan_payment_stats instead
+    # (design 2026-07-16 §3). Untag them and remember which series they leave behind
+    # so an orphaned series (no tagged txns left) can be ended in the final sweep.
+    untagged_series: set[int] = set()
+    for t in txns:
+        if t.id in loan_payment_outflows and t.series_id is not None:
+            untagged_series.add(t.series_id)
+            t.series_id = None
 
     groups: dict[tuple[str, Direction], list[Transaction]] = {}
     for t in txns:
@@ -277,10 +290,17 @@ async def detect_recurring(
     for series in existing.values():
         if series.status != SeriesStatus.active:
             continue
-        # detect_recurring tags every occurrence it matches, so an active series always
-        # has tagged txns; without any there is no evidence to judge — leave it alone.
+        # detect_recurring tags every occurrence it matches, so an active series
+        # normally always has tagged txns. Zero tagged txns means either there's no
+        # evidence to judge (leave it alone) or every txn it had was just untagged as
+        # a loan payment (its per-account derivation owns it now — end it here).
         last_seen = newest_by_series.get(series.id)
-        if last_seen is not None and _stale(last_seen, series.cadence, today):
+        if last_seen is None:
+            if series.id in untagged_series:
+                series.status = SeriesStatus.ended
+                stats.updated += 1
+            continue
+        if _stale(last_seen, series.cadence, today):
             series.status = SeriesStatus.ended
             stats.updated += 1
     await session.commit()
