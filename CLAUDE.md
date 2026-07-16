@@ -52,7 +52,7 @@ Pure-internal refactors with zero behavior change may skip this, but state that 
 
 ## Gotchas
 
-- `httpx.ASGITransport` never fires FastAPI lifespan — the CLI's in-process path runs `init_db` itself (cli/client.py); a real `moneta serve` gets it from lifespan.
+- `httpx.ASGITransport` never fires FastAPI lifespan — the CLI's in-process path drives the app's own lifespan manually around each request (`app.router.lifespan_context`, cli/client.py), so `init_db` and engine disposal happen exactly where a real `moneta serve` would run them.
 - Endpoints resolve `date.today()` at request time; test data must be date-relative (see tests/test_e2e.py's anchoring comment).
 - SimpleFIN gives no account types — they're inferred from name/org keywords (`pipelines/ingest.py`); Plaid supplies real types via `AccountDTO.type_hint`, which beats inference; user overrides via `moneta accounts --set-type` survive re-sync.
 - Backlog convention: `docs/backlog/<priority>/<kebab-case>.md`; QA items in `docs/qa-backlog/`.

@@ -133,7 +133,11 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if engine is not None:
             await init_db(engine)
-        yield
+        try:
+            yield
+        finally:
+            if engine is not None:
+                await engine.dispose()
 
     async def check_auth(authorization: Annotated[str | None, Header()] = None) -> None:
         if api_token is None:
@@ -154,7 +158,6 @@ def create_app(
         redoc_url="/redoc" if public else None,
         openapi_url="/openapi.json" if public else None,
     )
-    app.state.engine = engine
 
     async def get_session() -> AsyncIterator[AsyncSession]:
         async with sessionmaker() as session:
