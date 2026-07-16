@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.llm import Classifier
+from moneta.llm import CLASSIFICATION_TAXONOMY, Classifier
 from moneta.models import (
     Account,
     AliasSource,
@@ -27,6 +27,7 @@ from moneta.models import (
     Transaction,
     TransferLink,
     dollars,
+    recurring_cluster_item,
     series_key,
 )
 from moneta.pipelines.events import apply_price_change
@@ -51,17 +52,16 @@ Merchant: {merchant!r}; direction: {direction}; recent charges: {samples}
 Respond with JSON: {{"is_recurring": true/false, "confident": true/false}}
 Set confident=true ONLY if the pattern is clear."""
 
-_VERIFY_PROMPT = """You are double-checking automatic recurring-bill detection.
-- "bill": a fixed obligation — subscription, rent, insurance, loan or membership payment; \
-roughly stable amount; there are consequences if unpaid.
-- "habit": recurring discretionary spending — restaurants, coffee, bars, groceries, \
-rideshare; variable amounts; a fresh choice each time.
-- "not_recurring": neither — coincidental repetition.
-Merchant: {merchant!r}; direction: {direction}; cadence: {cadence}; \
-expected amount: ${expected}; amount cents min/median/max: {lo}/{med}/{hi}; \
-recent occurrences: {samples}
-Respond with JSON: {{"classification": "bill" | "habit" | "not_recurring", "confident": true/false}}
-Set confident=true ONLY if you are sure either way."""
+_VERIFY_PROMPT = (
+    "You are double-checking automatic recurring-bill detection.\n"
+    f"{CLASSIFICATION_TAXONOMY}\n"
+    "Merchant: {merchant!r}; direction: {direction}; cadence: {cadence}; "
+    "expected amount: ${expected}; amount cents min/median/max: {lo}/{med}/{hi}; "
+    "recent occurrences: {samples}\n"
+    'Respond with JSON: {{"classification": "bill" | "habit" | "not_recurring", '
+    '"confident": true/false}}\n'
+    "Set confident=true ONLY if you are sure either way."
+)
 
 
 def _sample(txn: Transaction) -> dict[str, Any]:
@@ -362,11 +362,7 @@ async def verify_series(session: AsyncSession, llm: Classifier | None) -> Verify
                 samples=[_prompt_txn(_sample(t)) for t in occurrences],
             )
         )
-        item = ReviewItem(
-            kind=ReviewKind.recurring_cluster,
-            question=f"Is {series.merchant!r} a recurring bill?",
-            payload={"merchant": series.merchant, "direction": series.direction},
-        )
+        item = recurring_cluster_item(series.merchant, series.direction)
         classification = answer.get("classification") if answer else None
         if classification not in ("bill", "habit", "not_recurring"):
             classification = None

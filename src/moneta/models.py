@@ -55,6 +55,16 @@ def series_key(merchant: object, direction: object) -> tuple[str, str] | None:
         return None
 
 
+def recurring_cluster_item(merchant: str, direction: str) -> "ReviewItem":
+    """The one recurring_cluster ReviewItem construction — question text and payload
+    shape are pinned by tests. Used by detection, verification, and the API ledger."""
+    return ReviewItem(
+        kind=ReviewKind.recurring_cluster,
+        question=f"Is {merchant!r} a recurring bill?",
+        payload={"merchant": merchant, "direction": direction},
+    )
+
+
 class Cadence(StrEnum):
     weekly = "weekly"
     biweekly = "biweekly"

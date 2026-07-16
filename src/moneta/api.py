@@ -29,6 +29,7 @@ from moneta.models import (
     SeriesEvent,
     SeriesStatus,
     SyncRun,
+    recurring_cluster_item,
 )
 from moneta.pipelines.normalize import renormalize_merchants
 from moneta.pipelines.recurring import reactivate_series
@@ -288,11 +289,7 @@ def create_app(
             .first()
         )
         if item is None:
-            item = ReviewItem(
-                kind=ReviewKind.recurring_cluster,
-                question=f"Is {series.merchant!r} a recurring bill?",
-                payload={"merchant": series.merchant, "direction": series.direction},
-            )
+            item = recurring_cluster_item(series.merchant, series.direction)
             session.add(item)
             await session.flush()
         return series, item
