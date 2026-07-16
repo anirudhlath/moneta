@@ -339,5 +339,5 @@ async def test_price_change_context_includes_recent_occurrences(session: AsyncSe
     session.add(item)
     await session.flush()
     ctx = await review_context(session, item)
-    assert ctx["old_amount"] == "15.99" and ctx["new_amount"] == "18.99"
-    assert ctx["samples"] == [{"posted_on": "2026-07-15", "amount": "18.99"}]
+    assert ctx["old_amount_cents"] == -1599 and ctx["new_amount_cents"] == -1899
+    assert ctx["samples"] == [{"posted_on": "2026-07-15", "amount_cents": -1899}]

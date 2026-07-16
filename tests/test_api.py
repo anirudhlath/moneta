@@ -318,18 +318,18 @@ async def test_review_context_enrichment(
         items = (await client.get("/review")).json()
 
     tp = next(i for i in items if i["kind"] == "transfer_pair")
-    assert tp["context"]["outflow"]["amount"] == "500.00"
+    assert tp["context"]["outflow"]["amount_cents"] == -50000
     assert tp["context"]["outflow"]["description"] == "ACH TRANSFER"
     cands = tp["context"]["candidates"]
     assert [c["description"] for c in cands] == ["DEPOSIT A", "DEPOSIT B"]
     assert cands[0]["account"] == "My Savings"
-    assert cands[0]["amount"] == "500.00"
+    assert cands[0]["amount_cents"] == 50000
     assert cands[0]["id"] == c1.id
 
     rc = next(i for i in items if i["kind"] == "recurring_cluster")
     samples = rc["context"]["samples"]
     assert len(samples) == 3
-    assert samples[0]["amount"] == "45.00"  # newest first
+    assert samples[0]["amount_cents"] == -4500  # newest first, sign intact
     assert rc["context"]["direction"] == "outflow"
 
 
@@ -345,8 +345,8 @@ async def test_review_resolve_price_change_validates_and_applies(
     items = (await client.get("/review")).json()
     assert len(items) == 1 and items[0]["kind"] == "price_change"
     item_id = items[0]["id"]
-    assert items[0]["context"]["old_amount"] == "15.99"
-    assert items[0]["context"]["new_amount"] == "18.99"
+    assert items[0]["context"]["old_amount_cents"] == -1599
+    assert items[0]["context"]["new_amount_cents"] == -1899
 
     r = await client.post(f"/review/{item_id}/resolve", json={"resolution": {}})
     assert r.status_code == 422

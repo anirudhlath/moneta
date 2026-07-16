@@ -275,30 +275,32 @@ def _review_one(item: dict[str, object]) -> dict[str, object] | None:
     assert isinstance(ctx, dict)
     if item["kind"] == "recurring_cluster":
         for s in ctx.get("samples", []):
-            console.print(f"    {s['posted_on']}  ${s['amount']}")
+            console.print(f"    {s['posted_on']}  {fmt_money(abs(s['amount_cents']))}")
         if ctx.get("direction") == "inflow":
             console.print("    [dim](these are deposits — answering y counts them as income)[/dim]")
         answer = _prompt_yes_no("Recurring? [y/n]")
         return None if answer is None else {"is_recurring": answer}
     if item["kind"] == "price_change":
         for s in ctx.get("samples", []):
-            console.print(f"    {s['posted_on']}  ${s['amount']}")
+            console.print(f"    {s['posted_on']}  {fmt_money(abs(s['amount_cents']))}")
+        old, new = ctx.get("old_amount_cents"), ctx.get("new_amount_cents")
         console.print(
-            f"    ${ctx.get('old_amount')} → ${ctx.get('new_amount')} on {ctx.get('occurred_on')}"
+            f"    {fmt_money(abs(old)) if isinstance(old, int) else '?'} → "
+            f"{fmt_money(abs(new)) if isinstance(new, int) else '?'} on {ctx.get('occurred_on')}"
         )
         answer = _prompt_yes_no("Price change? [y/n]")
         return None if answer is None else {"is_price_change": answer}
     if item["kind"] == "transfer_pair":
         if outflow := ctx.get("outflow"):
             console.print(
-                f"    out: ${outflow['amount']} on {outflow['posted_on']} "
+                f"    out: {fmt_money(abs(outflow['amount_cents']))} on {outflow['posted_on']} "
                 f"from {outflow['account']} — {outflow['description']!r}"
             )
         candidates = ctx.get("candidates") or []
         if candidates:
             for n, c in enumerate(candidates, 1):
                 console.print(
-                    f"    {n}. ${c['amount']} on {c['posted_on']} "
+                    f"    {n}. {fmt_money(abs(c['amount_cents']))} on {c['posted_on']} "
                     f"into {c['account']} — {c['description']!r}"
                 )
             answer = typer.prompt(
