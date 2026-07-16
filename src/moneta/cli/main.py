@@ -202,8 +202,8 @@ def obligations() -> None:
         warn = " [red]![/red]" if ob["deferred_interest_risk"] else ""
         table.add_row(
             escape(ob["account_name"]),
-            f"${ob['balance_owed']}",
-            f"${ob['monthly_payment']}" if ob["monthly_payment"] else "?",
+            fmt_money(ob["balance_owed_cents"]),
+            fmt_money(ob["monthly_payment_cents"]) if ob["monthly_payment_cents"] else "?",
             str(ob["months_left"] or "?"),
             f"{payoff}{warn}",
             str(ob["promo_expires_on"] or "—"),

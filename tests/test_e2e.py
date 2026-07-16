@@ -136,7 +136,7 @@ async def test_full_pipeline_power_and_obligations(client: httpx.AsyncClient) ->
     obs = (await client.get("/obligations")).json()
     assert len(obs) == 1
     assert obs[0]["months_left"] == 9
-    assert Decimal(obs[0]["monthly_payment"]) == Decimal("135.00")
+    assert obs[0]["monthly_payment_cents"] == 13500
 
     networth = (await client.get("/networth")).json()
     # 4200 + 10000 - (350 + 1215)

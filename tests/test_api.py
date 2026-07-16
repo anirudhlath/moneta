@@ -506,3 +506,17 @@ async def test_networth_money_fields_are_ints(client: httpx.AsyncClient) -> None
         "unvested_potential_cents",
     ):
         assert isinstance(body[key], int), key
+
+
+async def test_obligations_money_fields_are_ints(
+    client: httpx.AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    from moneta.models import AccountType
+
+    async with sessionmaker() as session:
+        await make_account(session, type=AccountType.loan, balance_cents=-121500)
+        await session.commit()
+
+    body = (await client.get("/obligations")).json()
+    assert body[0]["balance_owed_cents"] == 121500  # int, not "1215.00"
+    assert body[0]["monthly_payment_cents"] is None

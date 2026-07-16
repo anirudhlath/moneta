@@ -1,5 +1,4 @@
 from datetime import date
-from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,8 +47,8 @@ async def test_obligation_derived(session: AsyncSession) -> None:
     assert len(obs) == 1
     ob = obs[0]
     assert ob.account_name == "Synchrony CarCare"
-    assert ob.balance_owed == Decimal("1215.00")
-    assert ob.monthly_payment == Decimal("135.00")
+    assert ob.balance_owed_cents == 121500
+    assert ob.monthly_payment_cents == 13500
     assert ob.months_left == 9  # ceil(1215 / 135)
     assert ob.payoff_estimate == date(2027, 4, 3)  # today + 9*30 days
     assert ob.deferred_interest_risk is False
@@ -65,7 +64,7 @@ async def test_loan_without_series_has_no_payment(session: AsyncSession) -> None
     await make_account(session, type=AccountType.loan, balance_cents=-50000)
     obs = await compute_obligations(session, today=date(2026, 7, 7))
     assert len(obs) == 1
-    assert obs[0].monthly_payment is None and obs[0].months_left is None
+    assert obs[0].monthly_payment_cents is None and obs[0].months_left is None
     assert obs[0].deferred_interest_risk is False
 
 

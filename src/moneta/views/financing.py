@@ -1,6 +1,5 @@
 import math
 from datetime import date, timedelta
-from decimal import Decimal
 
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -10,7 +9,6 @@ from moneta.models import (
     Account,
     AccountType,
     RecurringSeries,
-    from_cents,
 )
 from moneta.pipelines.recurring import monthly_cents
 from moneta.queries import ClassifiedLink, classified_links
@@ -19,8 +17,8 @@ from moneta.queries import ClassifiedLink, classified_links
 class Obligation(BaseModel):
     account_id: int
     account_name: str
-    balance_owed: Decimal
-    monthly_payment: Decimal | None
+    balance_owed_cents: int
+    monthly_payment_cents: int | None
     months_left: int | None
     payoff_estimate: date | None
     promo_expires_on: date | None
@@ -53,8 +51,8 @@ async def compute_obligations(session: AsyncSession, today: date) -> list[Obliga
     links = await classified_links(session)
     result: list[Obligation] = []
     for loan in loans:
-        balance_owed = from_cents(abs(loan.balance_cents))
-        payment: Decimal | None = None
+        balance_owed_cents = abs(loan.balance_cents)
+        payment_cents: int | None = None
         months_left: int | None = None
         payoff: date | None = None
         series_id = _payment_series_id(loan.id, links)
@@ -64,9 +62,9 @@ async def compute_obligations(session: AsyncSession, today: date) -> list[Obliga
                     select(RecurringSeries).where(RecurringSeries.id == series_id)
                 )
             ).scalar_one()
-            payment = from_cents(abs(monthly_cents(series)))
-            if payment > 0:
-                months_left = math.ceil(balance_owed / payment)
+            payment_cents = abs(monthly_cents(series))
+            if payment_cents > 0:
+                months_left = math.ceil(balance_owed_cents / payment_cents)
                 payoff = today + timedelta(days=30 * months_left)
         risk = bool(
             payoff is not None
@@ -77,8 +75,8 @@ async def compute_obligations(session: AsyncSession, today: date) -> list[Obliga
             Obligation(
                 account_id=loan.id,
                 account_name=loan.name,
-                balance_owed=balance_owed,
-                monthly_payment=payment,
+                balance_owed_cents=balance_owed_cents,
+                monthly_payment_cents=payment_cents,
                 months_left=months_left,
                 payoff_estimate=payoff,
                 promo_expires_on=loan.promo_expires_on,
