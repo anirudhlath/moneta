@@ -153,6 +153,8 @@ isn't skipped by the incremental window. Plaid replays its full history (up to
 
 No server needed — the CLI runs the app in-process. To run a server instead:
 `uv run moneta serve`, then `export MONETA_API_URL=http://127.0.0.1:8300`.
+Binding a non-loopback host requires an API token (`MONETA_API_TOKEN` or
+`api_token` in config.toml); the CLI client sends it automatically.
 
 To enable the LLM second opinion, set `MONETA_LLM_MODEL` to any
 [LiteLLM model string](https://docs.litellm.ai/docs/providers) (e.g.
@@ -173,6 +175,8 @@ Unset = no LLM; ambiguous items go to `moneta review` instead.
 | `moneta accounts [--set-type ID TYPE] [--set-promo ID DATE]` | List accounts; set type / promo expiry |
 | `moneta import vesting <file.csv>` | Vesting data (`symbol,vested_quantity,unvested_quantity`) |
 | `moneta renormalize` | Re-apply improved merchant rules to already-synced data |
+| `moneta status` | Last sync run: when, success/failure, counts |
+| `moneta backup [dest]` | Online DB snapshot via SQLite `VACUUM INTO` |
 | `moneta serve` | Run the FastAPI server |
 
 ## Configuration
@@ -181,9 +185,11 @@ Env vars (`MONETA_*`) override `~/.config/moneta/config.toml`:
 `MONETA_SIMPLEFIN_ACCESS_URL`, `MONETA_PLAID_CLIENT_ID`, `MONETA_PLAID_SECRET`,
 `MONETA_PLAID_ENV` (`production` (default) or `sandbox`), `MONETA_LLM_MODEL` (any
 LiteLLM model string; unset = no LLM, ambiguous items go to `moneta review`),
-`MONETA_API_URL`, `MONETA_DB_PATH`, `MONETA_CONFIG_DIR` (config-file location;
-default `~/.config/moneta`). Linked Plaid banks (item ids + access tokens) live in
-`~/.config/moneta/plaid_items.json`.
+`MONETA_API_URL`, `MONETA_API_TOKEN`, `MONETA_DB_PATH`, `MONETA_CONFIG_DIR`
+(config-file location; default `~/.config/moneta`). Linked Plaid banks (item ids +
+access tokens) live in `~/.config/moneta/plaid_items.json`.
+
+Logs go to `<config dir>/moneta.log` (rotating); warnings also print to stderr.
 
 ## Development
 

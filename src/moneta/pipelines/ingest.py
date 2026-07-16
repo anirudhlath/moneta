@@ -1,9 +1,11 @@
+from datetime import date
+
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.aggregator.base import Snapshot
-from moneta.models import Account, AccountType, Holding, Transaction, to_cents
+from moneta.models import Account, AccountType, Holding, Transaction, TransferLink, to_cents
 
 _TYPE_HINTS: list[tuple[AccountType, tuple[str, ...]]] = [
     (AccountType.checking, ("checking",)),
@@ -25,6 +27,7 @@ def infer_account_type(name: str, org_name: str) -> AccountType:
 class IngestStats(BaseModel):
     new_accounts: int = 0
     new_transactions: int = 0
+    updated_transactions: int = 0
     holdings: int = 0
 
 
@@ -54,19 +57,52 @@ async def ingest_snapshot(session: AsyncSession, snap: Snapshot) -> IngestStats:
             existing.balance_date = dto.balance_date
         acct_ids[dto.id] = existing.id
 
-    seen = {
-        (aid, tid)
-        for aid, tid in (
-            await session.execute(select(Transaction.account_id, Transaction.aggregator_id))
+    # comparison columns as plain tuples — ORM rows are only fetched for the rare correction
+    existing_txns: dict[tuple[int, str], tuple[int, int, date, str]] = {
+        (aid, agg): (tid, cents, posted, desc)
+        for tid, aid, agg, cents, posted, desc in (
+            await session.execute(
+                select(
+                    Transaction.id,
+                    Transaction.account_id,
+                    Transaction.aggregator_id,
+                    Transaction.amount_cents,
+                    Transaction.posted_on,
+                    Transaction.description,
+                )
+            )
         ).all()
     }
+    relinked_ids: set[int] = set()
+    snapshot_new: set[tuple[int, str]] = set()
     for txn in snap.transactions:
         if txn.account_id not in acct_ids:
             continue
         key = (acct_ids[txn.account_id], txn.id)
-        if key in seen:
+        info = existing_txns.get(key)
+        if info is not None:
+            # institutions re-post corrections under the same id — take the new values
+            tid, old_cents, old_posted, old_desc = info
+            fields = (to_cents(txn.amount), txn.posted_on, txn.description)
+            if fields == (old_cents, old_posted, old_desc):
+                continue
+            row = await session.get_one(Transaction, tid)
+            if txn.description != old_desc:
+                # the merchant derives from the description — clear it so normalize
+                # (which runs right after ingest) re-derives it. series_id stays:
+                # detection untags only if the re-derived merchant actually moved,
+                # so a same-merchant correction can't fake a "genuinely new" txn
+                # and revive an ended series
+                row.merchant = None
+            if fields[:2] != (old_cents, old_posted):
+                relinked_ids.add(tid)  # amount/date matches behind a TransferLink are void
+            row.amount_cents, row.posted_on, row.description = fields
+            row.raw = txn.raw
+            existing_txns[key] = (tid, *fields)
+            stats.updated_transactions += 1
             continue
-        seen.add(key)
+        if key in snapshot_new:
+            continue
         session.add(
             Transaction(
                 account_id=key[0],
@@ -77,28 +113,48 @@ async def ingest_snapshot(session: AsyncSession, snap: Snapshot) -> IngestStats:
                 raw=txn.raw,
             )
         )
+        snapshot_new.add(key)
         stats.new_transactions += 1
+
+    if relinked_ids:
+        stale_links = (
+            (
+                await session.execute(
+                    select(TransferLink).where(
+                        or_(
+                            TransferLink.outflow_id.in_(relinked_ids),
+                            TransferLink.inflow_id.in_(relinked_ids),
+                        )
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for link in stale_links:  # link_transfers re-matches on the corrected values
+            await session.delete(link)
 
     for h in snap.holdings:
         if h.account_id not in acct_ids:
             continue
         acct_pk = acct_ids[h.account_id]
-        row = (
+        holding = (
             await session.execute(
                 select(Holding).where(Holding.account_id == acct_pk, Holding.symbol == h.symbol)
             )
         ).scalar_one_or_none()
-        if row is None:
-            row = Holding(
-                account_id=acct_pk,
-                symbol=h.symbol,
-                quantity=h.quantity,
-                market_value_cents=to_cents(h.market_value),
+        if holding is None:
+            session.add(
+                Holding(
+                    account_id=acct_pk,
+                    symbol=h.symbol,
+                    quantity=h.quantity,
+                    market_value_cents=to_cents(h.market_value),
+                )
             )
-            session.add(row)
         else:
-            row.quantity = h.quantity
-            row.market_value_cents = to_cents(h.market_value)
+            holding.quantity = h.quantity
+            holding.market_value_cents = to_cents(h.market_value)
         stats.holdings += 1
 
     await session.commit()

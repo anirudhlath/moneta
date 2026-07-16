@@ -1,5 +1,6 @@
 import os
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Iterator
 from datetime import date
 
 import pytest
@@ -14,6 +15,20 @@ def _clean_moneta_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tests must be hermetic: the developer's shell may export MONETA_* vars."""
     for key in [k for k in os.environ if k.startswith("MONETA_")]:
         monkeypatch.delenv(key)
+
+
+@pytest.fixture(autouse=True)
+def _utc_timezone() -> Iterator[None]:
+    """_ts_to_date converts in local time; pin TZ so tests don't depend on the machine."""
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = "UTC"
+    time.tzset()
+    yield
+    if old is None:
+        os.environ.pop("TZ", None)
+    else:
+        os.environ["TZ"] = old
+    time.tzset()
 
 
 @pytest.fixture

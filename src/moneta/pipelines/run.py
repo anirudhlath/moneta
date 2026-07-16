@@ -1,12 +1,13 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
+from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.aggregator.base import AggregatorAdapter
 from moneta.llm import Classifier
-from moneta.models import Transaction
+from moneta.models import SyncRun, Transaction
 from moneta.pipelines.events import emit_series_events
 from moneta.pipelines.ingest import IngestStats, ingest_snapshot
 from moneta.pipelines.normalize import normalize_merchants
@@ -47,18 +48,29 @@ async def run_sync(
     today: date,
     full: bool = False,
 ) -> SyncReport:
-    snap = await adapter.fetch(since=await _sync_since(session, full))
-    ingest = await ingest_snapshot(session, snap)
-    normalized = await normalize_merchants(session, llm)
-    transfers = await link_transfers(session, llm)
-    # auto-review before detection so confident LLM answers (incl. last sync's
-    # recurring questions) influence this run's series and exclusions
-    auto_resolved = await autoreview_items(session, llm) if llm else 0
-    recurring = await detect_recurring(session, llm, today)
-    # second opinion on what detection produced, before events fire on it
-    verify = await verify_series(session, llm)
-    events = await emit_series_events(session, llm, today)
-    return SyncReport(
+    run = SyncRun()
+    session.add(run)
+    await session.commit()
+    try:
+        snap = await adapter.fetch(since=await _sync_since(session, full))
+        ingest = await ingest_snapshot(session, snap)
+        normalized = await normalize_merchants(session, llm)
+        transfers = await link_transfers(session, llm)
+        # auto-review before detection so confident LLM answers (incl. last sync's
+        # recurring questions) influence this run's series and exclusions
+        auto_resolved = await autoreview_items(session, llm) if llm else 0
+        recurring = await detect_recurring(session, llm, today)
+        # second opinion on what detection produced, before events fire on it
+        verify = await verify_series(session, llm)
+        events = await emit_series_events(session, llm, today)
+    except Exception as exc:
+        await session.rollback()
+        run.finished_at = datetime.now()
+        run.error = f"{type(exc).__name__}: {exc}"
+        await session.commit()
+        logger.error("sync failed: {}", run.error)
+        raise
+    report = SyncReport(
         ingest=ingest,
         normalized=normalized,
         transfers=transfers,
@@ -67,3 +79,9 @@ async def run_sync(
         verify=verify,
         events=events,
     )
+    run.finished_at = datetime.now()
+    run.success = True
+    run.report = report.model_dump(mode="json")
+    await session.commit()
+    logger.info("sync ok: {}", run.report)
+    return report

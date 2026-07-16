@@ -1,4 +1,5 @@
 import statistics
+from calendar import monthrange
 from datetime import date, timedelta
 
 from pydantic import BaseModel
@@ -7,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.llm import Classifier
 from moneta.models import (
+    Account,
     AccountType,
     Cadence,
     Direction,
@@ -20,7 +22,7 @@ from moneta.models import (
     Transaction,
     series_key,
 )
-from moneta.queries import classified_links
+from moneta.queries import classified_links, primary_currency
 
 CADENCE_DAYS: dict[Cadence, int] = {
     Cadence.weekly: 7,
@@ -33,6 +35,13 @@ _TOLERANCE: dict[Cadence, int] = {
     Cadence.biweekly: 3,
     Cadence.monthly: 6,
     Cadence.annual: 20,
+}
+# days around next_expected_on within which a charge counts as "on time"
+GRACE_DAYS: dict[Cadence, int] = {
+    Cadence.weekly: 3,
+    Cadence.biweekly: 4,
+    Cadence.monthly: 7,
+    Cadence.annual: 30,
 }
 _MIN_OCCURRENCES = 3
 _AMOUNT_TOLERANCE = 0.20
@@ -48,6 +57,42 @@ _PER_MONTH: dict[Cadence, float] = {
     Cadence.monthly: 1.0,
     Cadence.annual: 1 / 12,
 }
+
+
+def _add_months(d: date, months: int) -> date:
+    total = d.month - 1 + months
+    year, month = d.year + total // 12, total % 12 + 1
+    return date(year, month, min(d.day, monthrange(year, month)[1]))
+
+
+def advance_expected_on(d: date, cadence: Cadence) -> date:
+    """One period after d — calendar-aware for monthly/annual so day-of-month holds."""
+    match cadence:
+        case Cadence.weekly:
+            return d + timedelta(days=7)
+        case Cadence.biweekly:
+            return d + timedelta(days=14)
+        case Cadence.monthly:
+            return _add_months(d, 1)
+        case Cadence.annual:
+            return _add_months(d, 12)
+
+
+def missed_event(series_id: int, window: date) -> SeriesEvent:
+    """The one shape of a missed-payment event — emitted here and by events.py."""
+    return SeriesEvent(
+        series_id=series_id,
+        kind=EventKind.missed,
+        occurred_on=window,
+        details={"expected_on": window.isoformat()},
+    )
+
+
+def reactivate_series(series: RecurringSeries, today: date) -> None:
+    """Forward-only bump: reactivating must not resurrect ancient missed windows."""
+    series.next_expected_on = max(series.next_expected_on, today)
+    series.status = SeriesStatus.active
+
 
 _LLM_PROMPT = """Is this group of bank transactions one recurring bill/subscription?
 Merchant: {merchant!r}; amounts (cents) and dates: {rows}
@@ -135,17 +180,32 @@ async def detect_recurring(
         (s.merchant, s.direction): s
         for s in (await session.execute(select(RecurringSeries))).scalars()
     }
+    # series feed power's income/fixed-cost sums, so they must be single-currency:
+    # only the primary currency's transactions can form or update a series
+    primary = await primary_currency(session)
     txns = (
         (
             await session.execute(
                 select(Transaction)
-                .where(Transaction.merchant.is_not(None))
+                .join(Account, Transaction.account_id == Account.id)
+                .where(Transaction.merchant.is_not(None), Account.currency == primary)
                 .order_by(Transaction.posted_on, Transaction.id)
             )
         )
         .scalars()
         .all()
     )
+    # a description correction can re-derive a txn's merchant away from the series it
+    # was tagged to — untag it so the old series doesn't keep stale occurrences and the
+    # new group sees it; same-merchant corrections stay tagged (so they never look
+    # "genuinely new" to the ended-series revival check below)
+    series_by_id = {s.id: s for s in existing.values()}
+    for t in txns:
+        if t.series_id is not None:
+            owner = series_by_id.get(t.series_id)
+            if owner is not None and owner.merchant != t.merchant:
+                t.series_id = None
+
     groups: dict[tuple[str, Direction], list[Transaction]] = {}
     for t in txns:
         if t.id in excluded or t.merchant is None:
@@ -206,7 +266,7 @@ async def detect_recurring(
             if not (answer and answer.get("is_recurring")):
                 _open_review()
                 continue
-        next_on = dates[-1] + timedelta(days=CADENCE_DAYS[cadence])
+        next_on = advance_expected_on(dates[-1], cadence)
         stale = _stale(dates[-1], cadence, today)
         series = existing.get((merchant, direction))
         if series is None:
@@ -240,6 +300,18 @@ async def detect_recurring(
                 status = SeriesStatus.active
             else:
                 status = series.status
+            if series.status == SeriesStatus.active and status == SeriesStatus.active:
+                # a resumed series leaps next_expected_on over unexamined windows here,
+                # and events.py only walks forward from the advanced value — emit misses
+                # for any empty window the leap skips (revivals deliberately don't burst).
+                # bound at the newest charge: windows past it were re-anchored by that
+                # charge and belong to events.py's future-guarded loop, not this one
+                grace_days = GRACE_DAYS[cadence]
+                window = series.next_expected_on
+                while window < dates[-1]:
+                    if not any(abs((d - window).days) <= grace_days for d in dates):
+                        session.add(missed_event(series.id, window))
+                    window = advance_expected_on(window, cadence)
             changed = (
                 series.next_expected_on != advanced_on
                 or series.cadence != cadence

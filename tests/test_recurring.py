@@ -19,7 +19,7 @@ from moneta.models import (
     TransferLink,
 )
 from moneta.pipelines.events import emit_series_events
-from moneta.pipelines.recurring import detect_recurring, monthly_cents
+from moneta.pipelines.recurring import advance_expected_on, detect_recurring, monthly_cents
 from tests.factories import make_account, make_txn
 
 
@@ -153,7 +153,7 @@ async def test_rerun_updates_not_duplicates(session: AsyncSession) -> None:
     stats = await detect_recurring(session, llm=None, today=date(2026, 7, 16))
     assert stats.new_series == 0 and stats.updated == 1
     s = (await _series(session))[0]
-    assert s.next_expected_on == date(2026, 8, 14)  # 7/15 + 30 days
+    assert s.next_expected_on == date(2026, 8, 15)  # 7/15 + 1 month
 
 
 class _UnstableLLM:
@@ -205,7 +205,7 @@ async def test_resync_does_not_duplicate_missed_events(session: AsyncSession) ->
     )
     assert len(missed) == 1
     s = (await _series(session))[0]
-    assert s.next_expected_on == date(2026, 5, 14)  # advance retained, not rewound
+    assert s.next_expected_on == date(2026, 5, 15)  # advance retained, not rewound
 
 
 async def test_recurring_cluster_resolved_true_creates_series_from_median(
@@ -281,7 +281,7 @@ async def test_stale_history_creates_ended_series(session: AsyncSession) -> None
     assert stats.new_series == 1
     s = (await _series(session))[0]
     assert s.status == SeriesStatus.ended
-    assert s.next_expected_on == date(2025, 4, 14)  # still computed: 3/15 + 30
+    assert s.next_expected_on == date(2025, 4, 15)  # still computed: 3/15 + 1 month
 
 
 async def test_active_series_auto_ends_when_stale(session: AsyncSession) -> None:
@@ -321,7 +321,7 @@ async def test_manually_ended_series_reactivates_on_new_occurrence(
     stats = await detect_recurring(session, llm=None, today=date(2026, 7, 16))
     assert stats.updated == 1
     assert s.status == SeriesStatus.active
-    assert s.next_expected_on == date(2026, 8, 14)
+    assert s.next_expected_on == date(2026, 8, 15)
 
 
 async def test_backfilled_old_txns_do_not_reactivate_ended_series(
@@ -365,7 +365,7 @@ async def test_auto_ended_series_reactivates_when_cadence_reestablished(
     assert stats.updated == 1
     s = (await _series(session))[0]
     assert s.status == SeriesStatus.active
-    assert s.next_expected_on == date(2026, 7, 31)
+    assert s.next_expected_on == date(2026, 8, 1)
 
 
 async def test_series_with_trailing_noise_still_auto_ends(session: AsyncSession) -> None:
@@ -519,3 +519,106 @@ async def test_cadence_miss_habitual_frequency_stays_silent(session: AsyncSessio
     stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
     assert stats.new_series == 0 and stats.review == 0
     assert (await session.execute(select(ReviewItem))).scalars().all() == []
+
+
+def test_advance_monthly_keeps_day_of_month() -> None:
+    assert advance_expected_on(date(2026, 1, 1), Cadence.monthly) == date(2026, 2, 1)
+    assert advance_expected_on(date(2026, 1, 31), Cadence.monthly) == date(2026, 2, 28)
+    assert advance_expected_on(date(2026, 4, 30), Cadence.monthly) == date(2026, 5, 30)
+
+
+def test_advance_annual_and_fixed_cadences() -> None:
+    assert advance_expected_on(date(2026, 2, 28), Cadence.annual) == date(2027, 2, 28)
+    assert advance_expected_on(date(2026, 7, 1), Cadence.weekly) == date(2026, 7, 8)
+    assert advance_expected_on(date(2026, 7, 1), Cadence.biweekly) == date(2026, 7, 15)
+
+
+async def test_foreign_currency_txns_never_form_series(session: AsyncSession) -> None:
+    await make_account(session, type=AccountType.checking)  # USD majority (tie → USD)
+    eur = await make_account(session, type=AccountType.checking, currency="EUR")
+    for month in (4, 5, 6):
+        await make_txn(
+            session, eur, amount_cents=-999, merchant="Spotify", posted_on=date(2026, month, 15)
+        )
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.new_series == 0 and stats.review == 0
+
+
+async def test_resumed_series_backfills_skipped_missed_windows(session: AsyncSession) -> None:
+    acct = await _seed_monthly(session, (1, 2, 3))
+    await detect_recurring(session, llm=None, today=date(2026, 3, 20))
+    s = (await _series(session))[0]
+    assert s.next_expected_on == date(2026, 4, 15)
+
+    # April's charge never arrives; the series resumes May–July before the next sync,
+    # so detection leaps next_expected_on from 4/15 to 8/15 over the empty April window
+    # (a resumed run needs 3 occurrences before cadence re-establishes — see _match_cadence)
+    await _seed_monthly(session, (5, 6, 7), acct=acct)
+    await detect_recurring(session, llm=None, today=date(2026, 7, 20))
+    missed = (
+        (await session.execute(select(SeriesEvent).where(SeriesEvent.kind == EventKind.missed)))
+        .scalars()
+        .all()
+    )
+    assert [e.occurred_on for e in missed] == [date(2026, 4, 15)]
+    assert s.next_expected_on == date(2026, 8, 15)
+
+    # idempotent: re-running detection emits nothing new
+    await detect_recurring(session, llm=None, today=date(2026, 7, 20))
+    missed = (
+        (await session.execute(select(SeriesEvent).where(SeriesEvent.kind == EventKind.missed)))
+        .scalars()
+        .all()
+    )
+    assert len(missed) == 1
+
+
+async def test_backfill_never_emits_future_windows(session: AsyncSession) -> None:
+    await _seed_monthly(session, (1, 2, 3), day=1)
+    await detect_recurring(session, llm=None, today=date(2026, 3, 2))
+    s = (await _series(session))[0]
+    assert s.next_expected_on == date(2026, 4, 1)
+
+    # the next charge posts 8 days late, re-anchoring the grid to the 9th
+    acct = (await session.execute(select(Account))).scalars().first()
+    assert acct is not None
+    await make_txn(
+        session, acct, amount_cents=-1599, merchant="Netflix", posted_on=date(2026, 4, 9)
+    )
+    await detect_recurring(session, llm=None, today=date(2026, 4, 10))
+    missed = (
+        (await session.execute(select(SeriesEvent).where(SeriesEvent.kind == EventKind.missed)))
+        .scalars()
+        .all()
+    )
+    # the 4/1 window genuinely had no charge within grace; 5/1 hasn't happened yet
+    assert [e.occurred_on for e in missed] == [date(2026, 4, 1)]
+
+
+async def test_detection_untags_txns_whose_merchant_moved(session: AsyncSession) -> None:
+    await _seed_monthly(session, (4, 5, 6))
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    s = (await _series(session))[0]
+    newest = (
+        await session.execute(select(Transaction).order_by(Transaction.posted_on.desc()).limit(1))
+    ).scalar_one()
+    assert newest.series_id == s.id
+    newest.merchant = "Spotify Usa"  # a description correction re-derived the merchant
+
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    await session.refresh(newest)
+    assert newest.series_id != s.id  # no longer feeds the Netflix series' stats
+
+
+async def test_same_merchant_tagged_txn_never_revives_ended_series(session: AsyncSession) -> None:
+    await _seed_monthly(session, (4, 5, 6))
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    s = (await _series(session))[0]
+    s.status = SeriesStatus.ended  # user cancels it
+    await session.commit()
+
+    # a description-only upstream correction leaves the txn tagged (see ingest.py);
+    # detection must not read it as a genuinely-new occurrence and revive the series
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    await session.refresh(s)
+    assert s.status == SeriesStatus.ended

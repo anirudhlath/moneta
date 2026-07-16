@@ -36,7 +36,28 @@ async def test_payment_on_time_no_miss(session: AsyncSession) -> None:
     assert await emit_series_events(session, llm=None, today=date(2026, 7, 1)) == 0
 
 
-async def test_price_increase_detected(session: AsyncSession) -> None:
+async def test_price_increase_detected_after_two_occurrences(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    s = await make_series(session, next_expected_on=date(2026, 8, 15))
+    for month in (6, 7):
+        await make_txn(
+            session,
+            acct,
+            amount_cents=-1899,
+            merchant="Netflix",
+            posted_on=date(2026, month, 15),
+            series_id=s.id,
+        )
+    n = await emit_series_events(session, llm=None, today=date(2026, 7, 16))
+    assert n == 1
+    ev = (await session.execute(select(SeriesEvent))).scalar_one()
+    assert ev.kind == EventKind.price_increase
+    assert ev.details == {"old_cents": -1599, "new_cents": -1899}
+    assert s.expected_cents == -1899
+    assert await emit_series_events(session, llm=None, today=date(2026, 7, 16)) == 0
+
+
+async def test_first_occurrence_at_new_price_waits(session: AsyncSession) -> None:
     acct = await make_account(session)
     s = await make_series(session, next_expected_on=date(2026, 8, 15))
     await make_txn(
@@ -47,13 +68,31 @@ async def test_price_increase_detected(session: AsyncSession) -> None:
         posted_on=date(2026, 7, 15),
         series_id=s.id,
     )
-    n = await emit_series_events(session, llm=None, today=date(2026, 7, 16))
-    assert n == 1
-    ev = (await session.execute(select(SeriesEvent))).scalar_one()
-    assert ev.kind == EventKind.price_increase
-    assert ev.details == {"old_cents": -1599, "new_cents": -1899}
-    assert s.expected_cents == -1899
     assert await emit_series_events(session, llm=None, today=date(2026, 7, 16)) == 0
+    assert s.expected_cents == -1599
+
+
+async def test_single_outlier_does_not_corrupt_expected(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    s = await make_series(session, next_expected_on=date(2026, 8, 15))
+    await make_txn(
+        session,
+        acct,
+        amount_cents=-1599,
+        merchant="Netflix",
+        posted_on=date(2026, 6, 15),
+        series_id=s.id,
+    )
+    await make_txn(
+        session,
+        acct,
+        amount_cents=-9999,
+        merchant="Netflix",
+        posted_on=date(2026, 7, 15),
+        series_id=s.id,
+    )
+    assert await emit_series_events(session, llm=None, today=date(2026, 7, 16)) == 0
+    assert s.expected_cents == -1599
 
 
 async def test_auto_ended_series_emits_no_missed_events(session: AsyncSession) -> None:
@@ -75,15 +114,39 @@ async def test_auto_ended_series_emits_no_missed_events(session: AsyncSession) -
 async def test_small_variation_not_price_increase(session: AsyncSession) -> None:
     acct = await make_account(session)
     s = await make_series(session, next_expected_on=date(2026, 8, 15))
+    for month in (6, 7):
+        await make_txn(
+            session,
+            acct,
+            amount_cents=-1620,
+            merchant="Netflix",
+            posted_on=date(2026, month, 15),
+            series_id=s.id,
+        )  # +1.3% — under the 5% threshold
+    assert await emit_series_events(session, llm=None, today=date(2026, 7, 16)) == 0
+
+
+async def test_missed_payments_catch_up_all_periods(session: AsyncSession) -> None:
+    s = await make_series(session, next_expected_on=date(2026, 3, 15))
+    n = await emit_series_events(session, llm=None, today=date(2026, 7, 1))
+    assert n == 4  # 3/15, 4/15, 5/15, 6/15 all missed in one sync
+    assert s.next_expected_on == date(2026, 7, 15)
+
+
+async def test_catch_up_skips_windows_with_payment(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    s = await make_series(session, next_expected_on=date(2026, 5, 15))
     await make_txn(
         session,
         acct,
-        amount_cents=-1620,
+        amount_cents=-1599,
         merchant="Netflix",
-        posted_on=date(2026, 7, 15),
+        posted_on=date(2026, 5, 16),
         series_id=s.id,
-    )  # +1.3%
-    assert await emit_series_events(session, llm=None, today=date(2026, 7, 16)) == 0
+    )
+    n = await emit_series_events(session, llm=None, today=date(2026, 7, 1))
+    assert n == 1  # 5/15 window was paid; only 6/15 missed
+    assert s.next_expected_on == date(2026, 7, 15)
 
 
 class PriceLLM:

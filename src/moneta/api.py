@@ -1,10 +1,13 @@
+import os
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
-from typing import Annotated, Any
+from pathlib import Path
+from typing import Annotated, Any, Literal
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -13,9 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from moneta.aggregator.base import AggregatorAdapter, MergedAdapter
 from moneta.aggregator.plaid import PlaidAdapter, PlaidClient, items_path, load_items
 from moneta.aggregator.simplefin import SimpleFINAdapter
-from moneta.config import Settings, load_settings
+from moneta.config import Settings, load_settings, make_private
 from moneta.db import init_db, make_sessionmaker
 from moneta.llm import Classifier, build_classifier
+from moneta.logs import configure_logging
 from moneta.models import (
     Account,
     AccountType,
@@ -25,11 +29,13 @@ from moneta.models import (
     ReviewStatus,
     SeriesEvent,
     SeriesStatus,
+    SyncRun,
 )
 from moneta.pipelines.normalize import renormalize_merchants
+from moneta.pipelines.recurring import reactivate_series
 from moneta.pipelines.review import apply_resolution, review_context
 from moneta.pipelines.run import SyncReport, run_sync
-from moneta.queries import classified_links
+from moneta.queries import classified_links, primary_currency
 from moneta.vesting import apply_vesting, parse_vesting_csv
 from moneta.views.cashflow import accrual_spend, cash_out
 from moneta.views.financing import Obligation, compute_obligations
@@ -105,11 +111,25 @@ class CashflowReport(BaseModel):
     cash_out: Decimal
 
 
+class SyncRunOut(BaseModel):
+    status: Literal["ok", "failed", "incomplete"]
+    started_at: datetime
+    finished_at: datetime | None
+    success: bool
+    error: str | None
+    report: dict[str, Any] | None
+
+
+class BackupIn(BaseModel):
+    dest: str | None = None
+
+
 def create_app(
     sessionmaker: async_sessionmaker[AsyncSession],
     adapter: AggregatorAdapter | None,
     llm: Classifier | None,
     engine: AsyncEngine | None = None,
+    api_token: str | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -117,7 +137,25 @@ def create_app(
             await init_db(engine)
         yield
 
-    app = FastAPI(title="moneta", lifespan=lifespan)
+    async def check_auth(authorization: Annotated[str | None, Header()] = None) -> None:
+        if api_token is None:
+            return
+        expected = f"Bearer {api_token}"
+        if authorization is None or not secrets.compare_digest(
+            authorization.encode(), expected.encode()
+        ):
+            raise HTTPException(status_code=401, detail="missing or invalid bearer token")
+
+    # app-level dependencies don't guard /docs//openapi.json — disable them when locked
+    public = api_token is None
+    app = FastAPI(
+        title="moneta",
+        lifespan=lifespan,
+        dependencies=[Depends(check_auth)],
+        docs_url="/docs" if public else None,
+        redoc_url="/redoc" if public else None,
+        openapi_url="/openapi.json" if public else None,
+    )
 
     async def get_session() -> AsyncIterator[AsyncSession]:
         async with sessionmaker() as session:
@@ -136,6 +174,28 @@ def create_app(
                 ),
             )
         return await run_sync(session, adapter, llm, today=date.today(), full=full)
+
+    @app.get("/sync/last")
+    async def sync_last(session: Session) -> SyncRunOut | None:
+        row = (
+            await session.execute(select(SyncRun).order_by(SyncRun.id.desc()).limit(1))
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        # the outcome rule lives here, not in each consumer: an unfinished row means
+        # the sync is still running or the process died mid-sync
+        if row.finished_at is None:
+            status: Literal["ok", "failed", "incomplete"] = "incomplete"
+        else:
+            status = "ok" if row.success else "failed"
+        return SyncRunOut(
+            status=status,
+            started_at=row.started_at,
+            finished_at=row.finished_at,
+            success=row.success,
+            error=row.error,
+            report=row.report,
+        )
 
     @app.get("/power")
     async def power(session: Session) -> PowerReport:
@@ -157,11 +217,14 @@ def create_app(
         range_start = start or today.replace(day=1)
         range_end = end or today
         links = await classified_links(session)
+        primary = await primary_currency(session)
         return CashflowReport(
             start=range_start,
             end=range_end,
-            accrual=await accrual_spend(session, range_start, range_end, links=links),
-            cash_out=await cash_out(session, range_start, range_end, links=links),
+            accrual=await accrual_spend(
+                session, range_start, range_end, links=links, primary=primary
+            ),
+            cash_out=await cash_out(session, range_start, range_end, links=links, primary=primary),
         )
 
     @app.get("/recurring")
@@ -190,7 +253,10 @@ def create_app(
         ).scalar_one_or_none()
         if series is None:
             raise HTTPException(status_code=404, detail="series not found")
-        series.status = body.status
+        if body.status == SeriesStatus.active and series.status != SeriesStatus.active:
+            reactivate_series(series, today=date.today())
+        else:
+            series.status = body.status
         await session.commit()
         return {"ok": True}
 
@@ -283,6 +349,28 @@ def create_app(
         await session.commit()
         return {"ok": True}
 
+    @app.post("/backup")
+    async def backup(body: BackupIn) -> dict[str, str]:
+        db_file = engine.url.database if engine is not None else None
+        if engine is None or not db_file or db_file == ":memory:":
+            raise HTTPException(status_code=400, detail="backup requires a file-backed database")
+        dest = (
+            Path(body.dest).expanduser()
+            if body.dest
+            else Path(db_file).with_name(f"moneta-backup-{datetime.now():%Y%m%d-%H%M%S}.db")
+        )
+        if dest.exists():
+            raise HTTPException(status_code=409, detail=f"destination already exists: {dest}")
+        old_umask = os.umask(0o077)  # VACUUM INTO creates dest itself — never world-readable
+        try:
+            async with engine.connect() as conn:
+                ac = await conn.execution_options(isolation_level="AUTOCOMMIT")
+                await ac.exec_driver_sql("VACUUM INTO ?", (str(dest),))
+        finally:
+            os.umask(old_umask)
+        make_private(dest)  # the backup is the full financial DB
+        return {"path": str(dest)}
+
     @app.post("/normalize/rerun")
     async def normalize_rerun(session: Session) -> dict[str, int]:
         return {"changed": await renormalize_merchants(session)}
@@ -326,6 +414,7 @@ def _build_adapter(settings: Settings) -> AggregatorAdapter | None:
 
 def build_app() -> FastAPI:
     settings = load_settings()
+    configure_logging(settings.config_dir)
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     engine, sessionmaker = make_sessionmaker(f"sqlite+aiosqlite:///{settings.db_path}")
     return create_app(
@@ -333,4 +422,5 @@ def build_app() -> FastAPI:
         _build_adapter(settings),
         build_classifier(settings.llm_model),
         engine=engine,
+        api_token=settings.api_token,
     )

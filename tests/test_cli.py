@@ -1,6 +1,6 @@
 import asyncio
 from collections.abc import Awaitable, Callable
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +9,15 @@ from typer.testing import CliRunner
 
 from moneta.cli.main import app
 from moneta.db import init_db, make_sessionmaker
-from moneta.models import AccountType, Direction, ReviewItem
+from moneta.models import (
+    AccountType,
+    Direction,
+    EventKind,
+    ReviewItem,
+    SeriesEvent,
+    SyncRun,
+    TransferLink,
+)
 from tests.factories import (
     make_account,
     make_price_change_item,
@@ -21,25 +29,25 @@ from tests.factories import (
 runner = CliRunner()
 
 
-def _seed_db(tmp_path: Path, seeder: Callable[[AsyncSession], Awaitable[Any]]) -> Any:
-    """Run a seeding coroutine against the CLI's on-disk test DB; return its result."""
+def _isolate(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("MONETA_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("MONETA_API_URL", raising=False)
+    monkeypatch.delenv("MONETA_SIMPLEFIN_ACCESS_URL", raising=False)
 
-    async def _run() -> Any:
+
+def _seed_db[T](tmp_path: Path, populate: Callable[[AsyncSession], Awaitable[T]]) -> T:
+    """Populate the file-backed DB the in-process CLI reads; owns the engine lifecycle."""
+
+    async def _run() -> T:
         engine, sessionmaker = make_sessionmaker(f"sqlite+aiosqlite:///{tmp_path / 'moneta.db'}")
         await init_db(engine)
         async with sessionmaker() as session:
-            result = await seeder(session)
+            result = await populate(session)
             await session.commit()
         await engine.dispose()
         return result
 
     return asyncio.run(_run())
-
-
-def _isolate(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
-    monkeypatch.setenv("MONETA_CONFIG_DIR", str(tmp_path))
-    monkeypatch.delenv("MONETA_API_URL", raising=False)
-    monkeypatch.delenv("MONETA_SIMPLEFIN_ACCESS_URL", raising=False)
 
 
 def test_power_runs_in_process(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -495,3 +503,148 @@ def test_setup_plaid_unlink_survives_remote_failure(tmp_path: Path, monkeypatch)
     assert result.exit_code == 0
     assert "removing locally" in result.output
     assert plaid_mod.load_items(plaid_mod.items_path(tmp_path)) == []
+
+
+def test_status_before_any_sync(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert "No sync has run yet" in result.output
+
+
+def test_status_shows_in_flight_sync_as_incomplete(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def seed(session: AsyncSession) -> None:
+        session.add(SyncRun())  # as run_sync writes it before the stages run
+
+    _seed_db(tmp_path, seed)
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert "incomplete" in result.output
+    assert "failed" not in result.output
+
+
+def test_serve_refuses_public_bind_without_token(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    import uvicorn
+
+    called: list[int] = []
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: called.append(1))
+    result = runner.invoke(app, ["serve", "--host", "0.0.0.0"])
+    assert result.exit_code == 1
+    assert "token" in result.output.lower()
+    assert not called
+
+
+def test_serve_public_bind_allowed_with_token(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("MONETA_API_TOKEN", "t0k3n")
+    import uvicorn
+
+    called: list[int] = []
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: called.append(1))
+    result = runner.invoke(app, ["serve", "--host", "0.0.0.0"])
+    assert result.exit_code == 0
+    assert called
+
+
+def test_in_process_cli_works_with_token_configured(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    (tmp_path / "config.toml").write_text('api_token = "t0k3n"\n')
+    result = runner.invoke(app, ["networth"])  # client must attach the bearer header
+    assert result.exit_code == 0
+
+
+def test_backup_command(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    runner.invoke(app, ["networth"])  # forces DB creation
+    dest = tmp_path / "snap.db"
+    result = runner.invoke(app, ["backup", str(dest)])
+    assert result.exit_code == 0
+    assert dest.exists()
+
+
+def test_obligations_renders_deferred_interest_warning(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    # /obligations resolves date.today() at request time — seed relative dates
+    today = date.today()
+
+    async def seed(session: AsyncSession) -> None:
+        checking = await make_account(session, type=AccountType.checking)
+        loan = await make_account(
+            session,
+            type=AccountType.loan,
+            name="Synchrony CarCare",
+            balance_cents=-121500,
+            promo_expires_on=today + timedelta(days=60),
+        )
+        series = await make_series(
+            session,
+            merchant="Synchrony Bank",
+            expected_cents=-13500,
+            next_expected_on=today + timedelta(days=27),
+        )
+        for days_ago in (65, 35, 4):
+            out = await make_txn(
+                session,
+                checking,
+                amount_cents=-13500,
+                merchant="Synchrony Bank",
+                posted_on=today - timedelta(days=days_ago),
+                series_id=series.id,
+            )
+            inn = await make_txn(
+                session,
+                loan,
+                amount_cents=13500,
+                merchant="Synchrony Bank",
+                posted_on=today - timedelta(days=days_ago),
+            )
+            session.add(
+                TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule")
+            )
+
+    _seed_db(tmp_path, seed)
+    result = runner.invoke(app, ["obligations"])
+    assert result.exit_code == 0
+    assert "Synchrony" in result.output  # rich may wrap the full name across cell lines
+    assert "deferred interest" in result.output  # payoff ~9mo out > promo ~2mo out
+    assert "Traceback" not in result.output
+
+
+def test_recurring_events_flag_renders_table(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def seed(session: AsyncSession) -> None:
+        series = await make_series(session)
+        session.add(
+            SeriesEvent(
+                series_id=series.id,
+                kind=EventKind.missed,
+                occurred_on=date(2026, 6, 15),
+                details={"expected_on": "2026-06-15"},
+            )
+        )
+
+    _seed_db(tmp_path, seed)
+    result = runner.invoke(app, ["recurring", "--events"])
+    assert result.exit_code == 0
+    assert "missed" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_setup_simplefin_saves_access_url(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def fake_claim(token: str) -> str:
+        assert token == "TOKEN"
+        return "https://u:p@bridge.example/simplefin"
+
+    monkeypatch.setattr("moneta.aggregator.simplefin.claim_setup_token", fake_claim)
+    result = runner.invoke(app, ["setup", "simplefin", "TOKEN"])
+    assert result.exit_code == 0
+    assert "connected" in result.output.lower()
+    from moneta.config import load_settings
+
+    assert load_settings().simplefin_access_url == "https://u:p@bridge.example/simplefin"

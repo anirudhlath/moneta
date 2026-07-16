@@ -1,10 +1,12 @@
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -13,6 +15,7 @@ from moneta.aggregator.plaid import PlaidAdapter, PlaidItem, items_path, save_it
 from moneta.aggregator.simplefin import SimpleFINAdapter
 from moneta.api import _build_adapter, create_app
 from moneta.config import Settings
+from moneta.db import init_db, make_sessionmaker
 from moneta.models import EventKind, RecurringSeries, ReviewItem, SeriesEvent
 from moneta.pipelines.recurring import detect_recurring
 from moneta.pipelines.run import RESYNC_OVERLAP_DAYS
@@ -55,13 +58,18 @@ SNAP = Snapshot(
 )
 
 
+@asynccontextmanager
+async def _client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
 @pytest.fixture
 async def client(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> AsyncIterator[httpx.AsyncClient]:
-    app = create_app(sessionmaker, adapter=FakeAdapter(SNAP), llm=None)
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+    async with _client(create_app(sessionmaker, adapter=FakeAdapter(SNAP), llm=None)) as c:
         yield c
 
 
@@ -107,9 +115,7 @@ async def test_sync_full_param_forces_epoch_pull(
     await make_txn(session, acct, posted_on=date(2026, 7, 5))
     await session.commit()
     adapter = RecordingAdapter()
-    app = create_app(sessionmaker, adapter=adapter, llm=None)
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+    async with _client(create_app(sessionmaker, adapter=adapter, llm=None)) as c:
         assert (await c.post("/sync")).status_code == 200
         assert adapter.since == date(2026, 7, 5) - timedelta(days=RESYNC_OVERLAP_DAYS)
         assert (await c.post("/sync", params={"full": "true"})).status_code == 200
@@ -119,9 +125,7 @@ async def test_sync_full_param_forces_epoch_pull(
 async def test_sync_without_adapter_is_400(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    app = create_app(sessionmaker, adapter=None, llm=None)
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+    async with _client(create_app(sessionmaker, adapter=None, llm=None)) as c:
         r = await c.post("/sync")
         assert r.status_code == 400
         assert "setup simplefin" in r.json()["detail"]
@@ -310,10 +314,7 @@ async def test_review_context_enrichment(
         )
         await session.commit()
 
-    app = create_app(sessionmaker, adapter=None, llm=None)
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with _client(create_app(sessionmaker, adapter=None, llm=None)) as client:
         items = (await client.get("/review")).json()
 
     tp = next(i for i in items if i["kind"] == "transfer_pair")
@@ -401,3 +402,83 @@ def test_build_adapter_tolerates_corrupt_items_file(tmp_path: Path) -> None:
     items_path(tmp_path).write_text("{not json")
     s = _settings(tmp_path, plaid_client_id="cid", plaid_secret="sec")
     assert _build_adapter(s) is None  # no crash: sync just runs without Plaid
+
+
+async def test_sync_last_endpoint(client: httpx.AsyncClient) -> None:
+    assert (await client.get("/sync/last")).json() is None
+    await client.post("/sync")
+    body = (await client.get("/sync/last")).json()
+    assert body["status"] == "ok"
+    assert body["success"] is True
+    assert body["report"]["ingest"]["new_transactions"] == 3
+
+
+async def test_bearer_token_enforced_when_configured(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with _client(create_app(sessionmaker, adapter=None, llm=None, api_token="s3cret")) as c:
+        assert (await c.get("/accounts")).status_code == 401
+        assert (
+            await c.get("/accounts", headers={"Authorization": "Bearer wrong"})
+        ).status_code == 401
+        assert (
+            await c.get("/accounts", headers={"Authorization": "Bearer s3cret"})
+        ).status_code == 200
+        # app-level dependencies don't cover the docs routes — they must be disabled
+        assert (await c.get("/openapi.json")).status_code == 404
+        assert (await c.get("/docs")).status_code == 404
+
+
+async def test_backup_vacuum_into(tmp_path: Path) -> None:
+    engine, sm = make_sessionmaker(f"sqlite+aiosqlite:///{tmp_path / 'm.db'}")
+    await init_db(engine)
+    dest = tmp_path / "out.db"
+    async with _client(create_app(sm, adapter=None, llm=None, engine=engine)) as c:
+        r = await c.post("/backup", json={"dest": str(dest)})
+        assert r.status_code == 200
+        assert r.json() == {"path": str(dest)}
+        assert dest.exists() and dest.stat().st_size > 0
+        assert dest.stat().st_mode & 0o777 == 0o600
+        assert (await c.post("/backup", json={"dest": str(dest)})).status_code == 409
+    await engine.dispose()
+
+
+async def test_backup_requires_file_backed_db(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # no engine → nothing to back up
+    async with _client(create_app(sessionmaker, adapter=None, llm=None)) as c:
+        assert (await c.post("/backup", json={})).status_code == 400
+
+
+async def test_patch_unknown_account_is_404(client: httpx.AsyncClient) -> None:
+    r = await client.patch("/accounts/999999", json={"type": "savings"})
+    assert r.status_code == 404
+
+
+async def test_resolve_unknown_review_item_is_404(client: httpx.AsyncClient) -> None:
+    r = await client.post("/review/999999/resolve", json={"resolution": {}})
+    assert r.status_code == 404
+
+
+async def test_import_vesting_malformed_csv_is_422(client: httpx.AsyncClient) -> None:
+    r = await client.post("/import/vesting", json={"csv": "ticker,vested\nACME,40\n"})
+    assert r.status_code == 422
+
+
+async def test_reactivating_stale_series_bumps_next_expected_forward(
+    sessionmaker: async_sessionmaker[AsyncSession], session: AsyncSession
+) -> None:
+    from moneta.models import SeriesStatus
+    from tests.factories import make_series
+
+    s = await make_series(session, status=SeriesStatus.ended, next_expected_on=date(2026, 1, 15))
+    await session.commit()
+    series_id = s.id
+
+    async with _client(create_app(sessionmaker, adapter=None, llm=None)) as c:
+        assert (
+            await c.patch(f"/recurring/{series_id}", json={"status": "active"})
+        ).status_code == 200
+        row = next(r for r in (await c.get("/recurring")).json() if r["id"] == series_id)
+    assert date.fromisoformat(row["next_expected_on"]) >= date.today()

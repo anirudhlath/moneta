@@ -5,7 +5,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.llm import Classifier, confident_yes
 from moneta.models import (
-    Cadence,
     EventKind,
     RecurringSeries,
     ReviewItem,
@@ -16,14 +15,8 @@ from moneta.models import (
     Transaction,
     dollars,
 )
-from moneta.pipelines.recurring import CADENCE_DAYS
+from moneta.pipelines.recurring import GRACE_DAYS, advance_expected_on, missed_event
 
-_GRACE: dict[Cadence, int] = {
-    Cadence.weekly: 3,
-    Cadence.biweekly: 4,
-    Cadence.monthly: 7,
-    Cadence.annual: 30,
-}
 _PRICE_CHANGE_THRESHOLD = 0.05
 
 _PRICE_PROMPT = """You are double-checking a detected price change on a recurring bill.
@@ -90,10 +83,9 @@ async def emit_series_events(session: AsyncSession, llm: Classifier | None, toda
         .all()
     )
     for s in series_list:
-        grace = timedelta(days=_GRACE[s.cadence])
-        period = timedelta(days=CADENCE_DAYS[s.cadence])
+        grace = timedelta(days=GRACE_DAYS[s.cadence])
 
-        if today > s.next_expected_on + grace:
+        while today > s.next_expected_on + grace:
             window_hit = (
                 await session.execute(
                     select(Transaction.id)
@@ -106,27 +98,25 @@ async def emit_series_events(session: AsyncSession, llm: Classifier | None, toda
                 )
             ).scalar_one_or_none()
             if window_hit is None:
-                session.add(
-                    SeriesEvent(
-                        series_id=s.id,
-                        kind=EventKind.missed,
-                        occurred_on=s.next_expected_on,
-                        details={"expected_on": s.next_expected_on.isoformat()},
-                    )
-                )
+                session.add(missed_event(s.id, s.next_expected_on))
                 emitted += 1
-            s.next_expected_on = s.next_expected_on + period
+            s.next_expected_on = advance_expected_on(s.next_expected_on, s.cadence)
 
-        latest = (
-            await session.execute(
-                select(Transaction)
-                .where(Transaction.series_id == s.id)
-                .order_by(Transaction.posted_on.desc())
-                .limit(1)
+        latest_two = (
+            (
+                await session.execute(
+                    select(Transaction)
+                    .where(Transaction.series_id == s.id)
+                    .order_by(Transaction.posted_on.desc(), Transaction.id.desc())
+                    .limit(2)
+                )
             )
-        ).scalar_one_or_none()
-        if latest is None or s.expected_cents == 0:
+            .scalars()
+            .all()
+        )
+        if not latest_two or s.expected_cents == 0:
             continue
+        latest = latest_two[0]
         drift = abs(latest.amount_cents - s.expected_cents) / abs(s.expected_cents)
         if (
             drift <= _PRICE_CHANGE_THRESHOLD
@@ -134,7 +124,17 @@ async def emit_series_events(session: AsyncSession, llm: Classifier | None, toda
             or (s.id, latest.amount_cents) in denied
         ):
             continue
-        if llm is None or await _confirms_price_change(llm, s, latest):
+        if llm is None:
+            # one sample is an outlier until a second occurrence confirms the new price
+            settled = (
+                len(latest_two) == 2
+                and abs(latest.amount_cents - latest_two[1].amount_cents)
+                <= abs(latest.amount_cents) * _PRICE_CHANGE_THRESHOLD
+            )
+            if settled:
+                apply_price_change(session, s, latest.amount_cents, latest.posted_on)
+                emitted += 1
+        elif await _confirms_price_change(llm, s, latest):
             apply_price_change(session, s, latest.amount_cents, latest.posted_on)
             emitted += 1
         else:

@@ -5,6 +5,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+import tomli_w
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,6 +13,20 @@ def _config_dir() -> Path:
     if env := os.environ.get("MONETA_CONFIG_DIR"):
         return Path(env)
     return Path.home() / ".config" / "moneta"
+
+
+def ensure_private_dir(path: Path) -> Path:
+    """Everything under the config dir is financial data — owner-only (0700)."""
+    path.mkdir(parents=True, exist_ok=True)
+    path.chmod(0o700)
+    return path
+
+
+def make_private(file: Path) -> Path:
+    """Owner-only (0600) file — credentials, database snapshots, logs."""
+    file.touch(mode=0o600, exist_ok=True)
+    file.chmod(0o600)
+    return file
 
 
 class Settings(BaseSettings):
@@ -25,6 +40,7 @@ class Settings(BaseSettings):
     plaid_env: str = "production"
     llm_model: str | None = None
     api_url: str | None = None
+    api_token: str | None = None
 
 
 def _read_config_file(config_dir: Path) -> dict[str, Any]:
@@ -45,10 +61,7 @@ def load_settings() -> Settings:
 
 
 def save_config_value(key: str, value: str) -> None:
-    config_dir = _config_dir()
-    config_dir.mkdir(parents=True, exist_ok=True)
-    path = config_dir / "config.toml"
+    config_dir = ensure_private_dir(_config_dir())  # the config file holds bank credentials
     values = _read_config_file(config_dir)
     values[key] = value
-    lines = [f'{k} = "{v}"' for k, v in values.items()]
-    path.write_text("\n".join(lines) + "\n")
+    make_private(config_dir / "config.toml").write_text(tomli_w.dumps(values))

@@ -53,9 +53,34 @@ def sync(
         console.print(
             f"LLM verified {verify['verified']} series; flagged {verify['flagged']} for review."
         )
+    if report["ingest"].get("updated_transactions"):
+        console.print(
+            f"{report['ingest']['updated_transactions']} transaction(s) corrected upstream."
+        )
     open_reviews = request("GET", "/review")
     if open_reviews:
         console.print(f"[yellow]{len(open_reviews)} items need review:[/yellow] moneta review")
+
+
+@app.command()
+def status() -> None:
+    """Show the most recent sync run and its outcome."""
+    r = request("GET", "/sync/last")
+    if not r:
+        console.print("No sync has run yet. Run: [bold]moneta sync[/bold]")
+        return
+    outcome = {
+        "ok": "[green]ok[/green]",
+        "failed": f"[red]failed[/red] — {r['error']}",
+        "incomplete": "[yellow]incomplete[/yellow] — still running, or the process died mid-sync",
+    }[r["status"]]
+    console.print(f"Last sync: {r['started_at']} → {outcome}")
+    if r["report"]:
+        rep = r["report"]
+        console.print(
+            f"  {rep['ingest']['new_transactions']} new txns, "
+            f"{rep['recurring']['new_series']} new series, {rep['events']} events"
+        )
 
 
 @app.command()
@@ -94,6 +119,11 @@ def networth() -> None:
         console.print(
             f"[yellow]{r['unknown_accounts']} account(s) have unknown type and are "
             f"excluded — fix with: moneta accounts --set-type ID TYPE[/yellow]"
+        )
+    if r.get("foreign_accounts"):  # .get: tolerate an older server in remote mode
+        console.print(
+            f"[yellow]{r['foreign_accounts']} account(s) in a non-primary currency are "
+            f"excluded from these totals[/yellow]"
         )
 
 
@@ -472,6 +502,15 @@ def setup_plaid_unlink(item_id: str) -> None:
 
 
 @app.command()
+def backup(
+    dest: Annotated[str | None, typer.Argument(help="Destination file (server-side path).")] = None,
+) -> None:
+    """Snapshot the database with SQLite VACUUM INTO (safe while running)."""
+    r = request("POST", "/backup", {"dest": dest} if dest else {})
+    console.print(f"Backup written to [bold]{r['path']}[/bold]")
+
+
+@app.command()
 def renormalize() -> None:
     """Re-apply improved merchant-naming rules to already-synced transactions."""
     result = request("POST", "/normalize/rerun")
@@ -485,4 +524,12 @@ def serve(host: str = "127.0.0.1", port: int = 8300) -> None:
     """Run the moneta API server."""
     import uvicorn
 
+    from moneta.config import load_settings
+
+    if host not in ("127.0.0.1", "::1", "localhost") and not load_settings().api_token:
+        console.print(
+            "[red]Error:[/red] refusing to bind a non-loopback host without an API token. "
+            "Set MONETA_API_TOKEN or api_token in config.toml."
+        )
+        raise typer.Exit(1)
     uvicorn.run("moneta.api:build_app", host=host, port=port, factory=True)

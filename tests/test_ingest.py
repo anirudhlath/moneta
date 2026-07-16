@@ -106,3 +106,137 @@ async def test_type_hint_beats_keyword_inference(session: AsyncSession) -> None:
     await ingest_snapshot(session, snap)
     acct = (await session.execute(select(Account))).scalar_one()
     assert acct.type == AccountType.credit
+
+
+async def test_resynced_txn_with_changed_fields_is_updated(session: AsyncSession) -> None:
+    acct = AccountDTO(
+        id="A-1",
+        name="Checking",
+        org_name="Chase",
+        currency="USD",
+        balance=Decimal("100.00"),
+        balance_date=date(2026, 7, 1),
+    )
+
+    def snap(amount: str, desc: str) -> Snapshot:
+        return Snapshot(
+            accounts=[acct],
+            transactions=[
+                TransactionDTO(
+                    id="T-1",
+                    account_id="A-1",
+                    posted_on=date(2026, 7, 1),
+                    amount=Decimal(amount),
+                    description=desc,
+                    raw={},
+                )
+            ],
+            holdings=[],
+        )
+
+    await ingest_snapshot(session, snap("-10.00", "COFFEE"))
+    stats = await ingest_snapshot(session, snap("-12.34", "COFFEE SHOP"))
+    assert stats.new_transactions == 0
+    assert stats.updated_transactions == 1
+    txn = (await session.execute(select(Transaction))).scalar_one()
+    assert txn.amount_cents == -1234
+    assert txn.description == "COFFEE SHOP"
+
+    stats = await ingest_snapshot(session, snap("-12.34", "COFFEE SHOP"))
+    assert stats.updated_transactions == 0  # identical re-sync is a no-op
+
+
+async def test_description_correction_clears_merchant_keeps_series(session: AsyncSession) -> None:
+    from moneta.pipelines.normalize import normalize_merchants
+    from tests.factories import make_series
+
+    acct = AccountDTO(
+        id="A-1",
+        name="Checking",
+        org_name="Chase",
+        currency="USD",
+        balance=Decimal("100.00"),
+        balance_date=date(2026, 7, 1),
+    )
+
+    def snap(desc: str) -> Snapshot:
+        return Snapshot(
+            accounts=[acct],
+            transactions=[
+                TransactionDTO(
+                    id="T-1",
+                    account_id="A-1",
+                    posted_on=date(2026, 7, 1),
+                    amount=Decimal("-15.99"),
+                    description=desc,
+                    raw={},
+                )
+            ],
+            holdings=[],
+        )
+
+    await ingest_snapshot(session, snap("NETFLIX.COM"))
+    await normalize_merchants(session, llm=None)
+    txn = (await session.execute(select(Transaction))).scalar_one()
+    assert txn.merchant == "Netflix.Com"
+    series = await make_series(session, merchant="Netflix.Com")
+    txn.series_id = series.id
+    await session.commit()
+
+    await ingest_snapshot(session, snap("SPOTIFY USA"))
+    txn = (await session.execute(select(Transaction))).scalar_one()
+    assert txn.merchant is None  # stale merchant cleared; normalize re-derives next
+    assert txn.series_id == series.id  # untagging is detection's call, not ingest's
+    await normalize_merchants(session, llm=None)
+    await session.refresh(txn)
+    assert txn.merchant == "Spotify Usa"
+
+
+async def test_amount_correction_drops_transfer_link(session: AsyncSession) -> None:
+    from moneta.models import TransferLink
+
+    accts = [
+        AccountDTO(
+            id=aid,
+            name=name,
+            org_name="Chase",
+            currency="USD",
+            balance=Decimal("100.00"),
+            balance_date=date(2026, 7, 1),
+        )
+        for aid, name in (("A-1", "Checking"), ("A-2", "Savings"))
+    ]
+
+    def snap(amount: str) -> Snapshot:
+        return Snapshot(
+            accounts=accts,
+            transactions=[
+                TransactionDTO(
+                    id="T-OUT",
+                    account_id="A-1",
+                    posted_on=date(2026, 7, 1),
+                    amount=Decimal(amount),
+                    description="TRANSFER OUT",
+                    raw={},
+                ),
+                TransactionDTO(
+                    id="T-IN",
+                    account_id="A-2",
+                    posted_on=date(2026, 7, 1),
+                    amount=Decimal("500.00"),
+                    description="TRANSFER IN",
+                    raw={},
+                ),
+            ],
+            holdings=[],
+        )
+
+    await ingest_snapshot(session, snap("-500.00"))
+    rows = (await session.execute(select(Transaction))).scalars().all()
+    out = next(t for t in rows if t.aggregator_id == "T-OUT")
+    inn = next(t for t in rows if t.aggregator_id == "T-IN")
+    session.add(TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule"))
+    await session.commit()
+
+    await ingest_snapshot(session, snap("-480.00"))  # upstream correction: legs no longer equal
+    assert (await session.execute(select(TransferLink))).scalars().all() == []

@@ -111,3 +111,12 @@ async def test_loan_payment_series_stays_in_fixed(session: AsyncSession) -> None
     await session.flush()
     report = await power_report(session, today=date(2026, 7, 7))
     assert report.total_fixed == Decimal("135")
+
+
+async def test_spent_ignores_foreign_currency_accounts(session: AsyncSession) -> None:
+    usd = await make_account(session, type=AccountType.checking)
+    eur = await make_account(session, type=AccountType.checking, currency="EUR")
+    await make_txn(session, usd, amount_cents=-5000, posted_on=date(2026, 7, 3))
+    await make_txn(session, eur, amount_cents=-7000, posted_on=date(2026, 7, 4))
+    r = await power_report(session, today=date(2026, 7, 9))
+    assert r.spent_so_far == Decimal("50.00")

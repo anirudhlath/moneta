@@ -10,7 +10,7 @@ re-scan TransferLink and rebuild their own txn->account/type/series maps.
 from dataclasses import dataclass
 from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.models import Account, AccountType, Transaction, TransferLink
@@ -26,6 +26,18 @@ class ClassifiedLink:
     inflow_account_type: AccountType
     outflow_series_id: int | None
     outflow_posted_on: date
+
+
+async def primary_currency(session: AsyncSession) -> str:
+    """Majority currency across accounts; ties prefer USD. Views aggregate only this —
+    summing cents across currencies would silently produce a meaningless number."""
+    rows = (
+        await session.execute(select(Account.currency, func.count()).group_by(Account.currency))
+    ).all()
+    counts: list[tuple[str, int]] = [(currency, n) for currency, n in rows]
+    if not counts:
+        return "USD"
+    return max(counts, key=lambda r: (r[1], r[0] == "USD", r[0]))[0]
 
 
 async def account_type_map(session: AsyncSession) -> dict[int, AccountType]:

@@ -189,6 +189,21 @@ class MerchantAlias(Base):
     source: Mapped[AliasSource] = mapped_column(String)
 
 
+class SyncRun(Base):
+    """Audit row per run_sync invocation — the answer to 'did last night's sync work?'."""
+
+    __tablename__ = "sync_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # naive local time, matching the app's local-calendar-day convention; a server
+    # default would be CURRENT_TIMESTAMP (UTC) and silently mix the two
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    success: Mapped[bool] = mapped_column(default=False)
+    error: Mapped[str | None] = mapped_column(default=None)
+    report: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=None)
+
+
 class ReviewItem(Base):
     __tablename__ = "review_items"
 

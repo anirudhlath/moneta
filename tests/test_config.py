@@ -1,5 +1,7 @@
+import tomllib
 from pathlib import Path
 
+import pytest
 from pydantic_settings import BaseSettings
 
 from moneta.config import Settings, load_settings, save_config_value
@@ -43,3 +45,24 @@ def test_plaid_settings_default_and_override(tmp_path: Path, monkeypatch) -> Non
     assert (s.plaid_client_id, s.plaid_secret, s.plaid_env) == ("cid", "sec", "sandbox")
     monkeypatch.setenv("MONETA_PLAID_ENV", "production")
     assert load_settings().plaid_env == "production"
+
+
+def test_save_config_value_escapes_and_roundtrips(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("MONETA_CONFIG_DIR", str(tmp_path))
+    tricky = 'https://u:p"w\\x@bridge.example/simplefin'
+    save_config_value("simplefin_access_url", tricky)
+    assert load_settings().simplefin_access_url == tricky
+
+
+def test_save_config_value_restricts_permissions(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("MONETA_CONFIG_DIR", str(tmp_path))
+    save_config_value("llm_model", "gpt")
+    assert (tmp_path / "config.toml").stat().st_mode & 0o777 == 0o600
+    assert tmp_path.stat().st_mode & 0o777 == 0o700
+
+
+def test_malformed_config_file_raises_toml_error(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("MONETA_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.toml").write_text("not = = valid\n")
+    with pytest.raises(tomllib.TOMLDecodeError):
+        load_settings()

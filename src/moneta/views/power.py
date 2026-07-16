@@ -18,7 +18,7 @@ from moneta.models import (
     from_cents,
 )
 from moneta.pipelines.recurring import monthly_cents
-from moneta.queries import classified_links, linked_txn_ids
+from moneta.queries import classified_links, linked_txn_ids, primary_currency
 
 
 class SeriesLine(BaseModel):
@@ -75,6 +75,7 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
     )
 
     linked_ids = linked_txn_ids(links)
+    primary = await primary_currency(session)
     month_txns = (
         (
             await session.execute(
@@ -86,6 +87,7 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
                     Transaction.posted_on <= today,
                     Transaction.series_id.is_(None),
                     Account.type.in_(SPEND_ACCOUNT_TYPES),
+                    Account.currency == primary,
                 )
             )
         )
