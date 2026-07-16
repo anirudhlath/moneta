@@ -5,13 +5,15 @@ from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException
+from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from moneta.aggregator.base import AggregatorAdapter
+from moneta.aggregator.base import AggregatorAdapter, MergedAdapter
+from moneta.aggregator.plaid import PlaidAdapter, PlaidClient, items_path, load_items
 from moneta.aggregator.simplefin import SimpleFINAdapter
-from moneta.config import load_settings
+from moneta.config import Settings, load_settings
 from moneta.db import init_db, make_sessionmaker
 from moneta.llm import Classifier, build_classifier
 from moneta.models import (
@@ -128,7 +130,10 @@ def create_app(
         if adapter is None:
             raise HTTPException(
                 status_code=400,
-                detail="No SimpleFIN aggregator configured. Run: moneta setup simplefin <token>",
+                detail=(
+                    "No aggregator configured. Connect one with: "
+                    "moneta setup simplefin <token> or moneta setup plaid <client_id> <secret>"
+                ),
             )
         return await run_sync(session, adapter, llm, today=date.today(), full=full)
 
@@ -293,16 +298,39 @@ def create_app(
     return app
 
 
+def _build_adapter(settings: Settings) -> AggregatorAdapter | None:
+    adapters: list[AggregatorAdapter] = []
+    if settings.simplefin_access_url:
+        adapters.append(SimpleFINAdapter(settings.simplefin_access_url))
+    if settings.plaid_client_id and settings.plaid_secret:
+        try:
+            items = load_items(items_path(settings.config_dir))
+        except ValueError as exc:
+            # a corrupt items file must not take down every endpoint — sync just
+            # runs without Plaid until the user re-links
+            logger.warning("{}", exc)
+            items = []
+        if items:
+            adapters.append(
+                PlaidAdapter(
+                    PlaidClient(
+                        settings.plaid_client_id, settings.plaid_secret, settings.plaid_env
+                    ),
+                    items,
+                )
+            )
+    if not adapters:
+        return None
+    return adapters[0] if len(adapters) == 1 else MergedAdapter(adapters)
+
+
 def build_app() -> FastAPI:
     settings = load_settings()
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     engine, sessionmaker = make_sessionmaker(f"sqlite+aiosqlite:///{settings.db_path}")
-    adapter: AggregatorAdapter | None = (
-        SimpleFINAdapter(settings.simplefin_access_url) if settings.simplefin_access_url else None
-    )
     return create_app(
         sessionmaker,
-        adapter,
+        _build_adapter(settings),
         build_classifier(settings.llm_model),
         engine=engine,
     )

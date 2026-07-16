@@ -42,7 +42,7 @@ async def ingest_snapshot(session: AsyncSession, snap: Snapshot) -> IngestStats:
                 name=dto.name,
                 org_name=dto.org_name,
                 currency=dto.currency,
-                type=infer_account_type(dto.name, dto.org_name),
+                type=dto.type_hint or infer_account_type(dto.name, dto.org_name),
                 balance_cents=to_cents(dto.balance),
                 balance_date=dto.balance_date,
             )

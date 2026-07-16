@@ -85,3 +85,24 @@ def test_infer_account_type() -> None:
     assert infer_account_type("CarCareONE", "Synchrony Bank") == AccountType.loan
     assert infer_account_type("Individual", "Fidelity") == AccountType.brokerage
     assert infer_account_type("Mystery", "Bank") == AccountType.unknown
+
+
+async def test_type_hint_beats_keyword_inference(session: AsyncSession) -> None:
+    snap = Snapshot(
+        accounts=[
+            AccountDTO(
+                id="plaid-1",
+                name="Totally Ambiguous Name",
+                org_name="Nowhere Bank",
+                currency="USD",
+                balance=Decimal("10.00"),
+                balance_date=date(2026, 7, 1),
+                type_hint=AccountType.credit,
+            )
+        ],
+        transactions=[],
+        holdings=[],
+    )
+    await ingest_snapshot(session, snap)
+    acct = (await session.execute(select(Account))).scalar_one()
+    assert acct.type == AccountType.credit

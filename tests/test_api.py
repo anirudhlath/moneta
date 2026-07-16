@@ -1,14 +1,18 @@
 from collections.abc import AsyncIterator
 from datetime import date, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import httpx
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from moneta.aggregator.base import AccountDTO, Snapshot, TransactionDTO
-from moneta.api import create_app
+from moneta.aggregator.base import AccountDTO, MergedAdapter, Snapshot, TransactionDTO
+from moneta.aggregator.plaid import PlaidAdapter, PlaidItem, items_path, save_items
+from moneta.aggregator.simplefin import SimpleFINAdapter
+from moneta.api import _build_adapter, create_app
+from moneta.config import Settings
 from moneta.models import EventKind, RecurringSeries, ReviewItem, SeriesEvent
 from moneta.pipelines.recurring import detect_recurring
 from moneta.pipelines.run import RESYNC_OVERLAP_DAYS
@@ -120,7 +124,8 @@ async def test_sync_without_adapter_is_400(
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         r = await c.post("/sync")
         assert r.status_code == 400
-        assert "SimpleFIN" in r.json()["detail"]
+        assert "setup simplefin" in r.json()["detail"]
+        assert "setup plaid" in r.json()["detail"]
 
 
 async def test_review_resolve_merchant(client: httpx.AsyncClient) -> None:
@@ -354,3 +359,45 @@ async def test_review_resolve_price_change_validates_and_applies(
             await session.execute(select(RecurringSeries).where(RecurringSeries.id == series_id))
         ).scalar_one()
         assert refreshed.expected_cents == -1899
+
+
+def _settings(tmp_path: Path, **kwargs: object) -> Settings:
+    return Settings(config_dir=tmp_path, db_path=tmp_path / "m.db", **kwargs)  # type: ignore[arg-type]
+
+
+def test_build_adapter_none_when_nothing_configured(tmp_path: Path) -> None:
+    # conftest's autouse _clean_moneta_env fixture already strips MONETA_* env vars
+    assert _build_adapter(_settings(tmp_path)) is None
+
+
+def test_build_adapter_simplefin_only(tmp_path: Path) -> None:
+    adapter = _build_adapter(
+        _settings(tmp_path, simplefin_access_url="https://u:p@bridge.example/simplefin")
+    )
+    assert isinstance(adapter, SimpleFINAdapter)
+
+
+def test_build_adapter_plaid_requires_items(tmp_path: Path) -> None:
+    s = _settings(tmp_path, plaid_client_id="cid", plaid_secret="sec", plaid_env="sandbox")
+    assert _build_adapter(s) is None  # creds but no linked items
+    save_items(items_path(tmp_path), [PlaidItem(item_id="it-1", access_token="a")])
+    assert isinstance(_build_adapter(s), PlaidAdapter)
+
+
+def test_build_adapter_merges_simplefin_and_plaid(tmp_path: Path) -> None:
+    save_items(items_path(tmp_path), [PlaidItem(item_id="it-1", access_token="a")])
+    adapter = _build_adapter(
+        _settings(
+            tmp_path,
+            simplefin_access_url="https://u:p@bridge.example/simplefin",
+            plaid_client_id="cid",
+            plaid_secret="sec",
+        )
+    )
+    assert isinstance(adapter, MergedAdapter)
+
+
+def test_build_adapter_tolerates_corrupt_items_file(tmp_path: Path) -> None:
+    items_path(tmp_path).write_text("{not json")
+    s = _settings(tmp_path, plaid_client_id="cid", plaid_secret="sec")
+    assert _build_adapter(s) is None  # no crash: sync just runs without Plaid

@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     config_dir: Path
     db_path: Path
     simplefin_access_url: str | None = None
+    plaid_client_id: str | None = None
+    plaid_secret: str | None = None
+    plaid_env: str = "production"
     llm_model: str | None = None
     api_url: str | None = None
 

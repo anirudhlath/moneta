@@ -60,7 +60,8 @@ def test_sync_without_setup_fails_cleanly(tmp_path: Path, monkeypatch) -> None: 
     _isolate(monkeypatch, tmp_path)
     result = runner.invoke(app, ["sync"])
     assert result.exit_code == 1
-    assert "SimpleFIN" in result.output
+    assert "simplefin" in result.output
+    assert "plaid" in result.output
 
 
 def test_sync_full_flag_requests_full_sync(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -383,3 +384,114 @@ def test_review_price_change_invalid_answer_skips_cleanly(tmp_path: Path, monkey
     assert result.exit_code == 0
     assert "invalid input, skipping" in result.output
     assert "Traceback" not in result.output
+
+
+def _setup_plaid(tmp_path: Path, monkeypatch) -> Any:  # type: ignore[no-untyped-def]
+    """Isolate env, save sandbox Plaid credentials, return the plaid module."""
+    import moneta.aggregator.plaid as plaid_mod
+
+    _isolate(monkeypatch, tmp_path)
+    runner.invoke(app, ["setup", "plaid", "cid", "sec", "--env", "sandbox"])
+    return plaid_mod
+
+
+def test_setup_plaid_saves_credentials(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["setup", "plaid", "cid", "sec", "--env", "sandbox"])
+    assert result.exit_code == 0
+    assert "plaid-link" in result.output
+    from moneta.config import load_settings
+
+    s = load_settings()
+    assert (s.plaid_client_id, s.plaid_secret, s.plaid_env) == ("cid", "sec", "sandbox")
+
+
+def test_setup_plaid_rejects_bad_env(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["setup", "plaid", "cid", "sec", "--env", "development"])
+    assert result.exit_code == 1
+    assert "production" in result.output
+
+
+def test_setup_plaid_link_requires_credentials(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["setup", "plaid-link"])
+    assert result.exit_code == 1
+    assert "moneta setup plaid" in result.output
+
+
+def test_setup_plaid_link_happy_path(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    plaid_mod = _setup_plaid(tmp_path, monkeypatch)
+
+    async def fake_create(client: Any, products: list[str]) -> Any:
+        return "lt-1", "https://hosted.plaid.com/link/abc"
+
+    async def fake_poll(
+        client: Any, link_token: str, timeout: float = 900.0, interval: float = 3.0
+    ) -> Any:
+        assert link_token == "lt-1"
+        return "public-1", "Chase"
+
+    async def fake_exchange(client: Any, public_token: str) -> Any:
+        assert public_token == "public-1"
+        return "access-1", "it-1"
+
+    monkeypatch.setattr(plaid_mod, "create_hosted_link", fake_create)
+    monkeypatch.setattr(plaid_mod, "poll_link_result", fake_poll)
+    monkeypatch.setattr(plaid_mod, "exchange_public_token", fake_exchange)
+
+    result = runner.invoke(app, ["setup", "plaid-link"])
+    assert result.exit_code == 0
+    assert "hosted.plaid.com" in result.output
+    assert "Linked Chase" in result.output
+
+    items = plaid_mod.load_items(plaid_mod.items_path(tmp_path))
+    assert len(items) == 1
+    assert items[0].item_id == "it-1"
+    assert items[0].access_token == "access-1"
+    assert items[0].products == ["transactions"]
+
+
+def test_setup_plaid_list_and_unlink(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    plaid_mod = _setup_plaid(tmp_path, monkeypatch)
+    plaid_mod.save_items(
+        plaid_mod.items_path(tmp_path),
+        [plaid_mod.PlaidItem(item_id="it-1", access_token="a", institution_name="Chase")],
+    )
+
+    result = runner.invoke(app, ["setup", "plaid-list"])
+    assert result.exit_code == 0
+    assert "Chase" in result.output
+
+    removed: list[str] = []
+
+    async def fake_post(self: Any, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        removed.append(path)
+        return {"request_id": "r"}
+
+    monkeypatch.setattr(plaid_mod.PlaidClient, "post", fake_post)
+    result = runner.invoke(app, ["setup", "plaid-unlink", "it-1"])
+    assert result.exit_code == 0
+    assert removed == ["/item/remove"]
+    assert plaid_mod.load_items(plaid_mod.items_path(tmp_path)) == []
+
+    result = runner.invoke(app, ["setup", "plaid-unlink", "nope"])
+    assert result.exit_code == 1
+    assert "plaid-list" in result.output
+
+
+def test_setup_plaid_unlink_survives_remote_failure(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    plaid_mod = _setup_plaid(tmp_path, monkeypatch)
+    plaid_mod.save_items(
+        plaid_mod.items_path(tmp_path),
+        [plaid_mod.PlaidItem(item_id="it-dead", access_token="a", institution_name="Old Bank")],
+    )
+
+    async def failing_post(self: Any, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        raise plaid_mod.PlaidError("ITEM_ERROR", "ITEM_NOT_FOUND", "already gone")
+
+    monkeypatch.setattr(plaid_mod.PlaidClient, "post", failing_post)
+    result = runner.invoke(app, ["setup", "plaid-unlink", "it-dead"])
+    assert result.exit_code == 0
+    assert "removing locally" in result.output
+    assert plaid_mod.load_items(plaid_mod.items_path(tmp_path)) == []
