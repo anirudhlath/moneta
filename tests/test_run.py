@@ -88,8 +88,8 @@ async def test_sync_verifies_new_deterministic_series(session: AsyncSession) -> 
 
     class VerifyLLM:
         async def classify_json(self, prompt: str) -> dict[str, Any] | None:
-            if "Netflix" in prompt and "recurring bill" in prompt:
-                return {"is_recurring": True, "confident": True}
+            if "Netflix" in prompt and "recurring-bill" in prompt:
+                return {"classification": "bill", "confident": True}
             return None
 
     report = await run_sync(session, RecordingAdapter(), llm=VerifyLLM(), today=date(2026, 7, 9))

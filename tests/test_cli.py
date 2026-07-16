@@ -286,8 +286,42 @@ def test_review_recurring_cluster_yes_resolves(tmp_path: Path, monkeypatch) -> N
     _seed_recurring_cluster_review(tmp_path)
     result = runner.invoke(app, ["review"], input="y\n")
     assert result.exit_code == 0
-    assert "Recurring? [y/n]" in result.output
+    assert "Bill, habit, or not recurring? [b/h/n]" in result.output
     assert "resolved" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_review_recurring_three_way(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The b/h/n prompt: 'h' resolves as a discretionary recurring habit."""
+    calls: list[tuple[str, str, Any]] = []
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        calls.append((method, path, json_body))
+        if path == "/review":
+            return [
+                {
+                    "id": 7,
+                    "kind": "recurring_cluster",
+                    "question": "Is 'Util Co' a recurring bill?",
+                    "payload": {"merchant": "Util Co", "direction": "outflow"},
+                    "context": {"samples": [], "direction": "outflow"},
+                }
+            ]
+        return {"ok": True}
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["review"], input="h\n")
+    assert result.exit_code == 0
+    assert (
+        "POST",
+        "/review/7/resolve",
+        {"resolution": {"is_recurring": True, "discretionary": True}},
+    ) in calls
     assert "Traceback" not in result.output
 
 
@@ -344,7 +378,7 @@ def test_review_summary_counts_kinds(tmp_path: Path, monkeypatch) -> None:  # ty
     result = runner.invoke(app, ["review"], input="\n")
     assert result.exit_code == 0
     assert "Review queue" in result.output
-    assert "recurring bill" in result.output
+    assert "bill or habit" in result.output
     assert "skipped" in result.output.lower()
 
 

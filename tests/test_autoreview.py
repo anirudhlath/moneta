@@ -157,9 +157,9 @@ async def _series_with_occurrences(session: AsyncSession) -> RecurringSeries:
     return series
 
 
-async def test_verify_confident_yes_writes_resolved_ledger_item(session: AsyncSession) -> None:
+async def test_verify_confident_bill_resolves(session: AsyncSession) -> None:
     await _series_with_occurrences(session)
-    llm = ScriptedLLM({"Netflix": {"is_recurring": True, "confident": True}})
+    llm = ScriptedLLM({"Netflix": {"classification": "bill", "confident": True}})
     stats = await verify_series(session, llm)
     assert stats == VerifyStats(verified=1, flagged=0)
     item = (await session.execute(select(ReviewItem))).scalar_one()
@@ -172,7 +172,7 @@ async def test_verify_confident_yes_writes_resolved_ledger_item(session: AsyncSe
 
 async def test_verify_prompt_carries_amounts_and_dates(session: AsyncSession) -> None:
     await _series_with_occurrences(session)
-    llm = ScriptedLLM({"Netflix": {"is_recurring": True, "confident": True}})
+    llm = ScriptedLLM({"Netflix": {"classification": "bill", "confident": True}})
     await verify_series(session, llm)
     assert "15.99" in llm.prompts[0] and "2026-06-15" in llm.prompts[0]
 
@@ -182,25 +182,49 @@ def test_prompt_txn_converts_every_cents_key() -> None:
     assert out == {"posted_on": "2026-07-01", "amount": "15.99", "old_amount": "10.00"}
 
 
-async def test_verify_unconfident_flags_for_human(session: AsyncSession) -> None:
+async def test_verify_confident_habit_flags_with_leaning(session: AsyncSession) -> None:
     series = await _series_with_occurrences(session)
-    llm = ScriptedLLM({"Netflix": {"is_recurring": True, "confident": False}})
+    llm = ScriptedLLM({"Netflix": {"classification": "habit", "confident": True}})
     stats = await verify_series(session, llm)
     assert stats == VerifyStats(verified=0, flagged=1)
     item = (await session.execute(select(ReviewItem))).scalar_one()
     assert item.status == ReviewStatus.open
     assert item.payload["llm_flagged"] is True
+    assert item.payload["llm_leaning"] == "habit"
+    assert series.status == SeriesStatus.active  # keeps counting until a human rules
+    assert series.discretionary is False  # the LLM never suppresses/demotes on its own
+
+
+async def test_verify_unconfident_flags_for_human(session: AsyncSession) -> None:
+    series = await _series_with_occurrences(session)
+    llm = ScriptedLLM({"Netflix": {"classification": "bill", "confident": False}})
+    stats = await verify_series(session, llm)
+    assert stats == VerifyStats(verified=0, flagged=1)
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.status == ReviewStatus.open
+    assert item.payload["llm_flagged"] is True
+    assert item.payload["llm_leaning"] == "bill"
     assert series.status == SeriesStatus.active  # keeps counting until a human rules
 
 
 async def test_verify_confident_no_flags_rather_than_suppresses(session: AsyncSession) -> None:
     series = await _series_with_occurrences(session)
-    llm = ScriptedLLM({"Netflix": {"is_recurring": False, "confident": True}})
+    llm = ScriptedLLM({"Netflix": {"classification": "not_recurring", "confident": True}})
     stats = await verify_series(session, llm)
     assert stats == VerifyStats(verified=0, flagged=1)
     assert series.status == SeriesStatus.active  # the LLM never suppresses determinism
     item = (await session.execute(select(ReviewItem))).scalar_one()
     assert item.status == ReviewStatus.open
+    assert item.payload["llm_leaning"] == "not_recurring"
+
+
+async def test_verify_malformed_answer_flags_unparseable(session: AsyncSession) -> None:
+    await _series_with_occurrences(session)
+    llm = ScriptedLLM({"Netflix": {"confident": True}})  # no classification key
+    stats = await verify_series(session, llm)
+    assert stats == VerifyStats(verified=0, flagged=1)
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.payload["llm_leaning"] == "unparseable"
 
 
 async def test_verify_skips_merchants_with_existing_items(session: AsyncSession) -> None:
@@ -213,14 +237,14 @@ async def test_verify_skips_merchants_with_existing_items(session: AsyncSession)
         )
     )
     await session.flush()
-    llm = ScriptedLLM({"Netflix": {"is_recurring": True, "confident": True}})
+    llm = ScriptedLLM({"Netflix": {"classification": "bill", "confident": True}})
     assert await verify_series(session, llm) == VerifyStats()
     assert llm.prompts == []
 
 
 async def test_verify_skips_ended_series(session: AsyncSession) -> None:
     await make_series(session, merchant="Old Gym", status=SeriesStatus.ended)
-    llm = ScriptedLLM({"Old Gym": {"is_recurring": True, "confident": True}})
+    llm = ScriptedLLM({"Old Gym": {"classification": "bill", "confident": True}})
     assert await verify_series(session, llm) == VerifyStats()
     assert llm.prompts == []
 
@@ -342,11 +366,25 @@ async def test_force_map_is_direction_scoped(session: AsyncSession) -> None:
 
 async def test_verify_covers_each_direction_separately(session: AsyncSession) -> None:
     await make_series(session, merchant="Venmo")  # outflow
-    llm = ScriptedLLM({"Venmo": {"is_recurring": True, "confident": True}})
+    llm = ScriptedLLM({"Venmo": {"classification": "bill", "confident": True}})
     assert await verify_series(session, llm) == VerifyStats(verified=1, flagged=0)
     # inflow series appears later (e.g. next sync); outflow's ledger must not mask it
     await make_series(session, merchant="Venmo", direction=Direction.inflow, expected_cents=1599)
     assert await verify_series(session, llm) == VerifyStats(verified=1, flagged=0)
+
+
+async def test_apply_resolution_habit_sets_discretionary(session: AsyncSession) -> None:
+    series = await make_series(session, merchant="Costco")
+    item = ReviewItem(
+        kind=ReviewKind.recurring_cluster,
+        question="Is 'Costco' a recurring bill?",
+        payload={"merchant": "Costco", "direction": "outflow"},
+    )
+    session.add(item)
+    await session.flush()
+    await apply_resolution(session, item, {"is_recurring": True, "discretionary": True})
+    assert series.discretionary is True
+    assert item.status == ReviewStatus.resolved
 
 
 async def test_price_change_context_includes_recent_occurrences(session: AsyncSession) -> None:

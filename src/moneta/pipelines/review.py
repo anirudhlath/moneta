@@ -5,6 +5,7 @@ LLM answers are classifications only and are applied through the exact same
 resolution path a human answer takes, tagged resolved_by="llm" for audit.
 """
 
+import statistics
 from datetime import date
 from typing import Any
 
@@ -12,7 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.llm import Classifier, confident_yes
+from moneta.llm import Classifier
 from moneta.models import (
     Account,
     AliasSource,
@@ -51,11 +52,15 @@ Respond with JSON: {{"is_recurring": true/false, "confident": true/false}}
 Set confident=true ONLY if the pattern is clear."""
 
 _VERIFY_PROMPT = """You are double-checking automatic recurring-bill detection.
-Is this one recurring bill/subscription/income stream (vs. habitual spending
-like groceries, gas, or dining that merely happens on a regular rhythm)?
+- "bill": a fixed obligation — subscription, rent, insurance, loan or membership payment; \
+roughly stable amount; there are consequences if unpaid.
+- "habit": recurring discretionary spending — restaurants, coffee, bars, groceries, \
+rideshare; variable amounts; a fresh choice each time.
+- "not_recurring": neither — coincidental repetition.
 Merchant: {merchant!r}; direction: {direction}; cadence: {cadence}; \
-expected amount: ${expected}; recent occurrences: {samples}
-Respond with JSON: {{"is_recurring": true/false, "confident": true/false}}
+expected amount: ${expected}; amount cents min/median/max: {lo}/{med}/{hi}; \
+recent occurrences: {samples}
+Respond with JSON: {{"classification": "bill" | "habit" | "not_recurring", "confident": true/false}}
 Set confident=true ONLY if you are sure either way."""
 
 
@@ -207,6 +212,15 @@ async def apply_resolution(
             stmt = stmt.where(RecurringSeries.direction == direction)
         for series in (await session.execute(stmt)).scalars():
             series.status = SeriesStatus.ended
+    elif item.kind == ReviewKind.recurring_cluster and resolution.get("is_recurring") is True:
+        stmt = select(RecurringSeries).where(
+            RecurringSeries.merchant == item.payload.get("merchant")
+        )
+        direction = item.payload.get("direction")
+        if direction is not None:
+            stmt = stmt.where(RecurringSeries.direction == direction)
+        for series in (await session.execute(stmt)).scalars():
+            series.discretionary = bool(resolution.get("discretionary"))
     elif item.kind == ReviewKind.price_change and resolution.get("is_price_change") is True:
         series_row = await session.get(RecurringSeries, item.payload["series_id"])
         if series_row is not None:
@@ -244,7 +258,12 @@ def _validated(item: ReviewItem, answer: dict[str, Any]) -> dict[str, Any] | Non
         return None
     if item.kind == ReviewKind.recurring_cluster:
         is_recurring = answer.get("is_recurring")
-        return {"is_recurring": is_recurring} if isinstance(is_recurring, bool) else None
+        if not isinstance(is_recurring, bool):
+            return None
+        resolution: dict[str, Any] = {"is_recurring": is_recurring}
+        if isinstance(answer.get("discretionary"), bool):
+            resolution["discretionary"] = answer["discretionary"]
+        return resolution
     return None
 
 
@@ -329,15 +348,18 @@ async def verify_series(session: AsyncSession, llm: Classifier | None) -> Verify
     for series in series_list:
         if series_key(series.merchant, series.direction) in seen:
             continue
+        occurrences = await _recent_occurrences(session, series.id)
+        amounts = [abs(t.amount_cents) for t in occurrences] or [abs(series.expected_cents)]
         answer = await llm.classify_json(
             _VERIFY_PROMPT.format(
                 merchant=series.merchant,
                 direction=series.direction,
                 cadence=series.cadence,
                 expected=dollars(series.expected_cents),
-                samples=[
-                    _prompt_txn(_sample(t)) for t in await _recent_occurrences(session, series.id)
-                ],
+                lo=min(amounts),
+                med=round(statistics.median(amounts)),
+                hi=max(amounts),
+                samples=[_prompt_txn(_sample(t)) for t in occurrences],
             )
         )
         item = ReviewItem(
@@ -345,12 +367,23 @@ async def verify_series(session: AsyncSession, llm: Classifier | None) -> Verify
             question=f"Is {series.merchant!r} a recurring bill?",
             payload={"merchant": series.merchant, "direction": series.direction},
         )
-        if confident_yes(answer, "is_recurring"):
+        classification = answer.get("classification") if answer else None
+        if classification not in ("bill", "habit", "not_recurring"):
+            classification = None
+        confident = bool(answer and answer.get("confident") is True)
+        if classification == "bill" and confident:
             item.status = ReviewStatus.resolved
             item.resolution = {"is_recurring": True, "resolved_by": "llm"}
             stats.verified += 1
         else:
-            item.payload = {**item.payload, "llm_flagged": True}
+            # never suppresses or demotes a deterministic detection on its own —
+            # confident habit/not_recurring, unconfident, and malformed answers all
+            # land here as a human-only flagged item recording what the LLM thought
+            item.payload = {
+                **item.payload,
+                "llm_flagged": True,
+                "llm_leaning": classification or "unparseable",
+            }
             stats.flagged += 1
         session.add(item)
     await session.commit()

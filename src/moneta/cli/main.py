@@ -240,8 +240,8 @@ def accounts(
 
 _REVIEW_KINDS = {
     "recurring_cluster": (
-        "recurring bill question",
-        "your answers set the fixed costs and income behind `moneta power`",
+        "bill or habit question",
+        "bills become fixed costs; habits stay discretionary spending in moneta power",
     ),
     "transfer_pair": (
         "transfer match",
@@ -283,9 +283,21 @@ def _review_one(item: dict[str, object]) -> dict[str, object] | None:
         for s in ctx.get("samples", []):
             console.print(f"    {s['posted_on']}  {fmt_money(abs(s['amount_cents']))}")
         if ctx.get("direction") == "inflow":
-            console.print("    [dim](these are deposits — answering y counts them as income)[/dim]")
-        answer = _prompt_yes_no("Recurring? [y/n]")
-        return None if answer is None else {"is_recurring": answer}
+            console.print("    [dim](these are deposits — answering b counts them as income)[/dim]")
+        answer = typer.prompt(
+            "Bill, habit, or not recurring? [b/h/n]", default="", show_default=False
+        )
+        normalized = answer.strip().lower()
+        if not normalized:
+            return None
+        if normalized in ("b", "bill", "y", "yes"):
+            return {"is_recurring": True}
+        if normalized in ("h", "habit"):
+            return {"is_recurring": True, "discretionary": True}
+        if normalized in ("n", "no", "not"):
+            return {"is_recurring": False}
+        console.print("[red]invalid input, skipping[/red]")
+        return None
     if item["kind"] == "price_change":
         for s in ctx.get("samples", []):
             console.print(f"    {s['posted_on']}  {fmt_money(abs(s['amount_cents']))}")
