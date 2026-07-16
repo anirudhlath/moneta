@@ -95,6 +95,7 @@ class ReviewKind(StrEnum):
     transfer_pair = "transfer_pair"
     recurring_cluster = "recurring_cluster"
     price_change = "price_change"
+    financing_account = "financing_account"
 
 
 class Base(DeclarativeBase):
@@ -113,6 +114,7 @@ class Account(Base):
     balance_cents: Mapped[int] = mapped_column(default=0)
     balance_date: Mapped[date] = mapped_column(Date)
     promo_expires_on: Mapped[date | None] = mapped_column(Date, default=None)
+    financing_mode: Mapped[bool] = mapped_column(default=False)
 
 
 class Transaction(Base):
@@ -151,6 +153,7 @@ class RecurringSeries(Base):
     expected_cents: Mapped[int]
     next_expected_on: Mapped[date] = mapped_column(Date)
     status: Mapped[SeriesStatus] = mapped_column(String, default=SeriesStatus.active)
+    discretionary: Mapped[bool] = mapped_column(default=False)
 
 
 class SeriesEvent(Base):
