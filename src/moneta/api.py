@@ -300,7 +300,6 @@ def create_app(
     @app.post("/recurring/{series_id}/not-a-bill")
     async def not_a_bill(series_id: int, session: Session) -> dict[str, bool]:
         _series, item = await _series_ledger_item(session, series_id)
-        item.status = ReviewStatus.open  # reopen a resolved item so apply_resolution re-runs
         await apply_resolution(session, item, {"is_recurring": False}, resolved_by="manual")
         await session.commit()
         return {"ok": True}
@@ -308,7 +307,6 @@ def create_app(
     @app.post("/recurring/{series_id}/habit")
     async def mark_habit(series_id: int, session: Session) -> dict[str, bool]:
         series, item = await _series_ledger_item(session, series_id)
-        item.status = ReviewStatus.open
         await apply_resolution(
             session, item, {"is_recurring": True, "discretionary": True}, resolved_by="manual"
         )

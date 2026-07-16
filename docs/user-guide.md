@@ -182,6 +182,11 @@ You can also set or clear this manually, bypassing the detection question:
 moneta accounts --set-financing <ID> true|false
 ```
 
+After confirming financing this way (review answer or `--set-financing`), any old
+credit-payment series over that card is replaced by the derived per-account payment line
+on the next `moneta sync` — numbers self-heal automatically, with no double-counting in
+the interim.
+
 **Limitation:** a *hybrid* card — one carrying both everyday spending and a promo
 financing plan at the same time — can't be split apart from transaction data alone, so
 the fingerprint won't fire cleanly and moneta can't separate "this payment is financing"

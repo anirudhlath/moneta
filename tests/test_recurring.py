@@ -352,6 +352,9 @@ async def test_unstable_llm_not_recurring_opens_review(session: AsyncSession) ->
     stats = await detect_recurring(session, llm=llm, today=date(2026, 7, 1))
     assert stats.new_series == 0 and stats.review == 1
     assert (await _series(session)) == []
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    # the LLM already looked and declined — human-only from here (task 16, 2026-07-16)
+    assert item.payload["llm_flagged"] is True
 
 
 async def test_unstable_no_llm_opens_review(session: AsyncSession) -> None:
@@ -361,6 +364,8 @@ async def test_unstable_no_llm_opens_review(session: AsyncSession) -> None:
     stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
     assert stats.new_series == 0 and stats.review == 1
     assert (await _series(session)) == []
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert "llm_flagged" not in item.payload  # no LLM ever looked — still autoreviewable
 
 
 async def test_stable_subscription_unchanged(session: AsyncSession) -> None:

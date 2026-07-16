@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.cadence import monthlyize
+from moneta.cadence import monthly_cents, monthlyize
 from moneta.models import (
     SPEND_ACCOUNT_TYPES,
     Account,
@@ -16,7 +16,6 @@ from moneta.models import (
     SeriesStatus,
     Transaction,
 )
-from moneta.pipelines.recurring import monthly_cents
 from moneta.queries import classified_links, linked_txn_ids, loan_payment_stats, primary_currency
 
 

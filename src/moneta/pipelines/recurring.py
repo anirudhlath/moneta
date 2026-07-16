@@ -9,7 +9,8 @@ from moneta.cadence import CADENCE_DAYS as CADENCE_DAYS
 from moneta.cadence import GRACE_DAYS as GRACE_DAYS
 from moneta.cadence import TOLERANCE as TOLERANCE
 from moneta.cadence import advance_expected_on as advance_expected_on
-from moneta.cadence import match_cadence, monthlyize
+from moneta.cadence import match_cadence
+from moneta.cadence import monthly_cents as monthly_cents
 from moneta.llm import Classifier
 from moneta.models import (
     Account,
@@ -68,10 +69,6 @@ class RecurringStats(BaseModel):
     new_series: int = 0
     updated: int = 0
     review: int = 0
-
-
-def monthly_cents(series: RecurringSeries) -> int:
-    return monthlyize(series.expected_cents, series.cadence)
 
 
 def _stale(last_seen: date, cadence: Cadence, today: date) -> bool:
@@ -204,13 +201,21 @@ async def detect_recurring(
             continue  # user-resolved as not recurring — suppress silently, forever
         discretionary = forced[1] if forced is not None else False
 
-        def _open_review(merchant: str = merchant, direction: Direction = direction) -> None:
+        def _open_review(
+            merchant: str = merchant,
+            direction: Direction = direction,
+            *,
+            llm_flagged: bool = False,
+        ) -> None:
             if (merchant, str(direction)) not in reviewed:
+                payload: dict[str, object] = {"merchant": merchant, "direction": direction}
+                if llm_flagged:
+                    payload["llm_flagged"] = True
                 session.add(
                     ReviewItem(
                         kind=ReviewKind.recurring_cluster,
                         question=f"Is {merchant!r} a recurring bill?",
-                        payload={"merchant": merchant, "direction": direction},
+                        payload=payload,
                     )
                 )
                 stats.review += 1
@@ -241,7 +246,11 @@ async def detect_recurring(
             if classification == "habit":
                 discretionary = True
             elif classification != "bill":
-                _open_review()
+                # an actual (even malformed) LLM answer means the LLM already looked —
+                # mirror verify_series: human-only from here, autoreview must not re-ask
+                # the binary bill/one-off prompt and rubber-stamp it as a fixed cost.
+                # A classify_json failure (answer is None) never looked; leave it askable.
+                _open_review(llm_flagged=answer is not None)
                 continue
         next_on = advance_expected_on(dates[-1], cadence)
         stale = _stale(dates[-1], cadence, today)

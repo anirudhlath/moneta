@@ -2,7 +2,7 @@ import statistics
 from calendar import monthrange
 from datetime import date, timedelta
 
-from moneta.models import Cadence
+from moneta.models import Cadence, RecurringSeries
 
 CADENCE_DAYS: dict[Cadence, int] = {
     Cadence.weekly: 7,
@@ -74,3 +74,7 @@ def match_cadence(dates: list[date]) -> tuple[Cadence, date] | None:
 
 def monthlyize(expected_cents: int, cadence: Cadence) -> int:
     return round(expected_cents * PER_MONTH[cadence])
+
+
+def monthly_cents(series: RecurringSeries) -> int:
+    return monthlyize(series.expected_cents, series.cadence)

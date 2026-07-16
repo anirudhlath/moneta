@@ -143,6 +143,44 @@ async def test_confident_recurring_answer_feeds_next_detection(session: AsyncSes
     assert stats.new_series == 1
 
 
+async def test_llm_declined_detection_item_stays_human_only(session: AsyncSession) -> None:
+    """The unstable-amount branch in detect_recurring consults the LLM; when it declines
+    (anything but "bill"), the review item it opens must be llm_flagged — mirroring
+    verify_series's "LLM already looked" rule — so autoreview's binary is_recurring
+    prompt can never rubber-stamp it into a fixed cost on a later sync (the exact
+    failure this wave exists to fix: architect finding, 2026-07-16, task 16)."""
+    acct = await make_account(session)
+    for d, cents in (
+        (date(2026, 6, 1), -2176),
+        (date(2026, 6, 8), -12035),
+        (date(2026, 6, 15), -3886),
+        (date(2026, 6, 22), -4100),
+    ):
+        await make_txn(
+            session, acct, amount_cents=cents, merchant="Neighborhood Bistro", posted_on=d
+        )
+    detect_llm = ScriptedLLM({"Neighborhood Bistro": {"classification": "not_recurring"}})
+    stats = await detect_recurring(session, llm=detect_llm, today=date(2026, 7, 1))
+    assert stats.new_series == 0 and stats.review == 1
+    assert (await session.execute(select(RecurringSeries))).scalars().all() == []
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.status == ReviewStatus.open
+    assert item.payload["llm_flagged"] is True
+
+    # next sync: autoreview must not even ask its old binary bill/one-off question
+    autoreview_llm = ScriptedLLM({"Neighborhood Bistro": {"is_recurring": True, "confident": True}})
+    resolved = await autoreview_items(session, autoreview_llm)
+    assert resolved == 0
+    assert autoreview_llm.prompts == []
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.status == ReviewStatus.open  # still open — not silently affirmed
+
+    # and detection itself must still create no series while the item sits open
+    stats2 = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats2.new_series == 0
+    assert (await session.execute(select(RecurringSeries))).scalars().all() == []
+
+
 async def _series_with_occurrences(session: AsyncSession) -> RecurringSeries:
     acct = await make_account(session)
     series = await make_series(session, merchant="Netflix")
