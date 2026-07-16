@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from moneta.models import Account, AccountType, Transaction, to_cents
 
 
-def test_cents_roundtrip() -> None:
+def test_to_cents() -> None:
     assert to_cents(Decimal("-42.50")) == -4250
     assert to_cents(Decimal("1234567.89")) == 123456789
 

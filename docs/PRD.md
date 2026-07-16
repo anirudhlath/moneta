@@ -119,7 +119,7 @@ Rich tables with stable IDs everywhere a follow-up action exists (`recurring --e
 | 2026-07-15 | **LLM recurring verification** | `verify_series` second-opinion ledger, price-change LLM gating + review flow, human-only flagged items. |
 | 2026-07-15 | **Plaid integration** | Plaid adapter (hosted link, full replay, sign normalization, type hints, per-item degradation), `MergedAdapter`, setup/link/list/unlink CLI. |
 | 2026-07-15 | **Review hardening** | Alembic migrations, WAL, bearer-token auth, `moneta status` + sync audit rows, `moneta backup`, rotating logs, local-timezone dates, single-currency views, upstream-correction handling, price-change outlier protection, 0600/0700 file hygiene. |
-| 2026-07-16 | **API money convention** | Every response money field is integer cents (`*_cents`); no Decimal-as-string or pre-formatted display strings. The CLI owns all formatting (`fmt_money`, one sign format everywhere); `dollars()` is now LLM-prompt-text-only. |
+| 2026-07-16 | **API money convention** | Every response money field is integer cents (`*_cents`); no Decimal-as-string or pre-formatted display strings. The CLI owns all formatting (`fmt_money`, one sign format everywhere); `dollars()` is prose-only (LLM prompts, review-question text). |
 
 ## 8. Roadmap
 

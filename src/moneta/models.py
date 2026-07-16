@@ -14,7 +14,7 @@ def to_cents(d: Decimal) -> int:
 
 
 def dollars(cents: int) -> str:
-    """Unsigned display amount for LLM prompt text only — API payloads carry cents."""
+    """Unsigned dollars for prose only (LLM prompts, review questions) — API fields carry cents."""
     return f"{abs(cents) / 100:.2f}"
 
 

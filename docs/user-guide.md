@@ -213,6 +213,9 @@ moneta serve                       # binds 127.0.0.1:8300
 moneta serve --host 0.0.0.0        # public bind — refused unless MONETA_API_TOKEN is set
 ```
 
+Every money field in an API response is an integer number of cents, named `*_cents`
+(e.g. `"remaining_cents": 355568` is $3,555.68) — clients do their own formatting.
+
 Point any CLI at it:
 
 ```bash
