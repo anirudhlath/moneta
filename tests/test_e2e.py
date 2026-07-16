@@ -140,4 +140,4 @@ async def test_full_pipeline_power_and_obligations(client: httpx.AsyncClient) ->
 
     networth = (await client.get("/networth")).json()
     # 4200 + 10000 - (350 + 1215)
-    assert Decimal(networth["net_worth"]) == Decimal("12635.00")
+    assert networth["net_worth_cents"] == 1263500

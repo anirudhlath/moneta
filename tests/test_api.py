@@ -88,7 +88,7 @@ async def test_sync_then_views(client: httpx.AsyncClient) -> None:
     assert r.json()[0]["merchant"] == "Netflix.Com"
 
     r = await client.get("/networth")
-    assert Decimal(r.json()["liquid"]) == Decimal("1000.00")
+    assert r.json()["liquid_cents"] == 100000
 
     r = await client.get("/accounts")
     assert r.json()[0]["type"] == "checking"
@@ -492,5 +492,17 @@ async def test_power_money_fields_are_ints(client: httpx.AsyncClient) -> None:
         "spending_power_cents",
         "spent_so_far_cents",
         "remaining_cents",
+    ):
+        assert isinstance(body[key], int), key
+
+
+async def test_networth_money_fields_are_ints(client: httpx.AsyncClient) -> None:
+    body = (await client.get("/networth")).json()
+    for key in (
+        "liquid_cents",
+        "vested_holdings_cents",
+        "liabilities_cents",
+        "net_worth_cents",
+        "unvested_potential_cents",
     ):
         assert isinstance(body[key], int), key

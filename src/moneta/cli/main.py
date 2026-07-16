@@ -118,11 +118,11 @@ def networth() -> None:
     """Net worth (vested only) with unvested shown separately."""
     r = request("GET", "/networth")
     table = Table(title="Net worth", show_header=False)
-    table.add_row("Liquid", f"${r['liquid']}")
-    table.add_row("Vested holdings", f"${r['vested_holdings']}")
-    table.add_row("Liabilities", f"-${r['liabilities']}")
-    table.add_row("[bold]Net worth[/bold]", f"[bold]${r['net_worth']}[/bold]")
-    table.add_row("Unvested (potential)", f"${r['unvested_potential']}")
+    table.add_row("Liquid", fmt_money(r["liquid_cents"]))
+    table.add_row("Vested holdings", fmt_money(r["vested_holdings_cents"]))
+    table.add_row("Liabilities", fmt_money(-r["liabilities_cents"]))
+    table.add_row("[bold]Net worth[/bold]", f"[bold]{fmt_money(r['net_worth_cents'])}[/bold]")
+    table.add_row("Unvested (potential)", fmt_money(r["unvested_potential_cents"]))
     console.print(table)
     if r["unknown_accounts"]:
         console.print(
