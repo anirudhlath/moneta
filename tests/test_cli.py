@@ -10,7 +10,13 @@ from typer.testing import CliRunner
 from moneta.cli.main import app
 from moneta.db import init_db, make_sessionmaker
 from moneta.models import AccountType, Direction, ReviewItem
-from tests.factories import make_account, make_series, make_series_event, make_txn
+from tests.factories import (
+    make_account,
+    make_price_change_item,
+    make_series,
+    make_series_event,
+    make_txn,
+)
 
 runner = CliRunner()
 
@@ -74,6 +80,7 @@ def test_sync_full_flag_requests_full_sync(monkeypatch) -> None:  # type: ignore
                 "recurring": {"new_series": 0},
                 "events": 0,
                 "auto_resolved": 0,
+                "verify": {"verified": 0, "flagged": 0},
             }
         return []
 
@@ -319,3 +326,60 @@ def test_renormalize_command_runs(tmp_path: Path, monkeypatch) -> None:  # type:
     result = runner.invoke(app, ["renormalize"])
     assert result.exit_code == 0
     assert "Updated 0 merchant name(s)" in result.output
+
+
+def test_sync_prints_verification_line(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        if path == "/sync":
+            return {
+                "ingest": {"new_transactions": 0},
+                "transfers": {"linked": 0},
+                "recurring": {"new_series": 1},
+                "events": 0,
+                "auto_resolved": 0,
+                "verify": {"verified": 2, "flagged": 1},
+            }
+        return []
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 0
+    assert "LLM verified 2 series; flagged 1 for review." in result.output
+
+
+def _seed_price_change_review(tmp_path: Path) -> None:
+    async def _seed() -> None:
+        engine, sessionmaker = make_sessionmaker(f"sqlite+aiosqlite:///{tmp_path / 'moneta.db'}")
+        await init_db(engine)
+        async with sessionmaker() as session:
+            series = await make_series(session)
+            session.add(make_price_change_item(series.id))
+            await session.commit()
+        await engine.dispose()
+
+    asyncio.run(_seed())
+
+
+def test_review_price_change_yes_resolves(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    _seed_price_change_review(tmp_path)
+    result = runner.invoke(app, ["review"], input="y\n")
+    assert result.exit_code == 0
+    assert "$15.99 → $18.99" in result.output
+    assert "Price change? [y/n]" in result.output
+    assert "resolved" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_review_price_change_invalid_answer_skips_cleanly(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    _seed_price_change_review(tmp_path)
+    result = runner.invoke(app, ["review"], input="maybe\n")
+    assert result.exit_code == 0
+    assert "invalid input, skipping" in result.output
+    assert "Traceback" not in result.output

@@ -17,6 +17,11 @@ def from_cents(c: int) -> Decimal:
     return Decimal(c) / 100
 
 
+def dollars(cents: int) -> str:
+    """Unsigned display amount; direction is conveyed separately at boundaries."""
+    return f"{abs(cents) / 100:.2f}"
+
+
 class AccountType(StrEnum):
     checking = "checking"
     savings = "savings"
@@ -38,6 +43,20 @@ LIABILITY_ACCOUNT_TYPES: tuple[AccountType, ...] = (AccountType.credit, AccountT
 class Direction(StrEnum):
     inflow = "inflow"
     outflow = "outflow"
+
+
+def series_key(merchant: object, direction: object) -> tuple[str, str] | None:
+    """Normalized (merchant, direction) identity for recurring-series bookkeeping.
+
+    Review-item payloads round-trip through JSON; this is the one place that
+    decides whether such a payload addresses a series. Returns None for junk.
+    """
+    if not isinstance(merchant, str) or not isinstance(direction, str):
+        return None
+    try:
+        return merchant, str(Direction(direction))
+    except ValueError:
+        return None
 
 
 class Cadence(StrEnum):
@@ -79,6 +98,7 @@ class ReviewKind(StrEnum):
     merchant = "merchant"
     transfer_pair = "transfer_pair"
     recurring_cluster = "recurring_cluster"
+    price_change = "price_change"
 
 
 class Base(DeclarativeBase):

@@ -5,23 +5,30 @@ LLM answers are classifications only and are applied through the exact same
 resolution path a human answer takes, tagged resolved_by="llm" for audit.
 """
 
+from datetime import date
 from typing import Any
 
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.llm import Classifier
+from moneta.llm import Classifier, confident_yes
 from moneta.models import (
     Account,
     AliasSource,
     LinkMethod,
     MerchantAlias,
+    RecurringSeries,
     ReviewItem,
     ReviewKind,
     ReviewStatus,
+    SeriesStatus,
     Transaction,
     TransferLink,
+    dollars,
+    series_key,
 )
+from moneta.pipelines.events import apply_price_change
 
 _MERCHANT_PROMPT = """You are auto-resolving a personal-finance review question.
 Name the merchant behind this bank descriptor.
@@ -43,6 +50,31 @@ Merchant: {merchant!r}; direction: {direction}; recent charges: {samples}
 Respond with JSON: {{"is_recurring": true/false, "confident": true/false}}
 Set confident=true ONLY if the pattern is clear."""
 
+_VERIFY_PROMPT = """You are double-checking automatic recurring-bill detection.
+Is this one recurring bill/subscription/income stream (vs. habitual spending
+like groceries, gas, or dining that merely happens on a regular rhythm)?
+Merchant: {merchant!r}; direction: {direction}; cadence: {cadence}; \
+expected amount: ${expected}; recent occurrences: {samples}
+Respond with JSON: {{"is_recurring": true/false, "confident": true/false}}
+Set confident=true ONLY if you are sure either way."""
+
+
+def _sample(txn: Transaction) -> dict[str, str]:
+    return {"posted_on": txn.posted_on.isoformat(), "amount": dollars(txn.amount_cents)}
+
+
+async def _recent_occurrences(session: AsyncSession, series_id: int) -> list[Transaction]:
+    return list(
+        (
+            await session.execute(
+                select(Transaction)
+                .where(Transaction.series_id == series_id)
+                .order_by(Transaction.posted_on.desc())
+                .limit(6)
+            )
+        ).scalars()
+    )
+
 
 async def txn_summaries(session: AsyncSession, txn_ids: list[int]) -> dict[int, dict[str, Any]]:
     if not txn_ids:
@@ -57,8 +89,7 @@ async def txn_summaries(session: AsyncSession, txn_ids: list[int]) -> dict[int, 
     return {
         txn.id: {
             "id": txn.id,
-            "posted_on": txn.posted_on.isoformat(),
-            "amount": f"{abs(txn.amount_cents) / 100:.2f}",
+            **_sample(txn),
             "description": txn.description,
             "account": account_name,
         }
@@ -95,19 +126,28 @@ async def review_context(session: AsyncSession, item: ReviewItem) -> dict[str, A
             .all()
         )
         return {
-            "samples": [
-                {
-                    "posted_on": t.posted_on.isoformat(),
-                    "amount": f"{abs(t.amount_cents) / 100:.2f}",
-                }
-                for t in txns
-            ],
+            "samples": [_sample(t) for t in txns],
             "direction": item.payload.get("direction"),
         }
     if item.kind == ReviewKind.merchant:
         return {
             "descriptor": item.payload.get("descriptor"),
             "suggested": item.payload.get("fallback"),
+        }
+    if item.kind == ReviewKind.price_change:
+        old, new = item.payload.get("old_cents"), item.payload.get("new_cents")
+        series_id = item.payload.get("series_id")
+        samples = (
+            [_sample(t) for t in await _recent_occurrences(session, series_id)]
+            if isinstance(series_id, int)
+            else []
+        )
+        return {
+            "merchant": item.payload.get("merchant"),
+            "old_amount": dollars(old) if isinstance(old, int) else None,
+            "new_amount": dollars(new) if isinstance(new, int) else None,
+            "occurred_on": item.payload.get("occurred_on"),
+            "samples": samples,
         }
     return {}
 
@@ -144,6 +184,27 @@ async def apply_resolution(
                 method=LinkMethod.manual if resolved_by == "manual" else LinkMethod.llm,
             )
         )
+    elif item.kind == ReviewKind.recurring_cluster and resolution.get("is_recurring") is False:
+        # detection's force map suppresses future runs; end the live series now so
+        # fixed costs stop counting it immediately instead of after the stale sweep
+        stmt = select(RecurringSeries).where(
+            RecurringSeries.merchant == item.payload.get("merchant"),
+            RecurringSeries.status == SeriesStatus.active,
+        )
+        direction = item.payload.get("direction")
+        if direction is not None:
+            stmt = stmt.where(RecurringSeries.direction == direction)
+        for series in (await session.execute(stmt)).scalars():
+            series.status = SeriesStatus.ended
+    elif item.kind == ReviewKind.price_change and resolution.get("is_price_change") is True:
+        series_row = await session.get(RecurringSeries, item.payload["series_id"])
+        if series_row is not None:
+            apply_price_change(
+                session,
+                series_row,
+                item.payload["new_cents"],
+                date.fromisoformat(item.payload["occurred_on"]),
+            )
     item.status = ReviewStatus.resolved
     item.resolution = {**resolution, "resolved_by": resolved_by}
 
@@ -179,6 +240,8 @@ async def autoreview_items(session: AsyncSession, llm: Classifier) -> int:
     )
     resolved = 0
     for item in items:
+        if item.payload.get("llm_flagged"):
+            continue  # opened because the LLM already looked — human-only
         context = await review_context(session, item)
         if item.kind == ReviewKind.merchant:
             prompt = _MERCHANT_PROMPT.format(
@@ -208,3 +271,67 @@ async def autoreview_items(session: AsyncSession, llm: Classifier) -> int:
         resolved += 1
     await session.commit()
     return resolved
+
+
+class VerifyStats(BaseModel):
+    verified: int = 0
+    flagged: int = 0
+
+
+async def verify_series(session: AsyncSession, llm: Classifier | None) -> VerifyStats:
+    """LLM second opinion on deterministically detected series.
+
+    A recurring_cluster ReviewItem (open or resolved) is the per-merchant
+    verification ledger: confident "yes" is recorded resolved (which also feeds
+    detect_recurring's force map); anything else opens a human item flagged
+    llm_flagged so autoreview never re-asks the LLM. The LLM never suppresses a
+    deterministic detection — flagged series stay active until a human rules.
+    """
+    stats = VerifyStats()
+    if llm is None:
+        return stats
+    seen = {
+        key
+        for item in (
+            await session.execute(
+                select(ReviewItem).where(ReviewItem.kind == ReviewKind.recurring_cluster)
+            )
+        ).scalars()
+        if (key := series_key(item.payload.get("merchant"), item.payload.get("direction")))
+    }
+    series_list = (
+        (
+            await session.execute(
+                select(RecurringSeries).where(RecurringSeries.status == SeriesStatus.active)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for series in series_list:
+        if series_key(series.merchant, series.direction) in seen:
+            continue
+        answer = await llm.classify_json(
+            _VERIFY_PROMPT.format(
+                merchant=series.merchant,
+                direction=series.direction,
+                cadence=series.cadence,
+                expected=dollars(series.expected_cents),
+                samples=[_sample(t) for t in await _recent_occurrences(session, series.id)],
+            )
+        )
+        item = ReviewItem(
+            kind=ReviewKind.recurring_cluster,
+            question=f"Is {series.merchant!r} a recurring bill?",
+            payload={"merchant": series.merchant, "direction": series.direction},
+        )
+        if confident_yes(answer, "is_recurring"):
+            item.status = ReviewStatus.resolved
+            item.resolution = {"is_recurring": True, "resolved_by": "llm"}
+            stats.verified += 1
+        else:
+            item.payload = {**item.payload, "llm_flagged": True}
+            stats.flagged += 1
+        session.add(item)
+    await session.commit()
+    return stats

@@ -18,6 +18,7 @@ from moneta.models import (
     SeriesEvent,
     SeriesStatus,
     Transaction,
+    series_key,
 )
 from moneta.queries import classified_links
 
@@ -113,22 +114,23 @@ async def detect_recurring(
 ) -> RecurringStats:
     stats = RecurringStats()
     excluded = await _excluded_txn_ids(session)
-    reviewed: set[str] = set()
-    force: dict[str, bool] = {}
+    reviewed: set[tuple[str, str]] = set()
+    force: dict[tuple[str, str], bool] = {}
     for item in (
         await session.execute(
             select(ReviewItem).where(ReviewItem.kind == ReviewKind.recurring_cluster)
         )
     ).scalars():
-        merchant_key = item.payload.get("merchant")
-        if not isinstance(merchant_key, str):
+        # direction-scoped: an answer about outflows must not force inflows
+        key = series_key(item.payload.get("merchant"), item.payload.get("direction"))
+        if key is None:
             continue
         if item.status == ReviewStatus.open:
-            reviewed.add(merchant_key)
+            reviewed.add(key)
         elif isinstance(item.resolution, dict) and isinstance(
             item.resolution.get("is_recurring"), bool
         ):
-            force[merchant_key] = item.resolution["is_recurring"]
+            force[key] = item.resolution["is_recurring"]
     existing = {
         (s.merchant, s.direction): s
         for s in (await session.execute(select(RecurringSeries))).scalars()
@@ -168,12 +170,12 @@ async def detect_recurring(
         med = statistics.median(amounts)
         stable = all(abs(a - med) <= med * _AMOUNT_TOLERANCE for a in amounts)
         expected = -round(med) if direction == Direction.outflow else round(med)
-        forced = force.get(merchant)
+        forced = force.get((merchant, str(direction)))
         if forced is False:
             continue  # user-resolved as not recurring — suppress silently, forever
 
         def _open_review(merchant: str = merchant, direction: Direction = direction) -> None:
-            if merchant not in reviewed:
+            if (merchant, str(direction)) not in reviewed:
                 session.add(
                     ReviewItem(
                         kind=ReviewKind.recurring_cluster,

@@ -44,6 +44,11 @@ def sync(
     )
     if report["auto_resolved"]:
         console.print(f"LLM auto-resolved {report['auto_resolved']} review item(s).")
+    verify = report["verify"]
+    if verify["verified"] or verify["flagged"]:
+        console.print(
+            f"LLM verified {verify['verified']} series; flagged {verify['flagged']} for review."
+        )
     open_reviews = request("GET", "/review")
     if open_reviews:
         console.print(f"[yellow]{len(open_reviews)} items need review:[/yellow] moneta review")
@@ -203,7 +208,24 @@ _REVIEW_KINDS = {
         "merchant name",
         "names a messy bank descriptor so it reads cleanly everywhere",
     ),
+    "price_change": (
+        "price change",
+        "confirming updates the expected amount behind `moneta power`",
+    ),
 }
+
+
+def _prompt_yes_no(question: str) -> bool | None:
+    answer = typer.prompt(question, default="", show_default=False)
+    if not answer:
+        return None
+    normalized = answer.strip().lower()
+    if normalized in ("y", "yes"):
+        return True
+    if normalized in ("n", "no"):
+        return False
+    console.print("[red]invalid input, skipping[/red]")
+    return None
 
 
 def _review_one(item: dict[str, object]) -> dict[str, object] | None:
@@ -215,16 +237,16 @@ def _review_one(item: dict[str, object]) -> dict[str, object] | None:
             console.print(f"    {s['posted_on']}  ${s['amount']}")
         if ctx.get("direction") == "inflow":
             console.print("    [dim](these are deposits — answering y counts them as income)[/dim]")
-        answer = typer.prompt("Recurring? [y/n]", default="", show_default=False)
-        if not answer:
-            return None
-        normalized = answer.strip().lower()
-        if normalized in ("y", "yes"):
-            return {"is_recurring": True}
-        if normalized in ("n", "no"):
-            return {"is_recurring": False}
-        console.print("[red]invalid input, skipping[/red]")
-        return None
+        answer = _prompt_yes_no("Recurring? [y/n]")
+        return None if answer is None else {"is_recurring": answer}
+    if item["kind"] == "price_change":
+        for s in ctx.get("samples", []):
+            console.print(f"    {s['posted_on']}  ${s['amount']}")
+        console.print(
+            f"    ${ctx.get('old_amount')} → ${ctx.get('new_amount')} on {ctx.get('occurred_on')}"
+        )
+        answer = _prompt_yes_no("Price change? [y/n]")
+        return None if answer is None else {"is_price_change": answer}
     if item["kind"] == "transfer_pair":
         if outflow := ctx.get("outflow"):
             console.print(
@@ -302,7 +324,9 @@ def review() -> None:
         console.print("[green]resolved[/green]")
     console.print(f"\nResolved {resolved}, skipped {skipped}.")
     if resolved:
-        console.print("Recurring/transfer answers apply on the next sync: [bold]moneta sync[/bold]")
+        # price/not-recurring answers apply immediately; new bills and transfer
+        # links shape detection on the next sync
+        console.print("Some answers take effect on the next sync: [bold]moneta sync[/bold]")
 
 
 @import_app.command("vesting")

@@ -6,15 +6,27 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.models import (
     AccountType,
+    Direction,
+    EventKind,
     MerchantAlias,
+    RecurringSeries,
     ReviewItem,
+    ReviewKind,
     ReviewStatus,
+    SeriesEvent,
+    SeriesStatus,
     Transaction,
     TransferLink,
 )
 from moneta.pipelines.recurring import detect_recurring
-from moneta.pipelines.review import autoreview_items
-from tests.factories import make_account, make_txn
+from moneta.pipelines.review import (
+    VerifyStats,
+    apply_resolution,
+    autoreview_items,
+    review_context,
+    verify_series,
+)
+from tests.factories import make_account, make_price_change_item, make_series, make_txn
 
 
 class ScriptedLLM:
@@ -128,3 +140,204 @@ async def test_confident_recurring_answer_feeds_next_detection(session: AsyncSes
     # consumes the force map
     stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
     assert stats.new_series == 1
+
+
+async def _series_with_occurrences(session: AsyncSession) -> RecurringSeries:
+    acct = await make_account(session)
+    series = await make_series(session, merchant="Netflix")
+    await make_txn(
+        session,
+        acct,
+        amount_cents=-1599,
+        merchant="Netflix",
+        posted_on=date(2026, 6, 15),
+        series_id=series.id,
+    )
+    return series
+
+
+async def test_verify_confident_yes_writes_resolved_ledger_item(session: AsyncSession) -> None:
+    await _series_with_occurrences(session)
+    llm = ScriptedLLM({"Netflix": {"is_recurring": True, "confident": True}})
+    stats = await verify_series(session, llm)
+    assert stats == VerifyStats(verified=1, flagged=0)
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.status == ReviewStatus.resolved
+    assert item.resolution == {"is_recurring": True, "resolved_by": "llm"}
+    # settled: a second run asks nothing
+    assert await verify_series(session, llm) == VerifyStats()
+    assert len(llm.prompts) == 1
+
+
+async def test_verify_prompt_carries_amounts_and_dates(session: AsyncSession) -> None:
+    await _series_with_occurrences(session)
+    llm = ScriptedLLM({"Netflix": {"is_recurring": True, "confident": True}})
+    await verify_series(session, llm)
+    assert "15.99" in llm.prompts[0] and "2026-06-15" in llm.prompts[0]
+
+
+async def test_verify_unconfident_flags_for_human(session: AsyncSession) -> None:
+    series = await _series_with_occurrences(session)
+    llm = ScriptedLLM({"Netflix": {"is_recurring": True, "confident": False}})
+    stats = await verify_series(session, llm)
+    assert stats == VerifyStats(verified=0, flagged=1)
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.status == ReviewStatus.open
+    assert item.payload["llm_flagged"] is True
+    assert series.status == SeriesStatus.active  # keeps counting until a human rules
+
+
+async def test_verify_confident_no_flags_rather_than_suppresses(session: AsyncSession) -> None:
+    series = await _series_with_occurrences(session)
+    llm = ScriptedLLM({"Netflix": {"is_recurring": False, "confident": True}})
+    stats = await verify_series(session, llm)
+    assert stats == VerifyStats(verified=0, flagged=1)
+    assert series.status == SeriesStatus.active  # the LLM never suppresses determinism
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.status == ReviewStatus.open
+
+
+async def test_verify_skips_merchants_with_existing_items(session: AsyncSession) -> None:
+    await _series_with_occurrences(session)
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.recurring_cluster,
+            question="Is 'Netflix' a recurring bill?",
+            payload={"merchant": "Netflix", "direction": "outflow"},
+        )
+    )
+    await session.flush()
+    llm = ScriptedLLM({"Netflix": {"is_recurring": True, "confident": True}})
+    assert await verify_series(session, llm) == VerifyStats()
+    assert llm.prompts == []
+
+
+async def test_verify_skips_ended_series(session: AsyncSession) -> None:
+    await make_series(session, merchant="Old Gym", status=SeriesStatus.ended)
+    llm = ScriptedLLM({"Old Gym": {"is_recurring": True, "confident": True}})
+    assert await verify_series(session, llm) == VerifyStats()
+    assert llm.prompts == []
+
+
+async def test_verify_without_llm_is_noop(session: AsyncSession) -> None:
+    await _series_with_occurrences(session)
+    assert await verify_series(session, None) == VerifyStats()
+    assert (await session.execute(select(ReviewItem))).scalar_one_or_none() is None
+
+
+async def test_autoreview_skips_llm_flagged_items(session: AsyncSession) -> None:
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.recurring_cluster,
+            question="Is 'Costco' a recurring bill?",
+            payload={"merchant": "Costco", "direction": "outflow", "llm_flagged": True},
+        )
+    )
+    await session.flush()
+    llm = ScriptedLLM({"Costco": {"is_recurring": True, "confident": True}})
+    assert await autoreview_items(session, llm) == 0
+    assert llm.prompts == []  # the LLM already looked once; re-asking is circular
+    assert len(await _open_items(session)) == 1
+
+
+async def test_not_recurring_resolution_ends_live_series(session: AsyncSession) -> None:
+    series = await make_series(session, merchant="Costco")
+    item = ReviewItem(
+        kind=ReviewKind.recurring_cluster,
+        question="Is 'Costco' a recurring bill?",
+        payload={"merchant": "Costco", "direction": "outflow"},
+    )
+    session.add(item)
+    await session.flush()
+    await apply_resolution(session, item, {"is_recurring": False})
+    assert series.status == SeriesStatus.ended
+    assert item.status == ReviewStatus.resolved
+
+
+async def test_not_recurring_resolution_leaves_other_direction_alone(
+    session: AsyncSession,
+) -> None:
+    series = await make_series(session, merchant="Costco", direction=Direction.inflow)
+    item = ReviewItem(
+        kind=ReviewKind.recurring_cluster,
+        question="Is 'Costco' a recurring bill?",
+        payload={"merchant": "Costco", "direction": "outflow"},
+    )
+    session.add(item)
+    await session.flush()
+    await apply_resolution(session, item, {"is_recurring": False})
+    assert series.status == SeriesStatus.active
+
+
+async def test_price_change_resolution_true_applies_amount(session: AsyncSession) -> None:
+    series = await make_series(session)
+    item = make_price_change_item(series.id)
+    session.add(item)
+    await session.flush()
+    await apply_resolution(session, item, {"is_price_change": True})
+    assert series.expected_cents == -1899
+    ev = (await session.execute(select(SeriesEvent))).scalar_one()
+    assert ev.kind == EventKind.price_increase
+    assert ev.occurred_on == date(2026, 7, 15)
+    assert ev.details == {"old_cents": -1599, "new_cents": -1899}
+    assert item.status == ReviewStatus.resolved
+
+
+async def test_price_change_resolution_false_resolves_without_applying(
+    session: AsyncSession,
+) -> None:
+    series = await make_series(session)
+    item = make_price_change_item(series.id)
+    session.add(item)
+    await session.flush()
+    await apply_resolution(session, item, {"is_price_change": False})
+    assert series.expected_cents == -1599
+    assert (await session.execute(select(SeriesEvent))).scalar_one_or_none() is None
+    assert item.status == ReviewStatus.resolved
+
+
+async def test_force_map_is_direction_scoped(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.recurring_cluster,
+            question="Is 'Venmo' a recurring bill?",
+            payload={"merchant": "Venmo", "direction": "outflow"},
+            status=ReviewStatus.resolved,
+            resolution={"is_recurring": True, "resolved_by": "llm"},
+        )
+    )
+    # irregular INFLOW group: the outflow verification must not force it into income
+    for d in (date(2026, 4, 1), date(2026, 4, 11), date(2026, 5, 26)):
+        await make_txn(session, acct, amount_cents=30000, merchant="Venmo", posted_on=d)
+    await session.flush()
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.new_series == 0
+
+
+async def test_verify_covers_each_direction_separately(session: AsyncSession) -> None:
+    await make_series(session, merchant="Venmo")  # outflow
+    llm = ScriptedLLM({"Venmo": {"is_recurring": True, "confident": True}})
+    assert await verify_series(session, llm) == VerifyStats(verified=1, flagged=0)
+    # inflow series appears later (e.g. next sync); outflow's ledger must not mask it
+    await make_series(session, merchant="Venmo", direction=Direction.inflow, expected_cents=1599)
+    assert await verify_series(session, llm) == VerifyStats(verified=1, flagged=0)
+
+
+async def test_price_change_context_includes_recent_occurrences(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    series = await make_series(session)
+    await make_txn(
+        session,
+        acct,
+        amount_cents=-1899,
+        merchant="Netflix",
+        posted_on=date(2026, 7, 15),
+        series_id=series.id,
+    )
+    item = make_price_change_item(series.id)
+    session.add(item)
+    await session.flush()
+    ctx = await review_context(session, item)
+    assert ctx["old_amount"] == "15.99" and ctx["new_amount"] == "18.99"
+    assert ctx["samples"] == [{"posted_on": "2026-07-15", "amount": "18.99"}]

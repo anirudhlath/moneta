@@ -10,6 +10,8 @@ from moneta.models import (
     Direction,
     EventKind,
     RecurringSeries,
+    ReviewItem,
+    ReviewKind,
     SeriesEvent,
     SeriesStatus,
     Transaction,
@@ -78,3 +80,20 @@ async def make_series_event(
     session.add(event)
     await session.flush()
     return event
+
+
+def make_price_change_item(series_id: int, **kw: Any) -> ReviewItem:
+    """Unattached price_change ReviewItem; callers add/flush/commit themselves."""
+    defaults: dict[str, Any] = {
+        "kind": ReviewKind.price_change,
+        "question": "Did 'Netflix' change price from $15.99 to $18.99?",
+        "payload": {
+            "series_id": series_id,
+            "merchant": "Netflix",
+            "old_cents": -1599,
+            "new_cents": -1899,
+            "occurred_on": "2026-07-15",
+            "llm_flagged": True,
+        },
+    }
+    return ReviewItem(**{**defaults, **kw})

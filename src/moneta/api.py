@@ -85,6 +85,13 @@ class ResolveIn(BaseModel):
     resolution: dict[str, Any]
 
 
+# review kinds whose resolution must carry a boolean answer under this key
+_REQUIRED_BOOL: dict[ReviewKind, str] = {
+    ReviewKind.recurring_cluster: "is_recurring",
+    ReviewKind.price_change: "is_price_change",
+}
+
+
 class VestingIn(BaseModel):
     csv: str
 
@@ -264,10 +271,9 @@ def create_app(
         ).scalar_one_or_none()
         if item is None:
             raise HTTPException(status_code=404, detail="review item not found")
-        if item.kind == ReviewKind.recurring_cluster and not isinstance(
-            body.resolution.get("is_recurring"), bool
-        ):
-            raise HTTPException(status_code=422, detail="resolution.is_recurring must be a bool")
+        required = _REQUIRED_BOOL.get(item.kind)
+        if required is not None and not isinstance(body.resolution.get(required), bool):
+            raise HTTPException(status_code=422, detail=f"resolution.{required} must be a bool")
         await apply_resolution(session, item, body.resolution, resolved_by="manual")
         await session.commit()
         return {"ok": True}
