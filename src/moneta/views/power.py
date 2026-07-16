@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from moneta.cadence import monthlyize
 from moneta.models import (
     SPEND_ACCOUNT_TYPES,
     Account,
@@ -16,7 +17,7 @@ from moneta.models import (
     Transaction,
 )
 from moneta.pipelines.recurring import monthly_cents
-from moneta.queries import classified_links, linked_txn_ids, primary_currency
+from moneta.queries import classified_links, linked_txn_ids, loan_payment_stats, primary_currency
 
 
 class SeriesLine(BaseModel):
@@ -60,17 +61,52 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
     cc_series = {
         link.outflow_series_id
         for link in links
-        if link.outflow_series_id is not None and link.inflow_account_type == AccountType.credit
+        if link.outflow_series_id is not None
+        and link.inflow_account_type == AccountType.credit
+        and not link.inflow_is_loan_like
     }
 
     income, monthly_income = _series_lines(
         s for s in series if s.direction == Direction.inflow and not s.discretionary
     )
-    fixed, total_fixed = _series_lines(
+    fixed_series = [
         s
         for s in series
         if s.direction == Direction.outflow and s.id not in cc_series and not s.discretionary
-    )
+    ]
+    fixed, total_fixed = _series_lines(fixed_series)
+
+    # A loan-like account already represented by an active series in `fixed` must not
+    # also get a derived payment line — that would double-count the same obligation.
+    fixed_series_ids = {s.id for s in fixed_series}
+    covered_loan_accounts = {
+        link.inflow_account_id
+        for link in links
+        if link.inflow_is_loan_like and link.outflow_series_id in fixed_series_ids
+    }
+    payments = {
+        account_id: lp
+        for account_id, lp in loan_payment_stats(links).items()
+        if account_id not in covered_loan_accounts
+    }
+    if payments:
+        names = {
+            aid: name
+            for aid, name in (
+                await session.execute(
+                    select(Account.id, Account.name).where(Account.id.in_(payments))
+                )
+            ).all()
+        }
+        for lp in payments.values():
+            line = SeriesLine(
+                merchant=f"{names.get(lp.account_id, f'account {lp.account_id}')} — payment",
+                cadence=lp.cadence,
+                monthly_cents=abs(monthlyize(lp.expected_cents, lp.cadence)),
+            )
+            fixed.append(line)
+            total_fixed += line.monthly_cents
+        fixed.sort(key=lambda line: line.monthly_cents, reverse=True)
 
     linked_ids = linked_txn_ids(links)
     primary = await primary_currency(session)

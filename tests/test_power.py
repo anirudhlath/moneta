@@ -112,6 +112,83 @@ async def test_loan_payment_series_stays_in_fixed(session: AsyncSession) -> None
     assert report.total_fixed_cents == 13500
 
 
+async def test_loan_payment_lines_in_fixed_costs(session: AsyncSession) -> None:
+    """Loan-linked payments with no recurring series of their own must still
+    surface as derived fixed-cost lines, one per loan account."""
+    checking = await make_account(session, type=AccountType.checking)
+    loan_a = await make_account(session, type=AccountType.loan, name="Car Loan")
+    loan_b = await make_account(session, type=AccountType.loan, name="Furniture Loan")
+    out_a = await make_txn(
+        session,
+        checking,
+        amount_cents=-13500,
+        merchant="Synchrony Bank",
+        posted_on=date(2026, 7, 5),
+    )
+    inn_a = await make_txn(
+        session, loan_a, amount_cents=13500, merchant="Synchrony Bank", posted_on=date(2026, 7, 5)
+    )
+    session.add(
+        TransferLink(outflow_id=out_a.id, inflow_id=inn_a.id, confidence=1.0, method="rule")
+    )
+    out_b = await make_txn(
+        session,
+        checking,
+        amount_cents=-20000,
+        merchant="Synchrony Bank",
+        posted_on=date(2026, 7, 6),
+    )
+    inn_b = await make_txn(
+        session, loan_b, amount_cents=20000, merchant="Synchrony Bank", posted_on=date(2026, 7, 6)
+    )
+    session.add(
+        TransferLink(outflow_id=out_b.id, inflow_id=inn_b.id, confidence=1.0, method="rule")
+    )
+    await session.flush()
+    report = await power_report(session, today=date(2026, 7, 7))
+    merchants = {line.merchant for line in report.fixed_costs}
+    assert merchants == {"Car Loan — payment", "Furniture Loan — payment"}
+    assert report.total_fixed_cents == 33500
+
+
+async def test_financing_mode_payments_are_fixed_costs_not_cc_excluded(
+    session: AsyncSession,
+) -> None:
+    """A financing-mode credit account (type stays `credit`) is loan-like, so its
+    linked payment series must count as a fixed cost, not get filtered out as a
+    plain credit-card payment (whose purchases are already counted as spend)."""
+    checking = await make_account(session, type=AccountType.checking)
+    card = await make_account(
+        session,
+        type=AccountType.credit,
+        financing_mode=True,
+        name="Synchrony Store Card",
+    )
+    payment = await make_series(
+        session, merchant="Synchrony Store Card Payment", expected_cents=-30000
+    )
+    out = await make_txn(
+        session,
+        checking,
+        amount_cents=-30000,
+        merchant="Synchrony Store Card Payment",
+        posted_on=date(2026, 7, 5),
+        series_id=payment.id,
+    )
+    inn = await make_txn(
+        session,
+        card,
+        amount_cents=30000,
+        merchant="Synchrony Store Card Payment",
+        posted_on=date(2026, 7, 5),
+    )
+    session.add(TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule"))
+    await session.flush()
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert report.total_fixed_cents == 30000
+    assert [line.merchant for line in report.fixed_costs] == ["Synchrony Store Card Payment"]
+
+
 async def test_spent_ignores_foreign_currency_accounts(session: AsyncSession) -> None:
     usd = await make_account(session, type=AccountType.checking)
     eur = await make_account(session, type=AccountType.checking, currency="EUR")
