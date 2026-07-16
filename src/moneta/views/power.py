@@ -2,7 +2,7 @@ from collections.abc import Iterable
 from datetime import date
 
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.models import (
@@ -63,9 +63,13 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
         if link.outflow_series_id is not None and link.inflow_account_type == AccountType.credit
     }
 
-    income, monthly_income = _series_lines(s for s in series if s.direction == Direction.inflow)
+    income, monthly_income = _series_lines(
+        s for s in series if s.direction == Direction.inflow and not s.discretionary
+    )
     fixed, total_fixed = _series_lines(
-        s for s in series if s.direction == Direction.outflow and s.id not in cc_series
+        s
+        for s in series
+        if s.direction == Direction.outflow and s.id not in cc_series and not s.discretionary
     )
 
     linked_ids = linked_txn_ids(links)
@@ -75,11 +79,16 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
             await session.execute(
                 select(Transaction)
                 .join(Account, Transaction.account_id == Account.id)
+                .outerjoin(RecurringSeries, Transaction.series_id == RecurringSeries.id)
                 .where(
                     Transaction.amount_cents < 0,
                     Transaction.posted_on >= month_start,
                     Transaction.posted_on <= today,
-                    Transaction.series_id.is_(None),
+                    or_(
+                        Transaction.series_id.is_(None),
+                        RecurringSeries.status != SeriesStatus.active,
+                        RecurringSeries.discretionary.is_(True),
+                    ),
                     Account.type.in_(SPEND_ACCOUNT_TYPES),
                     Account.currency == primary,
                 )

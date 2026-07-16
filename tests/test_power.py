@@ -2,7 +2,7 @@ from datetime import date
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.models import AccountType, Cadence, Direction, TransferLink
+from moneta.models import AccountType, Cadence, Direction, SeriesStatus, TransferLink
 from moneta.pipelines.recurring import detect_recurring
 from moneta.views.power import power_report
 from tests.factories import make_account, make_series, make_txn
@@ -119,3 +119,63 @@ async def test_spent_ignores_foreign_currency_accounts(session: AsyncSession) ->
     await make_txn(session, eur, amount_cents=-7000, posted_on=date(2026, 7, 4))
     r = await power_report(session, today=date(2026, 7, 9))
     assert r.spent_so_far_cents == 5000
+
+
+async def test_ended_series_txns_count_as_spent(session: AsyncSession) -> None:
+    checking = await make_account(session, type=AccountType.checking)
+    dead_gym = await make_series(
+        session, merchant="Dead Gym", expected_cents=-4999, status=SeriesStatus.ended
+    )
+    await make_txn(
+        session,
+        checking,
+        amount_cents=-4999,
+        merchant="Dead Gym",
+        posted_on=date(2026, 7, 5),
+        series_id=dead_gym.id,
+    )
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert report.spent_so_far_cents == 4999
+    assert report.remaining_cents == report.spending_power_cents - 4999
+
+
+async def test_discretionary_series_excluded_from_fixed_and_counted_as_spend(
+    session: AsyncSession,
+) -> None:
+    checking = await make_account(session, type=AccountType.checking)
+    dining = await make_series(
+        session, merchant="Dining Out", expected_cents=-3886, discretionary=True
+    )
+    await make_txn(
+        session,
+        checking,
+        amount_cents=-3886,
+        merchant="Dining Out",
+        posted_on=date(2026, 7, 5),
+        series_id=dining.id,
+    )
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert report.total_fixed_cents == 0
+    assert report.spent_so_far_cents == 3886
+
+
+async def test_discretionary_inflow_not_income(session: AsyncSession) -> None:
+    checking = await make_account(session, type=AccountType.checking)
+    reimbursement = await make_series(
+        session,
+        merchant="Expense Reimbursement",
+        direction=Direction.inflow,
+        expected_cents=20000,
+        discretionary=True,
+    )
+    await make_txn(
+        session,
+        checking,
+        amount_cents=20000,
+        merchant="Expense Reimbursement",
+        posted_on=date(2026, 7, 5),
+        series_id=reimbursement.id,
+    )
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert report.income_sources == []
+    assert report.monthly_income_cents == 0
