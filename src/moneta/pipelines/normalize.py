@@ -7,7 +7,7 @@ from moneta.llm import Classifier
 from moneta.models import AliasSource, MerchantAlias, ReviewItem, ReviewKind, Transaction
 
 _PREFIXES = re.compile(r"^(sq \*|tst\*\s*|paypal \*|py \*|amzn mktp us\*)", re.IGNORECASE)
-_STORE_NUM = re.compile(r"(#\d+|\b\d{3,}\b)")
+_STORE_NUM = re.compile(r"(#\d+|(?<![\w-])\d{3,}(?![\w-]))")
 # payment-reference tokens: 8+ alphanumeric chars containing at least one digit
 _REF_TOKEN = re.compile(r"\b(?=[0-9a-zA-Z]*\d)[0-9a-zA-Z]{8,}\b")
 _SPACES = re.compile(r"\s+")
