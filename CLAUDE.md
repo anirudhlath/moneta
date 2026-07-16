@@ -12,6 +12,16 @@ All four must pass before every commit. Test output must be pristine — a depre
 
 Run it: `uv run moneta --help` (CLI, no server needed — in-process ASGI) or `uv run moneta serve` (real server; see README for the full quickstart).
 
+## Docs upkeep (required end-of-session step)
+
+Before ending any session that changed behavior — code, CLI surface, config keys, defaults, or feature semantics — update the affected docs in the same commit/PR:
+
+- `docs/PRD.md` — feature tables, feature history, and roadmap (move shipped backlog items out; new capabilities in)
+- `docs/user-guide.md` — commands, flags, config reference, workflows, troubleshooting
+- `README.md` — quickstart and command table, if the user-facing surface moved
+
+Pure-internal refactors with zero behavior change may skip this, but state that explicitly in the session summary.
+
 ## Conventions that aren't obvious from the code
 
 - **Money is integer cents everywhere** (`*_cents: int`); `Decimal` only at boundaries via `to_cents`/`from_cents` (models.py). Never float for money. Share quantities on `Holding` are float — shares aren't money.

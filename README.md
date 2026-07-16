@@ -204,8 +204,12 @@ All of the above must pass before every commit (CI enforces the same gate).
 Tests cover the pipelines end-to-end against a fake aggregator and a scripted
 LLM — no network, no real accounts.
 
-## Design docs
+## Documentation
 
+- [User guide](docs/user-guide.md) — install, connecting banks, every command,
+  review workflow, server mode, backup, configuration, troubleshooting
+- [PRD](docs/PRD.md) — the full product picture: shipped features, feature
+  history, roadmap
 - [Design doc](docs/superpowers/specs/2026-07-07-moneta-design.md) — problem,
   architecture decisions, data model, pipeline specs, LLM usage rules
 - [Backlog](docs/backlog/) and [QA backlog](docs/qa-backlog/) — deferred work and
