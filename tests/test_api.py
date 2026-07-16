@@ -520,3 +520,20 @@ async def test_obligations_money_fields_are_ints(
     body = (await client.get("/obligations")).json()
     assert body[0]["balance_owed_cents"] == 121500  # int, not "1215.00"
     assert body[0]["monthly_payment_cents"] is None
+
+
+async def test_accounts_and_recurring_money_fields_are_ints(
+    client: httpx.AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    async with sessionmaker() as session:
+        await make_account(session, balance_cents=-121500)
+        await make_series(session, expected_cents=-1599)
+        await session.commit()
+
+    accounts = (await client.get("/accounts")).json()
+    assert accounts[0]["balance_cents"] == -121500
+    assert "balance" not in accounts[0]
+
+    series = (await client.get("/recurring")).json()
+    assert series[0]["expected_cents"] == -1599
+    assert "expected_amount" not in series[0]

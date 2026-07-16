@@ -165,7 +165,7 @@ def recurring(
                 escape(s["merchant"]),
                 s["direction"],
                 s["cadence"],
-                f"${s['expected_amount']}",
+                fmt_money(abs(s["expected_cents"])),
                 s["next_expected_on"],
                 s["status"],
             )
@@ -232,7 +232,7 @@ def accounts(
             escape(a["name"]),
             escape(a["org_name"]),
             a["type"],
-            f"${a['balance']}",
+            fmt_money(a["balance_cents"]),
             str(a["promo_expires_on"] or "—"),
         )
     console.print(table)

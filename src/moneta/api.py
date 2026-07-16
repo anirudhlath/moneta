@@ -47,7 +47,7 @@ class AccountOut(BaseModel):
     name: str
     org_name: str
     type: AccountType
-    balance: str
+    balance_cents: int
     promo_expires_on: date | None
 
 
@@ -62,7 +62,6 @@ class SeriesOut(BaseModel):
     direction: str
     cadence: str
     expected_cents: int
-    expected_amount: str
     next_expected_on: date
     status: str
 
@@ -239,7 +238,6 @@ def create_app(
                 direction=r.direction,
                 cadence=r.cadence,
                 expected_cents=r.expected_cents,
-                expected_amount=f"{abs(r.expected_cents) / 100:.2f}",
                 next_expected_on=r.next_expected_on,
                 status=r.status,
             )
@@ -293,7 +291,7 @@ def create_app(
                 name=a.name,
                 org_name=a.org_name,
                 type=a.type,
-                balance=f"{a.balance_cents / 100:.2f}",
+                balance_cents=a.balance_cents,
                 promo_expires_on=a.promo_expires_on,
             )
             for a in rows
