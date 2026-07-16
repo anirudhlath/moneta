@@ -125,6 +125,7 @@ Rich tables with stable IDs everywhere a follow-up action exists (`recurring --e
 Sourced from `docs/backlog/` (one file per ticket — see each for context and acceptance criteria).
 
 **High**
+- Distinguish fixed obligations from habitual discretionary spending (a weekly restaurant is "recurring" but not a fixed cost — prompts and amount-stability signal must separate them).
 - Brokerage accounts without holdings are invisible to net worth.
 - Fidelity NetBenefits CSV mapping (direct export → vesting import).
 - Transaction drill-down command (inspect what's behind a number).
@@ -136,6 +137,7 @@ Sourced from `docs/backlog/` (one file per ticket — see each for context and a
 - Upcoming charges surfaced in `power`.
 - Sync progress feedback; sync-staleness warning in `status`; per-item sync warnings surfaced to the user.
 - Per-source sync window (Plaid's daily replay currently pins the global window near today).
+- CLI overrule for a wrongly-confirmed recurring series (`--not-a-bill`).
 - Ended-series spend visibility; recurring reactivate via CLI; friendlier remote-CLI connection errors; normalize API money representation.
 
 **Low**
