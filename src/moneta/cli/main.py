@@ -255,6 +255,10 @@ _REVIEW_KINDS = {
         "price change",
         "confirming updates the expected amount behind `moneta power`",
     ),
+    "financing_account": (
+        "financing check",
+        "confirming counts this card's payments as fixed costs in moneta power",
+    ),
 }
 
 
@@ -334,6 +338,9 @@ def _review_one(item: dict[str, object]) -> dict[str, object] | None:
             console.print(f"    current guess: {suggested!r}")
         answer = typer.prompt("Merchant name (Enter to skip)", default="", show_default=False)
         return {"merchant": answer} if answer else None
+    if item["kind"] == "financing_account":
+        answer = _prompt_yes_no("Treat as financing? [y/n]")
+        return None if answer is None else {"financing": answer}
     answer = typer.prompt("Answer (blank to skip)", default="", show_default=False)
     return {"note": answer} if answer else None
 

@@ -216,6 +216,12 @@ async def apply_resolution(
                 item.payload["new_cents"],
                 date.fromisoformat(item.payload["occurred_on"]),
             )
+    elif item.kind == ReviewKind.financing_account and isinstance(
+        resolution.get("financing"), bool
+    ):
+        acct = await session.get(Account, item.payload["account_id"])
+        if acct is not None:
+            acct.financing_mode = resolution["financing"]
     item.status = ReviewStatus.resolved
     item.resolution = {**resolution, "resolved_by": resolved_by}
 

@@ -95,6 +95,7 @@ class ResolveIn(BaseModel):
 _REQUIRED_BOOL: dict[ReviewKind, str] = {
     ReviewKind.recurring_cluster: "is_recurring",
     ReviewKind.price_change: "is_price_change",
+    ReviewKind.financing_account: "financing",
 }
 
 

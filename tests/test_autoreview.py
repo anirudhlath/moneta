@@ -246,6 +246,25 @@ async def test_autoreview_skips_llm_flagged_items(session: AsyncSession) -> None
     assert len(await _open_items(session)) == 1
 
 
+async def test_autoreview_skips_financing_account(session: AsyncSession) -> None:
+    acct = await make_account(session, type=AccountType.credit, balance_cents=-16000)
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.financing_account,
+            question="'Test' looks like promo financing being paid down — "
+            "treat its payments as fixed costs?",
+            payload={"account_id": acct.id},
+        )
+    )
+    await session.flush()
+    llm = ScriptedLLM({"": {"financing": True, "confident": True}})
+    assert await autoreview_items(session, llm) == 0
+    assert llm.prompts == []  # human-only kind — autoreview never builds a prompt for it
+    items = await _open_items(session)
+    assert len(items) == 1
+    assert items[0].kind == ReviewKind.financing_account
+
+
 async def test_not_recurring_resolution_ends_live_series(session: AsyncSession) -> None:
     series = await make_series(session, merchant="Costco")
     item = ReviewItem(
