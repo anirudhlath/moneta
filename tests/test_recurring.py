@@ -4,6 +4,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from moneta.cadence import advance_expected_on, monthly_cents
 from moneta.models import (
     Account,
     AccountType,
@@ -20,7 +21,7 @@ from moneta.models import (
     TransferLink,
 )
 from moneta.pipelines.events import emit_series_events
-from moneta.pipelines.recurring import advance_expected_on, detect_recurring, monthly_cents
+from moneta.pipelines.recurring import detect_recurring
 from tests.factories import make_account, make_series, make_txn
 
 

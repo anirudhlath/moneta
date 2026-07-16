@@ -1,17 +1,13 @@
 import statistics
 from datetime import date
+from typing import NamedTuple
 
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.cadence import CADENCE_DAYS as CADENCE_DAYS
-from moneta.cadence import GRACE_DAYS as GRACE_DAYS
-from moneta.cadence import TOLERANCE as TOLERANCE
-from moneta.cadence import advance_expected_on as advance_expected_on
-from moneta.cadence import match_cadence
-from moneta.cadence import monthly_cents as monthly_cents
-from moneta.llm import Classifier
+from moneta.cadence import CADENCE_DAYS, GRACE_DAYS, TOLERANCE, advance_expected_on, match_cadence
+from moneta.llm import CLASSIFICATION_TAXONOMY, Classifier
 from moneta.models import (
     Account,
     Cadence,
@@ -24,6 +20,7 @@ from moneta.models import (
     SeriesEvent,
     SeriesStatus,
     Transaction,
+    recurring_cluster_item,
     series_key,
 )
 from moneta.queries import classified_links, primary_currency
@@ -54,21 +51,26 @@ def reactivate_series(series: RecurringSeries, today: date) -> None:
     series.status = SeriesStatus.active
 
 
-_LLM_PROMPT = """Classify this group of bank transactions from one merchant.
-- "bill": a fixed obligation — subscription, rent, insurance, loan or membership payment; \
-roughly stable amount; there are consequences if unpaid.
-- "habit": recurring discretionary spending — restaurants, coffee, bars, groceries, \
-rideshare; variable amounts; a fresh choice each time.
-- "not_recurring": neither — coincidental repetition.
-Merchant: {merchant!r}; amount cents min/median/max: {lo}/{med}/{hi}
-Amounts (cents) and dates: {rows}
-Respond with JSON: {{"classification": "bill" | "habit" | "not_recurring"}}"""
+_LLM_PROMPT = (
+    "Classify this group of bank transactions from one merchant.\n"
+    f"{CLASSIFICATION_TAXONOMY}\n"
+    "Merchant: {merchant!r}; amount cents min/median/max: {lo}/{med}/{hi}\n"
+    "Amounts (cents) and dates: {rows}\n"
+    'Respond with JSON: {{"classification": "bill" | "habit" | "not_recurring"}}'
+)
 
 
 class RecurringStats(BaseModel):
     new_series: int = 0
     updated: int = 0
     review: int = 0
+
+
+class ForcedAnswer(NamedTuple):
+    """A resolved recurring_cluster ReviewItem's answer, keyed by (merchant, direction)."""
+
+    is_recurring: bool
+    discretionary: bool
 
 
 def _stale(last_seen: date, cadence: Cadence, today: date) -> bool:
@@ -113,7 +115,7 @@ async def detect_recurring(
     stats = RecurringStats()
     excluded, loan_payment_outflows = await _excluded_txn_ids(session)
     reviewed: set[tuple[str, str]] = set()
-    force: dict[tuple[str, str], tuple[bool, bool]] = {}
+    force: dict[tuple[str, str], ForcedAnswer] = {}
     for item in (
         await session.execute(
             select(ReviewItem).where(ReviewItem.kind == ReviewKind.recurring_cluster)
@@ -128,9 +130,9 @@ async def detect_recurring(
         elif isinstance(item.resolution, dict) and isinstance(
             item.resolution.get("is_recurring"), bool
         ):
-            force[key] = (
-                item.resolution["is_recurring"],
-                bool(item.resolution.get("discretionary")),
+            force[key] = ForcedAnswer(
+                is_recurring=item.resolution["is_recurring"],
+                discretionary=bool(item.resolution.get("discretionary")),
             )
     existing = {
         (s.merchant, s.direction): s
@@ -197,9 +199,10 @@ async def detect_recurring(
         stable = all(abs(a - med) <= med * _AMOUNT_TOLERANCE for a in amounts)
         expected = -round(med) if direction == Direction.outflow else round(med)
         forced = force.get((merchant, str(direction)))
-        if forced is not None and forced[0] is False:
+        if forced is not None and forced.is_recurring is False:
             continue  # user-resolved as not recurring — suppress silently, forever
-        discretionary = forced[1] if forced is not None else False
+        discretionary = forced.discretionary if forced is not None else False
+        forced_recurring = forced is not None and forced.is_recurring
 
         def _open_review(
             merchant: str = merchant,
@@ -208,27 +211,21 @@ async def detect_recurring(
             llm_flagged: bool = False,
         ) -> None:
             if (merchant, str(direction)) not in reviewed:
-                payload: dict[str, object] = {"merchant": merchant, "direction": direction}
+                item = recurring_cluster_item(merchant, direction)
                 if llm_flagged:
-                    payload["llm_flagged"] = True
-                session.add(
-                    ReviewItem(
-                        kind=ReviewKind.recurring_cluster,
-                        question=f"Is {merchant!r} a recurring bill?",
-                        payload=payload,
-                    )
-                )
+                    item.payload = {**item.payload, "llm_flagged": True}
+                session.add(item)
                 stats.review += 1
 
         if cadence is None:
-            if forced is None or forced[0] is not True:  # irregular timing needs a human
+            if not forced_recurring:  # irregular timing needs a human
                 # only ask when it plausibly IS a bill: steady amounts at bill-like intervals
                 # (a single date is never bill-like timing — nothing to measure a gap from)
                 if stable and len(dates) >= 2 and _median_gap(dates) >= _MIN_REVIEW_GAP_DAYS:
                     _open_review()
                 continue
             cadence = _closest_cadence(dates)
-        elif not stable and (forced is None or forced[0] is not True):
+        elif not stable and not forced_recurring:
             answer = (
                 await llm.classify_json(
                     _LLM_PROMPT.format(
