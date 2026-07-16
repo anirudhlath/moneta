@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.cadence import CADENCE_DAYS as CADENCE_DAYS
 from moneta.cadence import GRACE_DAYS as GRACE_DAYS
+from moneta.cadence import TOLERANCE as TOLERANCE
 from moneta.cadence import advance_expected_on as advance_expected_on
 from moneta.cadence import match_cadence, monthlyize
 from moneta.llm import Classifier
@@ -84,8 +85,15 @@ def _median_gap(dates: list[date]) -> float:
 
 
 def _closest_cadence(dates: list[date]) -> Cadence:
-    med = _median_gap(dates)
-    return min(CADENCE_DAYS, key=lambda c: abs(CADENCE_DAYS[c] - med))
+    """Forced-in groups have no clean run; the newest gap is the least-stale evidence.
+    A between-buckets median once billed a $265.72 gym at biweekly ($575/mo)."""
+    if len(dates) < 2:
+        return Cadence.monthly
+    newest_gap = (dates[-1] - dates[-2]).days
+    candidate = min(CADENCE_DAYS, key=lambda c: abs(CADENCE_DAYS[c] - newest_gap))
+    if abs(CADENCE_DAYS[candidate] - newest_gap) <= TOLERANCE[candidate]:
+        return candidate
+    return Cadence.monthly  # safest: factor 1.0 can't inflate the monthly number
 
 
 async def _excluded_txn_ids(session: AsyncSession) -> tuple[set[int], set[int]]:
@@ -210,7 +218,8 @@ async def detect_recurring(
         if cadence is None:
             if forced is None or forced[0] is not True:  # irregular timing needs a human
                 # only ask when it plausibly IS a bill: steady amounts at bill-like intervals
-                if stable and _median_gap(dates) >= _MIN_REVIEW_GAP_DAYS:
+                # (a single date is never bill-like timing — nothing to measure a gap from)
+                if stable and len(dates) >= 2 and _median_gap(dates) >= _MIN_REVIEW_GAP_DAYS:
                     _open_review()
                 continue
             cadence = _closest_cadence(dates)

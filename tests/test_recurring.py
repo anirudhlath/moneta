@@ -686,8 +686,64 @@ async def test_cadence_miss_force_accept_uses_closest_cadence(session: AsyncSess
     stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
     assert stats.new_series == 1
     s = (await _series(session))[0]
-    assert s.cadence == Cadence.monthly  # median gap 27.5 days → closest cadence
+    # newest gap 45 days is nearest monthly (30) but outside its tolerance (6) → falls
+    # back to monthly anyway, the safe default
+    assert s.cadence == Cadence.monthly
     assert s.expected_cents == -30000
+
+
+async def test_forced_cadence_prefers_newest_gap(session: AsyncSession) -> None:
+    """Lifetime Fitness: a prorated first charge left gaps [12, 30]. The all-history
+    median gap (21) sits nearest biweekly; the newest gap (30) is monthly and is the
+    least-stale evidence — picking biweekly would show $575/mo for a $265.72/mo gym."""
+    acct = await make_account(session)
+    start = date(2026, 4, 1)
+    for offset in (0, 12, 42):
+        await make_txn(
+            session,
+            acct,
+            amount_cents=-26572,
+            merchant="Lifetime Fitness",
+            posted_on=start + timedelta(days=offset),
+        )
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.new_series == 0 and stats.review == 1
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    item.status = ReviewStatus.resolved
+    item.resolution = {"is_recurring": True}
+    await session.commit()
+
+    stats2 = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats2.new_series == 1
+    s = (await _series(session))[0]
+    assert s.cadence == Cadence.monthly
+    assert s.expected_cents == -26572
+
+
+async def test_forced_single_date_monthly_no_crash(session: AsyncSession) -> None:
+    """A group whose significant txns dedup to a single posted_on date must fall back
+    to monthly without statistics.median raising on an empty gap list."""
+    acct = await make_account(session)
+    same_day = date(2026, 6, 15)
+    for _ in range(3):
+        await make_txn(
+            session, acct, amount_cents=-5000, merchant="Same Day Co", posted_on=same_day
+        )
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.recurring_cluster,
+            status=ReviewStatus.resolved,
+            question="Is 'Same Day Co' a recurring bill?",
+            payload={"merchant": "Same Day Co", "direction": Direction.outflow},
+            resolution={"is_recurring": True},
+        )
+    )
+    await session.commit()
+
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.new_series == 1
+    s = (await _series(session))[0]
+    assert s.cadence == Cadence.monthly
 
 
 async def test_cadence_miss_unstable_amounts_stays_silent(session: AsyncSession) -> None:

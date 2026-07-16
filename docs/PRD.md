@@ -134,7 +134,6 @@ Sourced from `docs/backlog/` (one file per ticket — see each for context and a
 - Transaction drill-down command (inspect what's behind a number).
 
 **Medium**
-- Forced-recurring cadence fallback needs a tolerance check (`_closest_cadence` misclassified a real monthly gym as biweekly, inflating fixed costs).
 - Power rows should show per-cycle and monthly-equivalent amounts explicitly (cadence label next to a monthlyized number is ambiguous).
 - Safe-to-spend *today* (prorated within the month).
 - Upcoming charges surfaced in `power`.
