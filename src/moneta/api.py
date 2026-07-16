@@ -3,7 +3,6 @@ import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime
-from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -48,7 +47,7 @@ class AccountOut(BaseModel):
     name: str
     org_name: str
     type: AccountType
-    balance: str
+    balance_cents: int
     promo_expires_on: date | None
 
 
@@ -63,7 +62,6 @@ class SeriesOut(BaseModel):
     direction: str
     cadence: str
     expected_cents: int
-    expected_amount: str
     next_expected_on: date
     status: str
 
@@ -107,8 +105,8 @@ class VestingIn(BaseModel):
 class CashflowReport(BaseModel):
     start: date
     end: date
-    accrual: Decimal
-    cash_out: Decimal
+    accrual_cents: int
+    cash_out_cents: int
 
 
 class SyncRunOut(BaseModel):
@@ -135,7 +133,11 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if engine is not None:
             await init_db(engine)
-        yield
+        try:
+            yield
+        finally:
+            if engine is not None:
+                await engine.dispose()
 
     async def check_auth(authorization: Annotated[str | None, Header()] = None) -> None:
         if api_token is None:
@@ -221,10 +223,12 @@ def create_app(
         return CashflowReport(
             start=range_start,
             end=range_end,
-            accrual=await accrual_spend(
+            accrual_cents=await accrual_spend(
                 session, range_start, range_end, links=links, primary=primary
             ),
-            cash_out=await cash_out(session, range_start, range_end, links=links, primary=primary),
+            cash_out_cents=await cash_out(
+                session, range_start, range_end, links=links, primary=primary
+            ),
         )
 
     @app.get("/recurring")
@@ -237,7 +241,6 @@ def create_app(
                 direction=r.direction,
                 cadence=r.cadence,
                 expected_cents=r.expected_cents,
-                expected_amount=f"{abs(r.expected_cents) / 100:.2f}",
                 next_expected_on=r.next_expected_on,
                 status=r.status,
             )
@@ -291,7 +294,7 @@ def create_app(
                 name=a.name,
                 org_name=a.org_name,
                 type=a.type,
-                balance=f"{a.balance_cents / 100:.2f}",
+                balance_cents=a.balance_cents,
                 promo_expires_on=a.promo_expires_on,
             )
             for a in rows

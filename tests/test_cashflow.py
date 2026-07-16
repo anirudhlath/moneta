@@ -1,5 +1,4 @@
 from datetime import date
-from decimal import Decimal
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -34,12 +33,12 @@ async def _cc_purchase_and_payment(session: AsyncSession) -> tuple[Account, Acco
 
 async def test_accrual_counts_cc_purchases_not_payments(session: AsyncSession) -> None:
     await _cc_purchase_and_payment(session)
-    assert await accrual_spend(session, date(2026, 7, 1), date(2026, 7, 31)) == Decimal("80")
+    assert await accrual_spend(session, date(2026, 7, 1), date(2026, 7, 31)) == 8000
 
 
 async def test_cash_out_counts_cc_payment_not_purchase(session: AsyncSession) -> None:
     await _cc_purchase_and_payment(session)
-    assert await cash_out(session, date(2026, 7, 1), date(2026, 7, 31)) == Decimal("80")
+    assert await cash_out(session, date(2026, 7, 1), date(2026, 7, 31)) == 8000
 
 
 async def test_internal_moves_count_nowhere(session: AsyncSession) -> None:
@@ -57,8 +56,8 @@ async def test_internal_moves_count_nowhere(session: AsyncSession) -> None:
     )
     session.add(TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule"))
     await session.flush()
-    assert await accrual_spend(session, date(2026, 7, 1), date(2026, 7, 31)) == Decimal("0")
-    assert await cash_out(session, date(2026, 7, 1), date(2026, 7, 31)) == Decimal("0")
+    assert await accrual_spend(session, date(2026, 7, 1), date(2026, 7, 31)) == 0
+    assert await cash_out(session, date(2026, 7, 1), date(2026, 7, 31)) == 0
 
 
 async def test_cashflow_endpoint_returns_accrual_and_cash_out(
@@ -76,8 +75,8 @@ async def test_cashflow_endpoint_returns_accrual_and_cash_out(
     body = r.json()
     assert body["start"] == "2026-07-01"
     assert body["end"] == "2026-07-31"
-    assert Decimal(body["accrual"]) == Decimal("80")  # the RESTAURANT purchase
-    assert Decimal(body["cash_out"]) == Decimal("80")  # the CC PAYMENT, not the purchase
+    assert body["accrual_cents"] == 8000  # the RESTAURANT purchase
+    assert body["cash_out_cents"] == 8000  # the CC PAYMENT, not the purchase
 
 
 async def test_loan_account_purchase_not_accrual(session: AsyncSession) -> None:
@@ -89,4 +88,4 @@ async def test_loan_account_purchase_not_accrual(session: AsyncSession) -> None:
         posted_on=date(2026, 7, 2),
         description="FURNITURE STORE FINANCED PURCHASE",
     )
-    assert await accrual_spend(session, date(2026, 7, 1), date(2026, 7, 31)) == Decimal("0")
+    assert await accrual_spend(session, date(2026, 7, 1), date(2026, 7, 31)) == 0

@@ -1,5 +1,3 @@
-from decimal import Decimal
-
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,17 +8,16 @@ from moneta.models import (
     Account,
     AccountType,
     Holding,
-    from_cents,
 )
 from moneta.queries import primary_currency
 
 
 class NetWorthReport(BaseModel):
-    liquid: Decimal
-    vested_holdings: Decimal
-    liabilities: Decimal
-    net_worth: Decimal
-    unvested_potential: Decimal
+    liquid_cents: int
+    vested_holdings_cents: int
+    liabilities_cents: int
+    net_worth_cents: int
+    unvested_potential_cents: int
     unknown_accounts: int
     foreign_accounts: int
 
@@ -56,11 +53,11 @@ async def net_worth_report(session: AsyncSession) -> NetWorthReport:
         unvested_cents += round(h.market_value_cents * unvested_frac)
 
     return NetWorthReport(
-        liquid=from_cents(liquid),
-        vested_holdings=from_cents(vested_cents),
-        liabilities=from_cents(liabilities),
-        net_worth=from_cents(liquid + vested_cents - liabilities),
-        unvested_potential=from_cents(unvested_cents),
+        liquid_cents=liquid,
+        vested_holdings_cents=vested_cents,
+        liabilities_cents=liabilities,
+        net_worth_cents=liquid + vested_cents - liabilities,
+        unvested_potential_cents=unvested_cents,
         unknown_accounts=unknown,
         foreign_accounts=len(accounts) - len(domestic),
     )

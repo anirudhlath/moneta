@@ -123,7 +123,7 @@ async def test_full_pipeline_power_and_obligations(client: httpx.AsyncClient) ->
 
     power = (await client.get("/power")).json()
     # income: 2500 biweekly -> 5416.67/mo
-    assert Decimal(power["monthly_income"]) == Decimal("5416.67")
+    assert power["monthly_income_cents"] == 541667
     fixed_merchants = {line["merchant"] for line in power["fixed_costs"]}
     # rent + netflix + synchrony are fixed; CC payment series must NOT be
     assert any("Rent" in m or "Oakwood" in m for m in fixed_merchants)
@@ -131,13 +131,13 @@ async def test_full_pipeline_power_and_obligations(client: httpx.AsyncClient) ->
     assert any("Synchrony" in m for m in fixed_merchants)
     assert not any("Autopay" in m or "Chase" in m for m in fixed_merchants)
     # discretionary spend this month so far = 62.40 only
-    assert Decimal(power["spent_so_far"]) == Decimal("62.40")
+    assert power["spent_so_far_cents"] == 6240
 
     obs = (await client.get("/obligations")).json()
     assert len(obs) == 1
     assert obs[0]["months_left"] == 9
-    assert Decimal(obs[0]["monthly_payment"]) == Decimal("135.00")
+    assert obs[0]["monthly_payment_cents"] == 13500
 
     networth = (await client.get("/networth")).json()
     # 4200 + 10000 - (350 + 1215)
-    assert Decimal(networth["net_worth"]) == Decimal("12635.00")
+    assert networth["net_worth_cents"] == 1263500

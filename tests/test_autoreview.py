@@ -21,6 +21,7 @@ from moneta.models import (
 from moneta.pipelines.recurring import detect_recurring
 from moneta.pipelines.review import (
     VerifyStats,
+    _prompt_txn,
     apply_resolution,
     autoreview_items,
     review_context,
@@ -174,6 +175,11 @@ async def test_verify_prompt_carries_amounts_and_dates(session: AsyncSession) ->
     llm = ScriptedLLM({"Netflix": {"is_recurring": True, "confident": True}})
     await verify_series(session, llm)
     assert "15.99" in llm.prompts[0] and "2026-06-15" in llm.prompts[0]
+
+
+def test_prompt_txn_converts_every_cents_key() -> None:
+    out = _prompt_txn({"posted_on": "2026-07-01", "amount_cents": -1599, "old_amount_cents": -1000})
+    assert out == {"posted_on": "2026-07-01", "amount": "15.99", "old_amount": "10.00"}
 
 
 async def test_verify_unconfident_flags_for_human(session: AsyncSession) -> None:
@@ -339,5 +345,5 @@ async def test_price_change_context_includes_recent_occurrences(session: AsyncSe
     session.add(item)
     await session.flush()
     ctx = await review_context(session, item)
-    assert ctx["old_amount"] == "15.99" and ctx["new_amount"] == "18.99"
-    assert ctx["samples"] == [{"posted_on": "2026-07-15", "amount": "18.99"}]
+    assert ctx["old_amount_cents"] == -1599 and ctx["new_amount_cents"] == -1899
+    assert ctx["samples"] == [{"posted_on": "2026-07-15", "amount_cents": -1899}]

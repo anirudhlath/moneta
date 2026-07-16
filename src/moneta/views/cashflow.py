@@ -1,5 +1,4 @@
 from datetime import date
-from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,7 +8,6 @@ from moneta.models import (
     SPEND_ACCOUNT_TYPES,
     Account,
     Transaction,
-    from_cents,
 )
 from moneta.queries import ClassifiedLink, classified_links, linked_txn_ids, primary_currency
 
@@ -20,7 +18,7 @@ async def accrual_spend(
     end: date,
     links: list[ClassifiedLink] | None = None,
     primary: str | None = None,
-) -> Decimal:
+) -> int:
     if links is None:
         links = await classified_links(session)
     excluded = linked_txn_ids(links)
@@ -44,7 +42,7 @@ async def accrual_spend(
         .all()
     )
     total = sum(-t.amount_cents for t in txns if t.id not in excluded)
-    return from_cents(total)
+    return total
 
 
 async def cash_out(
@@ -53,7 +51,7 @@ async def cash_out(
     end: date,
     links: list[ClassifiedLink] | None = None,
     primary: str | None = None,
-) -> Decimal:
+) -> int:
     if links is None:
         links = await classified_links(session)
     by_outflow = {link.outflow_id: link for link in links}
@@ -82,4 +80,4 @@ async def cash_out(
         if link is not None and link.inflow_account_type in LIQUID_ACCOUNT_TYPES:
             continue  # internal liquid->liquid move
         total += -t.amount_cents
-    return from_cents(total)
+    return total

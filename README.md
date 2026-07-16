@@ -95,8 +95,8 @@ Design decisions worth calling out:
   computed on read, never stored.
 - **Raw payloads are kept**, so pipelines can be re-run when the logic improves
   (`moneta renormalize` re-applies merchant rules to already-synced data).
-- **Money is integer cents everywhere**; `Decimal` only at the API boundary.
-  Never float.
+- **Money is integer cents everywhere**, including every API response field
+  (`*_cents`); `Decimal` only at the aggregator input boundary. Never float.
 
 ## The LLM boundary
 

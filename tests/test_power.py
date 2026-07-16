@@ -1,5 +1,4 @@
 from datetime import date
-from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,15 +43,15 @@ async def test_power_report_full_picture(session: AsyncSession) -> None:
     )
     report = await power_report(session, today=date(2026, 7, 7))
     assert report.month == "2026-07"
-    assert report.monthly_income == Decimal("5416.67")  # 2500 * 26/12, cents-rounded
-    assert report.total_fixed == Decimal("1815.99")
-    assert report.spending_power == Decimal("3600.68")
-    assert report.spent_so_far == Decimal("45")
-    assert report.remaining == Decimal("3555.68")
+    assert report.monthly_income_cents == 541667  # 2500 * 26/12, cents-rounded
+    assert report.total_fixed_cents == 181599
+    assert report.spending_power_cents == 360068
+    assert report.spent_so_far_cents == 4500
+    assert report.remaining_cents == 355568
     merchants = [line.merchant for line in report.fixed_costs]
     assert merchants == ["Landlord", "Netflix"]  # sorted by amount desc
-    income = [(line.merchant, line.cadence, line.monthly_amount) for line in report.income_sources]
-    assert income == [("Acme Payroll", Cadence.biweekly, Decimal("5416.67"))]
+    income = [(line.merchant, line.cadence, line.monthly_cents) for line in report.income_sources]
+    assert income == [("Acme Payroll", Cadence.biweekly, 541667)]
 
 
 async def test_credit_payment_series_excluded_from_fixed(session: AsyncSession) -> None:
@@ -77,7 +76,7 @@ async def test_credit_payment_series_excluded_from_fixed(session: AsyncSession) 
     session.add(TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule"))
     await session.flush()
     report = await power_report(session, today=date(2026, 7, 7))
-    assert report.total_fixed == Decimal("0")  # CC payment series filtered out
+    assert report.total_fixed_cents == 0  # CC payment series filtered out
 
 
 async def test_stale_series_never_appears_in_fixed_costs(session: AsyncSession) -> None:
@@ -89,7 +88,7 @@ async def test_stale_series_never_appears_in_fixed_costs(session: AsyncSession) 
     await detect_recurring(session, llm=None, today=date(2026, 7, 8))
     report = await power_report(session, today=date(2026, 7, 8))
     assert report.fixed_costs == []
-    assert report.total_fixed == Decimal(0)
+    assert report.total_fixed_cents == 0
 
 
 async def test_loan_payment_series_stays_in_fixed(session: AsyncSession) -> None:
@@ -110,7 +109,7 @@ async def test_loan_payment_series_stays_in_fixed(session: AsyncSession) -> None
     session.add(TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule"))
     await session.flush()
     report = await power_report(session, today=date(2026, 7, 7))
-    assert report.total_fixed == Decimal("135")
+    assert report.total_fixed_cents == 13500
 
 
 async def test_spent_ignores_foreign_currency_accounts(session: AsyncSession) -> None:
@@ -119,4 +118,4 @@ async def test_spent_ignores_foreign_currency_accounts(session: AsyncSession) ->
     await make_txn(session, usd, amount_cents=-5000, posted_on=date(2026, 7, 3))
     await make_txn(session, eur, amount_cents=-7000, posted_on=date(2026, 7, 4))
     r = await power_report(session, today=date(2026, 7, 9))
-    assert r.spent_so_far == Decimal("50.00")
+    assert r.spent_so_far_cents == 5000

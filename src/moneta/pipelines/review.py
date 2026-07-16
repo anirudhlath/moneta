@@ -59,8 +59,19 @@ Respond with JSON: {{"is_recurring": true/false, "confident": true/false}}
 Set confident=true ONLY if you are sure either way."""
 
 
-def _sample(txn: Transaction) -> dict[str, str]:
-    return {"posted_on": txn.posted_on.isoformat(), "amount": dollars(txn.amount_cents)}
+def _sample(txn: Transaction) -> dict[str, Any]:
+    return {"posted_on": txn.posted_on.isoformat(), "amount_cents": txn.amount_cents}
+
+
+def _prompt_txn(summary: dict[str, Any]) -> dict[str, Any]:
+    """Context payloads carry machine cents; prompt text gets human dollars."""
+    out: dict[str, Any] = {}
+    for key, value in summary.items():
+        if key.endswith("_cents") and isinstance(value, int):
+            out[key.removesuffix("_cents")] = dollars(value)
+        else:
+            out[key] = value
+    return out
 
 
 async def _recent_occurrences(session: AsyncSession, series_id: int) -> list[Transaction]:
@@ -144,8 +155,8 @@ async def review_context(session: AsyncSession, item: ReviewItem) -> dict[str, A
         )
         return {
             "merchant": item.payload.get("merchant"),
-            "old_amount": dollars(old) if isinstance(old, int) else None,
-            "new_amount": dollars(new) if isinstance(new, int) else None,
+            "old_amount_cents": old if isinstance(old, int) else None,
+            "new_amount_cents": new if isinstance(new, int) else None,
             "occurred_on": item.payload.get("occurred_on"),
             "samples": samples,
         }
@@ -251,13 +262,14 @@ async def autoreview_items(session: AsyncSession, llm: Classifier) -> int:
             if not context.get("candidates"):
                 continue
             prompt = _TRANSFER_PROMPT.format(
-                outflow=context.get("outflow"), candidates=context["candidates"]
+                outflow=_prompt_txn(context["outflow"]) if context.get("outflow") else None,
+                candidates=[_prompt_txn(c) for c in context["candidates"]],
             )
         elif item.kind == ReviewKind.recurring_cluster:
             prompt = _RECURRING_PROMPT.format(
                 merchant=item.payload.get("merchant"),
                 direction=context.get("direction"),
-                samples=context.get("samples"),
+                samples=[_prompt_txn(s) for s in context.get("samples", [])],
             )
         else:
             continue
@@ -317,7 +329,9 @@ async def verify_series(session: AsyncSession, llm: Classifier | None) -> Verify
                 direction=series.direction,
                 cadence=series.cadence,
                 expected=dollars(series.expected_cents),
-                samples=[_sample(t) for t in await _recent_occurrences(session, series.id)],
+                samples=[
+                    _prompt_txn(_sample(t)) for t in await _recent_occurrences(session, series.id)
+                ],
             )
         )
         item = ReviewItem(

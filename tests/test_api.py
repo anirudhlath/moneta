@@ -82,13 +82,13 @@ async def test_sync_then_views(client: httpx.AsyncClient) -> None:
 
     r = await client.get("/power")
     assert r.status_code == 200
-    assert Decimal(r.json()["total_fixed"]) == Decimal("15.99")
+    assert r.json()["total_fixed_cents"] == 1599
 
     r = await client.get("/recurring")
     assert r.json()[0]["merchant"] == "Netflix.Com"
 
     r = await client.get("/networth")
-    assert Decimal(r.json()["liquid"]) == Decimal("1000.00")
+    assert r.json()["liquid_cents"] == 100000
 
     r = await client.get("/accounts")
     assert r.json()[0]["type"] == "checking"
@@ -162,7 +162,7 @@ async def test_patch_recurring_status_ends_series(client: httpx.AsyncClient) -> 
     await client.post("/sync")
     series = (await client.get("/recurring")).json()
     series_id = series[0]["id"]
-    assert Decimal((await client.get("/power")).json()["total_fixed"]) == Decimal("15.99")
+    assert (await client.get("/power")).json()["total_fixed_cents"] == 1599
 
     r = await client.patch(f"/recurring/{series_id}", json={"status": "ended"})
     assert r.status_code == 200
@@ -170,7 +170,7 @@ async def test_patch_recurring_status_ends_series(client: httpx.AsyncClient) -> 
 
     updated = (await client.get("/recurring")).json()[0]
     assert updated["status"] == "ended"
-    assert Decimal((await client.get("/power")).json()["total_fixed"]) == Decimal("0")
+    assert (await client.get("/power")).json()["total_fixed_cents"] == 0
 
     r = await client.patch(f"/recurring/{series_id}", json={"status": "active"})
     assert r.status_code == 200
@@ -318,18 +318,18 @@ async def test_review_context_enrichment(
         items = (await client.get("/review")).json()
 
     tp = next(i for i in items if i["kind"] == "transfer_pair")
-    assert tp["context"]["outflow"]["amount"] == "500.00"
+    assert tp["context"]["outflow"]["amount_cents"] == -50000
     assert tp["context"]["outflow"]["description"] == "ACH TRANSFER"
     cands = tp["context"]["candidates"]
     assert [c["description"] for c in cands] == ["DEPOSIT A", "DEPOSIT B"]
     assert cands[0]["account"] == "My Savings"
-    assert cands[0]["amount"] == "500.00"
+    assert cands[0]["amount_cents"] == 50000
     assert cands[0]["id"] == c1.id
 
     rc = next(i for i in items if i["kind"] == "recurring_cluster")
     samples = rc["context"]["samples"]
     assert len(samples) == 3
-    assert samples[0]["amount"] == "45.00"  # newest first
+    assert samples[0]["amount_cents"] == -4500  # newest first, sign intact
     assert rc["context"]["direction"] == "outflow"
 
 
@@ -345,8 +345,8 @@ async def test_review_resolve_price_change_validates_and_applies(
     items = (await client.get("/review")).json()
     assert len(items) == 1 and items[0]["kind"] == "price_change"
     item_id = items[0]["id"]
-    assert items[0]["context"]["old_amount"] == "15.99"
-    assert items[0]["context"]["new_amount"] == "18.99"
+    assert items[0]["context"]["old_amount_cents"] == -1599
+    assert items[0]["context"]["new_amount_cents"] == -1899
 
     r = await client.post(f"/review/{item_id}/resolve", json={"resolution": {}})
     assert r.status_code == 422
@@ -482,3 +482,58 @@ async def test_reactivating_stale_series_bumps_next_expected_forward(
         ).status_code == 200
         row = next(r for r in (await c.get("/recurring")).json() if r["id"] == series_id)
     assert date.fromisoformat(row["next_expected_on"]) >= date.today()
+
+
+async def test_power_money_fields_are_ints(client: httpx.AsyncClient) -> None:
+    body = (await client.get("/power")).json()
+    for key in (
+        "monthly_income_cents",
+        "total_fixed_cents",
+        "spending_power_cents",
+        "spent_so_far_cents",
+        "remaining_cents",
+    ):
+        assert isinstance(body[key], int), key
+
+
+async def test_networth_money_fields_are_ints(client: httpx.AsyncClient) -> None:
+    body = (await client.get("/networth")).json()
+    for key in (
+        "liquid_cents",
+        "vested_holdings_cents",
+        "liabilities_cents",
+        "net_worth_cents",
+        "unvested_potential_cents",
+    ):
+        assert isinstance(body[key], int), key
+
+
+async def test_obligations_money_fields_are_ints(
+    client: httpx.AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    from moneta.models import AccountType
+
+    async with sessionmaker() as session:
+        await make_account(session, type=AccountType.loan, balance_cents=-121500)
+        await session.commit()
+
+    body = (await client.get("/obligations")).json()
+    assert body[0]["balance_owed_cents"] == 121500  # int, not "1215.00"
+    assert body[0]["monthly_payment_cents"] is None
+
+
+async def test_accounts_and_recurring_money_fields_are_ints(
+    client: httpx.AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    async with sessionmaker() as session:
+        await make_account(session, balance_cents=-121500)
+        await make_series(session, expected_cents=-1599)
+        await session.commit()
+
+    accounts = (await client.get("/accounts")).json()
+    assert accounts[0]["balance_cents"] == -121500
+    assert "balance" not in accounts[0]
+
+    series = (await client.get("/recurring")).json()
+    assert series[0]["expected_cents"] == -1599
+    assert "expected_amount" not in series[0]

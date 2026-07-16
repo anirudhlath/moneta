@@ -200,13 +200,18 @@ def test_cashflow_date_flags_pass_params(monkeypatch) -> None:  # type: ignore[n
         params: dict[str, Any] | None = None,
     ) -> Any:
         calls.append((method, path, params))
-        return {"start": "2026-01-01", "end": "2026-06-30", "accrual": "12.34", "cash_out": "5.00"}
+        return {
+            "start": "2026-01-01",
+            "end": "2026-06-30",
+            "accrual_cents": 1234,
+            "cash_out_cents": 500,
+        }
 
     monkeypatch.setattr("moneta.cli.main.request", fake_request)
     result = runner.invoke(app, ["cashflow", "--start", "2026-01-01", "--end", "2026-06-30"])
     assert result.exit_code == 0
     assert calls == [("GET", "/cashflow", {"start": "2026-01-01", "end": "2026-06-30"})]
-    assert "12.34" in result.output
+    assert "$12.34" in result.output
 
 
 def test_cashflow_invalid_date_fails_cleanly(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -229,6 +234,19 @@ def test_power_itemizes_income_sources(tmp_path: Path, monkeypatch) -> None:  # 
     result = runner.invoke(app, ["power"])
     assert result.exit_code == 0
     assert "Acme Payroll" in result.output
+
+
+def test_power_negative_money_renders_minus_before_dollar(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def _seed(session: AsyncSession) -> None:
+        await make_series(session, merchant="Rent", expected_cents=-500000)
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["power"])
+    assert result.exit_code == 0
+    assert "-$5000.00" in result.output  # fixed costs / spending power / remaining
+    assert "$-" not in result.output  # one sign format everywhere
 
 
 def test_review_non_integer_answer_skips_cleanly(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -648,3 +666,13 @@ def test_setup_simplefin_saves_access_url(tmp_path: Path, monkeypatch) -> None: 
     from moneta.config import load_settings
 
     assert load_settings().simplefin_access_url == "https://u:p@bridge.example/simplefin"
+
+
+def test_fmt_money_formats_cents() -> None:
+    from moneta.cli.main import fmt_money
+
+    assert fmt_money(0) == "$0.00"
+    assert fmt_money(1599) == "$15.99"
+    assert fmt_money(-3609) == "-$36.09"
+    assert fmt_money(-5) == "-$0.05"
+    assert fmt_money(123456789) == "$1234567.89"

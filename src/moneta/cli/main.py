@@ -29,6 +29,13 @@ def _parse_iso_date(value: str) -> str:
         raise typer.Exit(1) from None
 
 
+def fmt_money(cents: int) -> str:
+    """Integer cents -> display dollars; negatives are -$X.YY (sign before the $)."""
+    sign = "-" if cents < 0 else ""
+    whole, frac = divmod(abs(cents), 100)
+    return f"{sign}${whole}.{frac:02d}"
+
+
 @app.command()
 def sync(
     full: Annotated[
@@ -88,19 +95,21 @@ def power() -> None:
     """Monthly spending power: income - fixed costs."""
     r = request("GET", "/power")
     table = Table(title=f"Spending power — {r['month']}", show_header=False)
-    table.add_row("Income (detected)", f"${r['monthly_income']}/mo")
+    table.add_row("Income (detected)", f"{fmt_money(r['monthly_income_cents'])}/mo")
     for line in r["income_sources"]:
         table.add_row(
-            f"  {escape(line['merchant'])} ({line['cadence']})", f"${line['monthly_amount']}"
+            f"  {escape(line['merchant'])} ({line['cadence']})", fmt_money(line["monthly_cents"])
         )
-    table.add_row("Fixed costs", f"-${r['total_fixed']}/mo")
+    table.add_row("Fixed costs", f"{fmt_money(-r['total_fixed_cents'])}/mo")
     for line in r["fixed_costs"]:
         table.add_row(
-            f"  {escape(line['merchant'])} ({line['cadence']})", f"${line['monthly_amount']}"
+            f"  {escape(line['merchant'])} ({line['cadence']})", fmt_money(line["monthly_cents"])
         )
-    table.add_row("[bold]Spending power[/bold]", f"[bold]${r['spending_power']}/mo[/bold]")
-    table.add_row("Spent so far", f"-${r['spent_so_far']}")
-    table.add_row("[bold]Remaining[/bold]", f"[bold]${r['remaining']}[/bold]")
+    table.add_row(
+        "[bold]Spending power[/bold]", f"[bold]{fmt_money(r['spending_power_cents'])}/mo[/bold]"
+    )
+    table.add_row("Spent so far", fmt_money(-r["spent_so_far_cents"]))
+    table.add_row("[bold]Remaining[/bold]", f"[bold]{fmt_money(r['remaining_cents'])}[/bold]")
     console.print(table)
 
 
@@ -109,11 +118,11 @@ def networth() -> None:
     """Net worth (vested only) with unvested shown separately."""
     r = request("GET", "/networth")
     table = Table(title="Net worth", show_header=False)
-    table.add_row("Liquid", f"${r['liquid']}")
-    table.add_row("Vested holdings", f"${r['vested_holdings']}")
-    table.add_row("Liabilities", f"-${r['liabilities']}")
-    table.add_row("[bold]Net worth[/bold]", f"[bold]${r['net_worth']}[/bold]")
-    table.add_row("Unvested (potential)", f"${r['unvested_potential']}")
+    table.add_row("Liquid", fmt_money(r["liquid_cents"]))
+    table.add_row("Vested holdings", fmt_money(r["vested_holdings_cents"]))
+    table.add_row("Liabilities", fmt_money(-r["liabilities_cents"]))
+    table.add_row("[bold]Net worth[/bold]", f"[bold]{fmt_money(r['net_worth_cents'])}[/bold]")
+    table.add_row("Unvested (potential)", fmt_money(r["unvested_potential_cents"]))
     console.print(table)
     if r["unknown_accounts"]:
         console.print(
@@ -156,7 +165,7 @@ def recurring(
                 escape(s["merchant"]),
                 s["direction"],
                 s["cadence"],
-                f"${s['expected_amount']}",
+                fmt_money(abs(s["expected_cents"])),
                 s["next_expected_on"],
                 s["status"],
             )
@@ -178,8 +187,8 @@ def cashflow(
     }
     r = request("GET", "/cashflow", params=params or None)
     table = Table(title=f"Cashflow — {r['start']} to {r['end']}", show_header=False)
-    table.add_row("Accrual spend", f"${r['accrual']}")
-    table.add_row("Cash out", f"${r['cash_out']}")
+    table.add_row("Accrual spend", fmt_money(r["accrual_cents"]))
+    table.add_row("Cash out", fmt_money(r["cash_out_cents"]))
     console.print(table)
 
 
@@ -193,8 +202,8 @@ def obligations() -> None:
         warn = " [red]![/red]" if ob["deferred_interest_risk"] else ""
         table.add_row(
             escape(ob["account_name"]),
-            f"${ob['balance_owed']}",
-            f"${ob['monthly_payment']}" if ob["monthly_payment"] else "?",
+            fmt_money(ob["balance_owed_cents"]),
+            fmt_money(ob["monthly_payment_cents"]) if ob["monthly_payment_cents"] else "?",
             str(ob["months_left"] or "?"),
             f"{payoff}{warn}",
             str(ob["promo_expires_on"] or "—"),
@@ -223,7 +232,7 @@ def accounts(
             escape(a["name"]),
             escape(a["org_name"]),
             a["type"],
-            f"${a['balance']}",
+            fmt_money(a["balance_cents"]),
             str(a["promo_expires_on"] or "—"),
         )
     console.print(table)
@@ -268,30 +277,32 @@ def _review_one(item: dict[str, object]) -> dict[str, object] | None:
     assert isinstance(ctx, dict)
     if item["kind"] == "recurring_cluster":
         for s in ctx.get("samples", []):
-            console.print(f"    {s['posted_on']}  ${s['amount']}")
+            console.print(f"    {s['posted_on']}  {fmt_money(abs(s['amount_cents']))}")
         if ctx.get("direction") == "inflow":
             console.print("    [dim](these are deposits — answering y counts them as income)[/dim]")
         answer = _prompt_yes_no("Recurring? [y/n]")
         return None if answer is None else {"is_recurring": answer}
     if item["kind"] == "price_change":
         for s in ctx.get("samples", []):
-            console.print(f"    {s['posted_on']}  ${s['amount']}")
+            console.print(f"    {s['posted_on']}  {fmt_money(abs(s['amount_cents']))}")
+        old, new = ctx.get("old_amount_cents"), ctx.get("new_amount_cents")
         console.print(
-            f"    ${ctx.get('old_amount')} → ${ctx.get('new_amount')} on {ctx.get('occurred_on')}"
+            f"    {fmt_money(abs(old)) if isinstance(old, int) else '?'} → "
+            f"{fmt_money(abs(new)) if isinstance(new, int) else '?'} on {ctx.get('occurred_on')}"
         )
         answer = _prompt_yes_no("Price change? [y/n]")
         return None if answer is None else {"is_price_change": answer}
     if item["kind"] == "transfer_pair":
         if outflow := ctx.get("outflow"):
             console.print(
-                f"    out: ${outflow['amount']} on {outflow['posted_on']} "
+                f"    out: {fmt_money(abs(outflow['amount_cents']))} on {outflow['posted_on']} "
                 f"from {outflow['account']} — {outflow['description']!r}"
             )
         candidates = ctx.get("candidates") or []
         if candidates:
             for n, c in enumerate(candidates, 1):
                 console.print(
-                    f"    {n}. ${c['amount']} on {c['posted_on']} "
+                    f"    {n}. {fmt_money(abs(c['amount_cents']))} on {c['posted_on']} "
                     f"into {c['account']} — {c['description']!r}"
                 )
             answer = typer.prompt(

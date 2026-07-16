@@ -13,12 +13,8 @@ def to_cents(d: Decimal) -> int:
     return int((d * 100).to_integral_value())
 
 
-def from_cents(c: int) -> Decimal:
-    return Decimal(c) / 100
-
-
 def dollars(cents: int) -> str:
-    """Unsigned display amount; direction is conveyed separately at boundaries."""
+    """Unsigned dollars for prose only (LLM prompts, review questions) — API fields carry cents."""
     return f"{abs(cents) / 100:.2f}"
 
 
