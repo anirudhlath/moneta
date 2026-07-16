@@ -217,4 +217,8 @@ LLM — no network, no real accounts.
 
 ## License
 
-[MIT](LICENSE)
+[AGPL-3.0-or-later](LICENSE) © 2026 Anirudh Lath
+
+Briefly published under MIT during initial release prep (July 13–15, 2026); relicensed to
+AGPL-3.0-or-later on 2026-07-15. Contributions are accepted under the same license with a
+[DCO](CONTRIBUTING.md) sign-off.

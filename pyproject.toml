@@ -2,6 +2,7 @@
 name = "moneta"
 version = "0.1.0"
 description = "Personal finance: monthly spending power = income minus fixed costs"
+license = "AGPL-3.0-or-later"
 readme = "README.md"
 authors = [
     { name = "Anirudh Lath", email = "anirudhlath@gmail.com" }
