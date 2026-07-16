@@ -482,6 +482,40 @@ def test_review_recurring_three_way(monkeypatch) -> None:  # type: ignore[no-unt
     assert "Traceback" not in result.output
 
 
+def test_review_recurring_cluster_shows_llm_leaning(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A verify_series-flagged item carries payload.llm_leaning; the CLI surfaces it
+    before the b/h/n prompt so a human reviewing knows what the LLM already thought."""
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        if path == "/review":
+            return [
+                {
+                    "id": 7,
+                    "kind": "recurring_cluster",
+                    "question": "Is 'Util Co' a recurring bill?",
+                    "payload": {
+                        "merchant": "Util Co",
+                        "direction": "outflow",
+                        "llm_flagged": True,
+                        "llm_leaning": "habit",
+                    },
+                    "context": {"samples": [], "direction": "outflow"},
+                }
+            ]
+        return {"ok": True}
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["review"], input="\n")
+    assert result.exit_code == 0
+    assert "LLM leaned: habit" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_review_recurring_cluster_invalid_answer_skips_cleanly(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     _isolate(monkeypatch, tmp_path)
     _seed_recurring_cluster_review(tmp_path)

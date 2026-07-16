@@ -340,6 +340,10 @@ def _review_one(item: dict[str, object]) -> dict[str, object] | None:
             console.print(f"    {s['posted_on']}  {fmt_money(abs(s['amount_cents']))}")
         if ctx.get("direction") == "inflow":
             console.print("    [dim](these are deposits — answering b counts them as income)[/dim]")
+        payload = item.get("payload") or {}
+        assert isinstance(payload, dict)
+        if leaning := payload.get("llm_leaning"):
+            console.print(f"    [dim](LLM leaned: {leaning})[/dim]")
         answer = typer.prompt(
             "Bill, habit, or not recurring? [b/h/n]", default="", show_default=False
         )

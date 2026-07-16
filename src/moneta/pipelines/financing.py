@@ -15,6 +15,7 @@ from moneta.models import Account, AccountType, ReviewItem, ReviewKind, Transact
 _AMOUNT_TOLERANCE = 0.20  # near-equal payments: within ±20% of the credit median
 _MINOR_FRACTION = 0.25  # debits under 25% of the median credit are fees, not purchases
 _MIN_PAYMENTS = 2
+_MIN_NEAR_MEDIAN = 2  # at least this many payments must cluster near the median
 
 
 async def detect_financing(session: AsyncSession) -> int:
@@ -41,15 +42,26 @@ async def detect_financing(session: AsyncSession) -> int:
         .scalars()
         .all()
     )
-    opened = 0
-    for acct in candidates:
-        if acct.id in asked:
-            continue
-        txns = (
-            (await session.execute(select(Transaction).where(Transaction.account_id == acct.id)))
+    unasked = [acct for acct in candidates if acct.id not in asked]
+    txns_by_account: dict[int, list[Transaction]] = {}
+    if unasked:
+        rows = (
+            (
+                await session.execute(
+                    select(Transaction).where(
+                        Transaction.account_id.in_([acct.id for acct in unasked])
+                    )
+                )
+            )
             .scalars()
             .all()
         )
+        for t in rows:
+            txns_by_account.setdefault(t.account_id, []).append(t)
+
+    opened = 0
+    for acct in unasked:
+        txns = txns_by_account.get(acct.id, [])
         credits = sorted((t for t in txns if t.amount_cents > 0), key=lambda t: t.posted_on)
         if len(credits) < _MIN_PAYMENTS:
             continue
@@ -59,7 +71,7 @@ async def detect_financing(session: AsyncSession) -> int:
             for t in credits
             if abs(t.amount_cents - median_credit) <= median_credit * _AMOUNT_TOLERANCE
         )
-        if near_median < 2:
+        if near_median < _MIN_NEAR_MEDIAN:
             continue
         payments_began = credits[0].posted_on
         purchasing = any(
