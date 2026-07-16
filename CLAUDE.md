@@ -24,7 +24,7 @@ Pure-internal refactors with zero behavior change may skip this, but state that 
 
 ## Conventions that aren't obvious from the code
 
-- **Money is integer cents everywhere** (`*_cents: int`); `Decimal` only at boundaries via `to_cents`/`from_cents` (models.py). Never float for money. Share quantities on `Holding` are float — shares aren't money.
+- **Money is integer cents everywhere** (`*_cents: int`) — including every API response field; `Decimal` only at the aggregator input boundary via `to_cents` (models.py). `dollars()` renders unsigned dollars for LLM prompt text only; the CLI formats every money cell via `fmt_money` (`-$X.YY` negatives). Never float for money. Share quantities on `Holding` are float — shares aren't money.
 - **Sign convention:** negative = outflow, positive = inflow (SimpleFIN's convention, kept end-to-end).
 - **Plaid inverts both signs** (aggregator/plaid.py): Plaid amounts are positive when money leaves the account and liability balances are positive-owed; the adapter negates both so stored data follows the SimpleFIN convention. `PlaidAdapter.fetch` ignores `since` — it replays `/transactions/sync` from an empty cursor every run (≤730 days; ingest dedup absorbs the overlap), so `sync --full` is a no-op for Plaid.
 - **Enum columns load as plain `str`**, not enum instances (columns are `String`-typed). Compare with `==` (StrEnum equals its value); never `is`, never `.name` on loaded values.
