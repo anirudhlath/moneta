@@ -95,19 +95,21 @@ def power() -> None:
     """Monthly spending power: income - fixed costs."""
     r = request("GET", "/power")
     table = Table(title=f"Spending power — {r['month']}", show_header=False)
-    table.add_row("Income (detected)", f"${r['monthly_income']}/mo")
+    table.add_row("Income (detected)", f"{fmt_money(r['monthly_income_cents'])}/mo")
     for line in r["income_sources"]:
         table.add_row(
-            f"  {escape(line['merchant'])} ({line['cadence']})", f"${line['monthly_amount']}"
+            f"  {escape(line['merchant'])} ({line['cadence']})", fmt_money(line["monthly_cents"])
         )
-    table.add_row("Fixed costs", f"-${r['total_fixed']}/mo")
+    table.add_row("Fixed costs", f"{fmt_money(-r['total_fixed_cents'])}/mo")
     for line in r["fixed_costs"]:
         table.add_row(
-            f"  {escape(line['merchant'])} ({line['cadence']})", f"${line['monthly_amount']}"
+            f"  {escape(line['merchant'])} ({line['cadence']})", fmt_money(line["monthly_cents"])
         )
-    table.add_row("[bold]Spending power[/bold]", f"[bold]${r['spending_power']}/mo[/bold]")
-    table.add_row("Spent so far", f"-${r['spent_so_far']}")
-    table.add_row("[bold]Remaining[/bold]", f"[bold]${r['remaining']}[/bold]")
+    table.add_row(
+        "[bold]Spending power[/bold]", f"[bold]{fmt_money(r['spending_power_cents'])}/mo[/bold]"
+    )
+    table.add_row("Spent so far", fmt_money(-r["spent_so_far_cents"]))
+    table.add_row("[bold]Remaining[/bold]", f"[bold]{fmt_money(r['remaining_cents'])}[/bold]")
     console.print(table)
 
 

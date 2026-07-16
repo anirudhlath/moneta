@@ -82,7 +82,7 @@ async def test_sync_then_views(client: httpx.AsyncClient) -> None:
 
     r = await client.get("/power")
     assert r.status_code == 200
-    assert Decimal(r.json()["total_fixed"]) == Decimal("15.99")
+    assert r.json()["total_fixed_cents"] == 1599
 
     r = await client.get("/recurring")
     assert r.json()[0]["merchant"] == "Netflix.Com"
@@ -162,7 +162,7 @@ async def test_patch_recurring_status_ends_series(client: httpx.AsyncClient) -> 
     await client.post("/sync")
     series = (await client.get("/recurring")).json()
     series_id = series[0]["id"]
-    assert Decimal((await client.get("/power")).json()["total_fixed"]) == Decimal("15.99")
+    assert (await client.get("/power")).json()["total_fixed_cents"] == 1599
 
     r = await client.patch(f"/recurring/{series_id}", json={"status": "ended"})
     assert r.status_code == 200
@@ -170,7 +170,7 @@ async def test_patch_recurring_status_ends_series(client: httpx.AsyncClient) -> 
 
     updated = (await client.get("/recurring")).json()[0]
     assert updated["status"] == "ended"
-    assert Decimal((await client.get("/power")).json()["total_fixed"]) == Decimal("0")
+    assert (await client.get("/power")).json()["total_fixed_cents"] == 0
 
     r = await client.patch(f"/recurring/{series_id}", json={"status": "active"})
     assert r.status_code == 200
@@ -482,3 +482,15 @@ async def test_reactivating_stale_series_bumps_next_expected_forward(
         ).status_code == 200
         row = next(r for r in (await c.get("/recurring")).json() if r["id"] == series_id)
     assert date.fromisoformat(row["next_expected_on"]) >= date.today()
+
+
+async def test_power_money_fields_are_ints(client: httpx.AsyncClient) -> None:
+    body = (await client.get("/power")).json()
+    for key in (
+        "monthly_income_cents",
+        "total_fixed_cents",
+        "spending_power_cents",
+        "spent_so_far_cents",
+        "remaining_cents",
+    ):
+        assert isinstance(body[key], int), key

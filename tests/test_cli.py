@@ -231,6 +231,19 @@ def test_power_itemizes_income_sources(tmp_path: Path, monkeypatch) -> None:  # 
     assert "Acme Payroll" in result.output
 
 
+def test_power_negative_money_renders_minus_before_dollar(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def _seed(session: AsyncSession) -> None:
+        await make_series(session, merchant="Rent", expected_cents=-500000)
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["power"])
+    assert result.exit_code == 0
+    assert "-$5000.00" in result.output  # fixed costs / spending power / remaining
+    assert "$-" not in result.output  # one sign format everywhere
+
+
 def test_review_non_integer_answer_skips_cleanly(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     _isolate(monkeypatch, tmp_path)
 

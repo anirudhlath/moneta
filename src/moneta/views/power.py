@@ -1,6 +1,5 @@
 from collections.abc import Iterable
 from datetime import date
-from decimal import Decimal
 
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -15,7 +14,6 @@ from moneta.models import (
     RecurringSeries,
     SeriesStatus,
     Transaction,
-    from_cents,
 )
 from moneta.pipelines.recurring import monthly_cents
 from moneta.queries import classified_links, linked_txn_ids, primary_currency
@@ -24,31 +22,27 @@ from moneta.queries import classified_links, linked_txn_ids, primary_currency
 class SeriesLine(BaseModel):
     merchant: str
     cadence: Cadence
-    monthly_amount: Decimal
+    monthly_cents: int
 
 
 class PowerReport(BaseModel):
     month: str
-    monthly_income: Decimal
+    monthly_income_cents: int
     income_sources: list[SeriesLine]
     fixed_costs: list[SeriesLine]
-    total_fixed: Decimal
-    spending_power: Decimal
-    spent_so_far: Decimal
-    remaining: Decimal
+    total_fixed_cents: int
+    spending_power_cents: int
+    spent_so_far_cents: int
+    remaining_cents: int
 
 
-def _series_lines(series: Iterable[RecurringSeries]) -> tuple[list[SeriesLine], Decimal]:
+def _series_lines(series: Iterable[RecurringSeries]) -> tuple[list[SeriesLine], int]:
     lines = [
-        SeriesLine(
-            merchant=s.merchant,
-            cadence=s.cadence,
-            monthly_amount=from_cents(abs(monthly_cents(s))),
-        )
+        SeriesLine(merchant=s.merchant, cadence=s.cadence, monthly_cents=abs(monthly_cents(s)))
         for s in series
     ]
-    lines.sort(key=lambda line: line.monthly_amount, reverse=True)
-    return lines, sum((line.monthly_amount for line in lines), Decimal(0))
+    lines.sort(key=lambda line: line.monthly_cents, reverse=True)
+    return lines, sum(line.monthly_cents for line in lines)
 
 
 async def power_report(session: AsyncSession, today: date) -> PowerReport:
@@ -96,15 +90,14 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
     )
     spent_cents = sum(-t.amount_cents for t in month_txns if t.id not in linked_ids)
 
-    spent = from_cents(spent_cents)
     power = monthly_income - total_fixed
     return PowerReport(
         month=f"{today.year:04d}-{today.month:02d}",
-        monthly_income=monthly_income,
+        monthly_income_cents=monthly_income,
         income_sources=income,
         fixed_costs=fixed,
-        total_fixed=total_fixed,
-        spending_power=power,
-        spent_so_far=spent,
-        remaining=power - spent,
+        total_fixed_cents=total_fixed,
+        spending_power_cents=power,
+        spent_so_far_cents=spent_cents,
+        remaining_cents=power - spent_cents,
     )
