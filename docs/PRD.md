@@ -137,7 +137,7 @@ Sourced from `docs/backlog/` (one file per ticket — see each for context and a
 - Ended-series spend visibility; recurring reactivate via CLI; friendlier remote-CLI connection errors; normalize API money representation.
 
 **Low**
-- JSON output flag (scripting); notifications digest; power history over time; transaction categorization; merchant-normalization improvements; transfer-dedup edge cases; Plaid cursor-based incremental sync; Plaid Link update mode; vesting source adapter seam; SimpleFIN adapter injectable clock; test-coverage gaps.
+- JSON output flag (scripting); notifications digest; power history over time; transaction categorization; merchant-normalization improvements; transfer-dedup edge cases; Plaid cursor-based incremental sync; Plaid Link update mode; vesting source adapter seam; SimpleFIN adapter injectable clock; test-coverage gaps; consistent sign rendering in `power`.
 
 ## 9. Risks & open questions
 

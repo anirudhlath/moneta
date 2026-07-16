@@ -18,6 +18,17 @@ Python traceback to the user. Every other CLI failure mode in this codebase
 is asserted to print a clean message with `"Traceback" not in result.output`;
 this path isn't.
 
+## QA confirmation (2026-07-15)
+
+Reproduced during QA against a real server: killed `moneta serve` mid-session,
+ran `moneta power` with `MONETA_API_URL` still set → raw
+`ConnectError: All connection attempts failed` traceback, exit 1. Also
+observed on the **in-process** path: `moneta sync` with an unreachable
+`simplefin_access_url` prints the same raw traceback to the console (the
+SyncRun row and `moneta status` handle it correctly — only the console output
+is ugly). Fix should cover both: the remote client's connection failure and
+the CLI rendering of adapter connection errors from sync.
+
 ## Acceptance criteria
 - `cli/client.py::_arequest` catches `httpx.ConnectError` (and reasonably
   `httpx.TimeoutException`) around the request call, prints a rich
