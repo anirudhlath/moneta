@@ -13,9 +13,9 @@ Real occurrence (2026-07-15): 'Aplpay Tst* Uno Mas Dallas Tx' — weekly
 restaurant visits ranging **$21.76–$120.35** (5.5× spread) — became a weekly
 series (expected $38.86, the newest-run median) after the LLM resolved
 "is_recurring: true". Power showed **+$168.39/mo of fixed costs** for what is
-discretionary dining. The owner had to overrule via a hand-written
-`apply_resolution` call (no CLI path — see
-`recurring-not-a-bill-cli-overrule.md`).
+discretionary dining. At the time the only fix was a hand-written
+`apply_resolution` call; a CLI door now exists (`moneta recurring
+--not-a-bill/--habit/--re-review ID`, shipped 2026-07-16).
 
 The signal was available and ignored: the group failed the ±20% amount-
 stability check (`stable=False`), which is precisely the fingerprint of

@@ -129,14 +129,25 @@ committed vs. how much left your accounts.
 ### `moneta recurring`
 
 ```bash
-moneta recurring               # detected series: ID, merchant, direction, cadence, amount, next expected
-moneta recurring --events      # recent events: missed payments, price increases, new series
-moneta recurring --end <ID>    # cancel a series you know is over (IDs are in the table)
+moneta recurring                  # detected series: ID, merchant, direction, cadence, amount, next expected
+moneta recurring --events         # recent events: missed payments, price increases, new series
+moneta recurring --end <ID>       # cancel a series you know is over (IDs are in the table)
+moneta recurring --not-a-bill <ID> # override: not recurring — ends the series, suppressed forever
+moneta recurring --habit <ID>      # override: discretionary habit, not a bill; reactivates if ended
+moneta recurring --re-review <ID>  # reopen the series' bill/habit/not-recurring review question
 ```
 
 Series end automatically when charges stop, and revive if a genuinely new charge appears at
 the old cadence. A price increase is only applied after two agreeing charges (or an LLM/your
 confirmation) — a single weird charge never rewrites what a bill is "supposed to" cost.
+
+`--end`, `--not-a-bill`, `--habit`, and `--re-review` are mutually exclusive with each other —
+pass exactly one. Each overrule flag writes through the same `recurring_cluster` review-item
+ledger a bill/habit/not-recurring answer would (`resolved_by: "manual"`), so a wrong LLM or
+detection verdict is always human-correctable: `--not-a-bill` ends the series immediately and
+suppresses it from every future sync; `--habit` flips it to discretionary spending and
+reactivates it if it had ended; `--re-review` reopens the ledger item so it reappears in
+`moneta review` (and a fresh answer can supersede the old one).
 
 ### `moneta obligations`
 
@@ -273,6 +284,9 @@ Files in the config dir (all owner-only, dir is 0700):
 | Account has the wrong type | `moneta accounts --set-type <ID> <TYPE>` — sticks across syncs. |
 | Merchant names look wrong | Answer the merchant questions in `moneta review`; after rule improvements, `moneta renormalize` re-applies naming to all history. |
 | A subscription shows as active but is cancelled | `moneta recurring --end <ID>`. |
+| A series was wrongly confirmed as a recurring bill | `moneta recurring --not-a-bill <ID>` — ends it and suppresses it from every future sync. |
+| A recurring series is really discretionary spending | `moneta recurring --habit <ID>` — reactivates it if ended, tags it discretionary (not a fixed cost). |
+| An overrule was a mistake | `moneta recurring --re-review <ID>` reopens the question in `moneta review`. |
 | A price change looks wrong | It only applies after two agreeing charges or a confirmation; deny it in `moneta review` and the old expected amount stands. |
 | Numbers exclude an account | Foreign-currency accounts are excluded from aggregates by design and reported in `networth`. |
 | Remote CLI gets 401 | `MONETA_API_TOKEN` on the client must match the server's. |

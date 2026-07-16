@@ -16,7 +16,15 @@ from moneta.aggregator.simplefin import SimpleFINAdapter
 from moneta.api import _build_adapter, create_app
 from moneta.config import Settings
 from moneta.db import init_db, make_sessionmaker
-from moneta.models import EventKind, RecurringSeries, ReviewItem, SeriesEvent
+from moneta.models import (
+    EventKind,
+    RecurringSeries,
+    ReviewItem,
+    ReviewKind,
+    ReviewStatus,
+    SeriesEvent,
+    SeriesStatus,
+)
 from moneta.pipelines.recurring import detect_recurring
 from moneta.pipelines.run import RESYNC_OVERLAP_DAYS
 from tests.conftest import FakeAdapter, RecordingAdapter
@@ -214,6 +222,152 @@ async def test_events_with_dangling_series_still_listed(
 async def test_patch_recurring_unknown_id_is_404(client: httpx.AsyncClient) -> None:
     r = await client.patch("/recurring/999999", json={"status": "ended"})
     assert r.status_code == 404
+
+
+async def test_not_a_bill_ends_series_flips_ledger_and_suppresses(
+    client: httpx.AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    async with sessionmaker() as session:
+        acct = await make_account(session)
+        for month in (4, 5, 6):
+            await make_txn(
+                session,
+                acct,
+                amount_cents=-2000,
+                merchant="Util Co",
+                posted_on=date(2026, month, 10),
+            )
+        await session.commit()
+        await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+
+    async with sessionmaker() as session:
+        series_id = (
+            (
+                await session.execute(
+                    select(RecurringSeries).where(RecurringSeries.merchant == "Util Co")
+                )
+            )
+            .scalar_one()
+            .id
+        )
+        # simulate a prior LLM verification: a resolved-True recurring_cluster ledger item
+        session.add(
+            ReviewItem(
+                kind=ReviewKind.recurring_cluster,
+                question="Is 'Util Co' a recurring bill?",
+                payload={"merchant": "Util Co", "direction": "outflow"},
+                status=ReviewStatus.resolved,
+                resolution={"is_recurring": True, "resolved_by": "llm"},
+            )
+        )
+        await session.commit()
+
+    r = await client.post(f"/recurring/{series_id}/not-a-bill")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True}
+
+    async with sessionmaker() as session:
+        series = await session.get(RecurringSeries, series_id)
+        assert series is not None and series.status == SeriesStatus.ended
+        item = (
+            (
+                await session.execute(
+                    select(ReviewItem).where(ReviewItem.kind == ReviewKind.recurring_cluster)
+                )
+            )
+            .scalars()
+            .one()
+        )
+        assert item.status == ReviewStatus.resolved
+        assert item.resolution == {"is_recurring": False, "resolved_by": "manual"}
+
+    async with sessionmaker() as session:
+        stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.new_series == 0
+    async with sessionmaker() as session:
+        series = await session.get(RecurringSeries, series_id)
+        assert series is not None and series.status == SeriesStatus.ended
+
+
+async def test_habit_marks_discretionary_and_reactivates_if_ended(
+    client: httpx.AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    async with sessionmaker() as session:
+        series = await make_series(
+            session, status=SeriesStatus.ended, next_expected_on=date(2020, 1, 1)
+        )
+        series_id = series.id
+        await session.commit()
+
+    r = await client.post(f"/recurring/{series_id}/habit")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True}
+
+    async with sessionmaker() as session:
+        refreshed = await session.get(RecurringSeries, series_id)
+        assert refreshed is not None
+        assert refreshed.status == SeriesStatus.active
+        assert refreshed.discretionary is True
+        assert refreshed.next_expected_on > date(2020, 1, 1)
+        item = (
+            (
+                await session.execute(
+                    select(ReviewItem).where(ReviewItem.kind == ReviewKind.recurring_cluster)
+                )
+            )
+            .scalars()
+            .one()
+        )
+        assert item.status == ReviewStatus.resolved
+        assert item.resolution == {
+            "is_recurring": True,
+            "discretionary": True,
+            "resolved_by": "manual",
+        }
+
+
+async def test_re_review_reopens_item(
+    client: httpx.AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    async with sessionmaker() as session:
+        series = await make_series(session)
+        series_id = series.id
+        session.add(
+            ReviewItem(
+                kind=ReviewKind.recurring_cluster,
+                question=f"Is {series.merchant!r} a recurring bill?",
+                payload={"merchant": series.merchant, "direction": series.direction},
+                status=ReviewStatus.resolved,
+                resolution={"is_recurring": True, "resolved_by": "llm"},
+            )
+        )
+        await session.commit()
+
+    r = await client.post(f"/recurring/{series_id}/re-review")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True}
+
+    async with sessionmaker() as session:
+        item = (
+            (
+                await session.execute(
+                    select(ReviewItem).where(ReviewItem.kind == ReviewKind.recurring_cluster)
+                )
+            )
+            .scalars()
+            .one()
+        )
+        assert item.status == ReviewStatus.open
+        assert item.resolution is None
+
+    open_items = (await client.get("/review")).json()
+    assert any(i["kind"] == "recurring_cluster" for i in open_items)
+
+
+async def test_overrule_unknown_series_404(client: httpx.AsyncClient) -> None:
+    for path in ("not-a-bill", "habit", "re-review"):
+        r = await client.post(f"/recurring/999999/{path}")
+        assert r.status_code == 404
 
 
 async def test_import_vesting_endpoint(client: httpx.AsyncClient) -> None:

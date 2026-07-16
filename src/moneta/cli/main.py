@@ -139,12 +139,53 @@ def networth() -> None:
 @app.command()
 def recurring(
     events: Annotated[bool, typer.Option("--events")] = False,
-    end: Annotated[int | None, typer.Option("--end")] = None,
+    end: Annotated[int | None, typer.Option("--end", help="Cancel a series.")] = None,
+    not_a_bill: Annotated[
+        int | None,
+        typer.Option(
+            "--not-a-bill", help="Not recurring: ends the series and suppresses it forever."
+        ),
+    ] = None,
+    habit: Annotated[
+        int | None,
+        typer.Option(
+            "--habit", help="Discretionary habit, not a bill; reactivates the series if ended."
+        ),
+    ] = None,
+    re_review: Annotated[
+        int | None,
+        typer.Option("--re-review", help="Reopen the series' bill/habit review question."),
+    ] = None,
 ) -> None:
-    """List detected recurring series (or recent events with --events); --end ID to cancel one."""
+    """List detected recurring series (or recent events with --events).
+
+    --end ID cancels a series. --not-a-bill / --habit / --re-review ID overrule
+    detection instead; all four are mutually exclusive with each other.
+    """
+    overrules = [v for v in (end, not_a_bill, habit, re_review) if v is not None]
+    if len(overrules) > 1:
+        console.print(
+            "[red]Error:[/red] --end, --not-a-bill, --habit, and --re-review "
+            "are mutually exclusive."
+        )
+        raise typer.Exit(1)
     if end is not None:
         request("PATCH", f"/recurring/{end}", {"status": "ended"})
         console.print(f"[green]Series {end} ended.[/green]")
+    if not_a_bill is not None:
+        request("POST", f"/recurring/{not_a_bill}/not-a-bill")
+        console.print(
+            f"[green]Series {not_a_bill} marked not-a-bill — "
+            "suppressed from future detection.[/green]"
+        )
+    if habit is not None:
+        request("POST", f"/recurring/{habit}/habit")
+        console.print(
+            f"[green]Series {habit} marked habit — discretionary, not a fixed cost.[/green]"
+        )
+    if re_review is not None:
+        request("POST", f"/recurring/{re_review}/re-review")
+        console.print(f"[green]Series {re_review} reopened for review.[/green]")
     if events:
         rows = request("GET", "/recurring/events")
         table = Table("When", "ID", "Merchant", "Event", "Details")

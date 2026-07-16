@@ -264,6 +264,65 @@ def create_app(
         await session.commit()
         return {"ok": True}
 
+    async def _series_ledger_item(
+        session: AsyncSession, series_id: int
+    ) -> tuple[RecurringSeries, ReviewItem]:
+        series = (
+            await session.execute(select(RecurringSeries).where(RecurringSeries.id == series_id))
+        ).scalar_one_or_none()
+        if series is None:
+            raise HTTPException(status_code=404, detail="series not found")
+        item = (
+            (
+                await session.execute(
+                    select(ReviewItem).where(
+                        ReviewItem.kind == ReviewKind.recurring_cluster,
+                        ReviewItem.payload["merchant"].as_string() == series.merchant,
+                        ReviewItem.payload["direction"].as_string() == series.direction,
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if item is None:
+            item = ReviewItem(
+                kind=ReviewKind.recurring_cluster,
+                question=f"Is {series.merchant!r} a recurring bill?",
+                payload={"merchant": series.merchant, "direction": series.direction},
+            )
+            session.add(item)
+            await session.flush()
+        return series, item
+
+    @app.post("/recurring/{series_id}/not-a-bill")
+    async def not_a_bill(series_id: int, session: Session) -> dict[str, bool]:
+        _series, item = await _series_ledger_item(session, series_id)
+        item.status = ReviewStatus.open  # reopen a resolved item so apply_resolution re-runs
+        await apply_resolution(session, item, {"is_recurring": False}, resolved_by="manual")
+        await session.commit()
+        return {"ok": True}
+
+    @app.post("/recurring/{series_id}/habit")
+    async def mark_habit(series_id: int, session: Session) -> dict[str, bool]:
+        series, item = await _series_ledger_item(session, series_id)
+        item.status = ReviewStatus.open
+        await apply_resolution(
+            session, item, {"is_recurring": True, "discretionary": True}, resolved_by="manual"
+        )
+        if series.status != SeriesStatus.active:
+            reactivate_series(series, today=date.today())
+        await session.commit()
+        return {"ok": True}
+
+    @app.post("/recurring/{series_id}/re-review")
+    async def re_review(series_id: int, session: Session) -> dict[str, bool]:
+        _series, item = await _series_ledger_item(session, series_id)
+        item.status = ReviewStatus.open
+        item.resolution = None
+        await session.commit()
+        return {"ok": True}
+
     @app.get("/recurring/events")
     async def events(session: Session) -> list[EventOut]:
         rows = (

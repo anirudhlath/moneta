@@ -138,6 +138,81 @@ def test_recurring_end_option_ends_series(tmp_path: Path, monkeypatch) -> None: 
     assert "ended" in result.output
 
 
+def test_recurring_not_a_bill_flag_posts(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[tuple[str, str, Any, Any]] = []
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        calls.append((method, path, json_body, params))
+        if method == "GET":
+            return []
+        return {"ok": True}
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["recurring", "--not-a-bill", "4"])
+    assert result.exit_code == 0
+    assert ("POST", "/recurring/4/not-a-bill", None, None) in calls
+    assert "not-a-bill" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_recurring_habit_and_re_review_flags_post(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[tuple[str, str, Any, Any]] = []
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        calls.append((method, path, json_body, params))
+        if method == "GET":
+            return []
+        return {"ok": True}
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+
+    result = runner.invoke(app, ["recurring", "--habit", "7"])
+    assert result.exit_code == 0
+    assert ("POST", "/recurring/7/habit", None, None) in calls
+    assert "habit" in result.output
+
+    calls.clear()
+    result = runner.invoke(app, ["recurring", "--re-review", "9"])
+    assert result.exit_code == 0
+    assert ("POST", "/recurring/9/re-review", None, None) in calls
+    assert "reopened" in result.output
+
+
+def test_recurring_overrule_flags_mutually_exclusive(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[tuple[str, str]] = []
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        calls.append((method, path))
+        return {"ok": True}
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["recurring", "--not-a-bill", "4", "--habit", "5"])
+    assert result.exit_code == 1
+    assert "mutually exclusive" in result.output
+    assert "Traceback" not in result.output
+    assert calls == []
+
+    result = runner.invoke(app, ["recurring", "--end", "4", "--re-review", "5"])
+    assert result.exit_code == 1
+    assert "mutually exclusive" in result.output
+    assert calls == []
+
+
 def test_recurring_table_shows_id_and_direction(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     _isolate(monkeypatch, tmp_path)
 

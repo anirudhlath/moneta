@@ -66,7 +66,7 @@ A FastAPI server owns **all** logic; the typer CLI is a thin HTTP client that ru
 | **Merchant normalization** | Deterministic rules first; unrecognized descriptors go to the LLM or the review queue. `moneta renormalize` re-applies improved rules to already-synced data (raw payloads are kept for exactly this). |
 | **Transfer dedup** | Candidate pairs scored on amount, date proximity, account direction. High-confidence pairs auto-link; ambiguous ones escalate to LLM/review. The inflow leg is always excluded from analysis; the outflow leg too, unless it pays a loan account (loan payments are fixed costs). |
 | **Recurring detection** | Cadence (weekly/biweekly/monthly/annual) + amount-stability analysis over normalized merchants, for outflows (bills) *and* inflows (paychecks). Stats are judged on the newest run of occurrences so deep-history gaps don't poison detection. Only primary-currency transactions are grouped. |
-| **Series lifecycle** | Stale series (newest occurrence >3 cadence periods old) auto-end and drop out of events and the power view; a genuinely new charge at cadence revives them; backfilled history never does. Manual end via `moneta recurring --end ID`; manual reactivation bumps the next-expected date forward. |
+| **Series lifecycle** | Stale series (newest occurrence >3 cadence periods old) auto-end and drop out of events and the power view; a genuinely new charge at cadence revives them; backfilled history never does. Manual end via `moneta recurring --end ID`; manual reactivation bumps the next-expected date forward. `--not-a-bill`/`--habit`/`--re-review ID` let a human overrule or reopen a bill/habit/not-recurring verdict through the same `recurring_cluster` ledger and `apply_resolution` path an LLM or `moneta review` answer takes (`resolved_by: "manual"`); `--not-a-bill` ends the series and suppresses it from every future sync, `--habit` reactivates an ended series as discretionary. |
 | **Series events** | `missed` (one per empty grace window, catching up every missed period in one sync) and `price_increase`. A price change needs the two newest occurrences to agree (>5% drift from expected, within 5% of each other) — one outlier never rewrites the expected amount. |
 | **LLM auto-review** | Confident LLM answers resolve open review items during sync (before detection, so answers shape the same run). Unconfident/malformed answers fall through to the human queue. |
 | **LLM series verification** | Second opinion on deterministic detections: each active series is reviewed once; confident-yes is recorded (and feeds detection's force map), anything else opens a human-only review item. The LLM never suppresses a deterministic detection — it's a ledger, not a veto. |
@@ -120,6 +120,7 @@ Rich tables with stable IDs everywhere a follow-up action exists (`recurring --e
 | 2026-07-15 | **Plaid integration** | Plaid adapter (hosted link, full replay, sign normalization, type hints, per-item degradation), `MergedAdapter`, setup/link/list/unlink CLI. |
 | 2026-07-15 | **Review hardening** | Alembic migrations, WAL, bearer-token auth, `moneta status` + sync audit rows, `moneta backup`, rotating logs, local-timezone dates, single-currency views, upstream-correction handling, price-change outlier protection, 0600/0700 file hygiene. |
 | 2026-07-16 | **API money convention** | Every response money field is integer cents (`*_cents`); no Decimal-as-string or pre-formatted display strings. The CLI owns all formatting (`fmt_money`, one sign format everywhere); `dollars()` is prose-only (LLM prompts, review-question text). |
+| 2026-07-16 | **Recurring overrule CLI** | `moneta recurring --not-a-bill/--habit/--re-review ID` (mutually exclusive with each other and `--end`) — `POST /recurring/{id}/{not-a-bill,habit,re-review}` find-or-create the series' `recurring_cluster` ledger item and apply a manual resolution through the existing `apply_resolution` path, so a wrongly-confirmed bill or habit is always human-correctable. |
 
 ## 8. Roadmap
 
@@ -139,7 +140,6 @@ Sourced from `docs/backlog/` (one file per ticket — see each for context and a
 - Upcoming charges surfaced in `power`.
 - Sync progress feedback; sync-staleness warning in `status`; per-item sync warnings surfaced to the user.
 - Per-source sync window (Plaid's daily replay currently pins the global window near today).
-- CLI overrule for a wrongly-confirmed recurring series (`--not-a-bill`).
 - Ended-series spend visibility; recurring reactivate via CLI; friendlier remote-CLI connection errors.
 
 **Low**
