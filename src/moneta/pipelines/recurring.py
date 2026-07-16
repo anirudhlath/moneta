@@ -1,11 +1,14 @@
 import statistics
-from calendar import monthrange
-from datetime import date, timedelta
+from datetime import date
 
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from moneta.cadence import CADENCE_DAYS as CADENCE_DAYS
+from moneta.cadence import GRACE_DAYS as GRACE_DAYS
+from moneta.cadence import advance_expected_on as advance_expected_on
+from moneta.cadence import match_cadence, monthlyize
 from moneta.llm import Classifier
 from moneta.models import (
     Account,
@@ -24,25 +27,6 @@ from moneta.models import (
 )
 from moneta.queries import classified_links, primary_currency
 
-CADENCE_DAYS: dict[Cadence, int] = {
-    Cadence.weekly: 7,
-    Cadence.biweekly: 14,
-    Cadence.monthly: 30,
-    Cadence.annual: 365,
-}
-_TOLERANCE: dict[Cadence, int] = {
-    Cadence.weekly: 2,
-    Cadence.biweekly: 3,
-    Cadence.monthly: 6,
-    Cadence.annual: 20,
-}
-# days around next_expected_on within which a charge counts as "on time"
-GRACE_DAYS: dict[Cadence, int] = {
-    Cadence.weekly: 3,
-    Cadence.biweekly: 4,
-    Cadence.monthly: 7,
-    Cadence.annual: 30,
-}
 _MIN_OCCURRENCES = 3
 _AMOUNT_TOLERANCE = 0.20
 _STALE_PERIODS = 3
@@ -51,31 +35,6 @@ _MINOR_FRACTION = 0.25
 # cadence-miss groups only warrant a review question when timing is bill-like,
 # not habitual spending (coffee, rideshare) with sub-weekly bursts
 _MIN_REVIEW_GAP_DAYS = 10
-_PER_MONTH: dict[Cadence, float] = {
-    Cadence.weekly: 52 / 12,
-    Cadence.biweekly: 26 / 12,
-    Cadence.monthly: 1.0,
-    Cadence.annual: 1 / 12,
-}
-
-
-def _add_months(d: date, months: int) -> date:
-    total = d.month - 1 + months
-    year, month = d.year + total // 12, total % 12 + 1
-    return date(year, month, min(d.day, monthrange(year, month)[1]))
-
-
-def advance_expected_on(d: date, cadence: Cadence) -> date:
-    """One period after d — calendar-aware for monthly/annual so day-of-month holds."""
-    match cadence:
-        case Cadence.weekly:
-            return d + timedelta(days=7)
-        case Cadence.biweekly:
-            return d + timedelta(days=14)
-        case Cadence.monthly:
-            return _add_months(d, 1)
-        case Cadence.annual:
-            return _add_months(d, 12)
 
 
 def missed_event(series_id: int, window: date) -> SeriesEvent:
@@ -106,32 +65,12 @@ class RecurringStats(BaseModel):
 
 
 def monthly_cents(series: RecurringSeries) -> int:
-    return round(series.expected_cents * _PER_MONTH[series.cadence])
+    return monthlyize(series.expected_cents, series.cadence)
 
 
 def _stale(last_seen: date, cadence: Cadence, today: date) -> bool:
     """A series is stale once its newest occurrence is over 3 cadence periods old."""
     return (today - last_seen).days > _STALE_PERIODS * CADENCE_DAYS[cadence]
-
-
-def _match_cadence(dates: list[date]) -> tuple[Cadence, date] | None:
-    """Best cadence and the start date of the newest run matching it.
-
-    Deep history contains breaks (pauses, resubscriptions, card reissues); judging
-    cadence on the maximal recent run keeps ancient gaps from poisoning a
-    currently-clean series.
-    """
-    gaps = [(b - a).days for a, b in zip(dates, dates[1:], strict=False)]
-    for cadence, days in CADENCE_DAYS.items():
-        tol = _TOLERANCE[cadence]
-        start = len(dates) - 1
-        while start > 0 and abs(gaps[start - 1] - days) <= tol * 2:
-            start -= 1
-        if len(dates) - start < _MIN_OCCURRENCES:
-            continue
-        if abs(statistics.median(gaps[start:]) - days) <= tol:
-            return cadence, dates[start]
-    return None
 
 
 def _median_gap(dates: list[date]) -> float:
@@ -219,7 +158,7 @@ async def detect_recurring(
         if len(significant) < _MIN_OCCURRENCES:
             continue
         dates = sorted({t.posted_on for t in significant})  # dedup: double-posts aren't 0-day gaps
-        match = _match_cadence(dates)
+        match = match_cadence(dates)
         if match is None:
             cadence, run = None, significant
         else:
