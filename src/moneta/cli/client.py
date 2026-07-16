@@ -5,6 +5,7 @@ from typing import Any
 
 import httpx
 import typer
+from fastapi import FastAPI
 from rich.console import Console
 
 from moneta.config import load_settings
@@ -19,6 +20,7 @@ async def _arequest(
     params: dict[str, Any] | None,
 ) -> Any:
     settings = load_settings()
+    app: FastAPI | None = None
     if settings.api_url:
         transport: httpx.AsyncBaseTransport | None = None
         base_url = settings.api_url
@@ -30,11 +32,18 @@ async def _arequest(
         engine, _ = make_sessionmaker(f"sqlite+aiosqlite:///{settings.db_path}")
         await init_db(engine)
         await engine.dispose()
-        transport = httpx.ASGITransport(app=build_app())
+        app = build_app()
+        transport = httpx.ASGITransport(app=app)
         base_url = "http://moneta.local"
     headers = {"Authorization": f"Bearer {settings.api_token}"} if settings.api_token else None
-    async with httpx.AsyncClient(transport=transport, base_url=base_url, timeout=120) as client:
-        resp = await client.request(method, path, params=params, json=json_body, headers=headers)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url=base_url, timeout=120) as client:
+            resp = await client.request(
+                method, path, params=params, json=json_body, headers=headers
+            )
+    finally:
+        if app is not None:
+            await app.state.engine.dispose()
     if resp.status_code >= 400:
         try:  # proxies and unhandled 500s return plaintext/HTML, not FastAPI's JSON
             body = resp.json()

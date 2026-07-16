@@ -156,6 +156,7 @@ def create_app(
         redoc_url="/redoc" if public else None,
         openapi_url="/openapi.json" if public else None,
     )
+    app.state.engine = engine
 
     async def get_session() -> AsyncIterator[AsyncSession]:
         async with sessionmaker() as session:
