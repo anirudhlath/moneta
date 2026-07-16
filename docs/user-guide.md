@@ -168,8 +168,9 @@ by the linked account keeps each obligation's amount and cadence correct.
 Some store credit cards (e.g. Synchrony-issued cards) are used purely as 0%-promo
 financing vehicles rather than for everyday spending. Moneta detects this from behavior,
 not the card issuer: a `credit`-typed account whose transaction history is (almost)
-nothing but periodic, near-equal payment credits against a positive owed balance — no
-real purchase activity — looks like financing in use. The first time this fingerprint
+nothing but repeated, near-equal payment credits against a positive owed balance — no
+real purchase activity since the payments began (an initial financed purchase before the
+first payment is fine) — looks like financing in use. The first time this fingerprint
 fires for an account, `moneta review` asks a one-time financing-check question (`y`/`n`);
 the answer is remembered and never asked again for that account. Answering `y` sets
 `financing_mode`, which gives the account loan semantics: its payments count as fixed
