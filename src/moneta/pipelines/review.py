@@ -65,8 +65,12 @@ def _sample(txn: Transaction) -> dict[str, Any]:
 
 def _prompt_txn(summary: dict[str, Any]) -> dict[str, Any]:
     """Context payloads carry machine cents; prompt text gets human dollars."""
-    out = {k: v for k, v in summary.items() if k != "amount_cents"}
-    out["amount"] = dollars(summary["amount_cents"])
+    out: dict[str, Any] = {}
+    for key, value in summary.items():
+        if key.endswith("_cents") and isinstance(value, int):
+            out[key.removesuffix("_cents")] = dollars(value)
+        else:
+            out[key] = value
     return out
 
 
