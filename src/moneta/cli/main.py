@@ -29,6 +29,13 @@ def _parse_iso_date(value: str) -> str:
         raise typer.Exit(1) from None
 
 
+def fmt_money(cents: int) -> str:
+    """Integer cents -> display dollars; negatives are -$X.YY (sign before the $)."""
+    sign = "-" if cents < 0 else ""
+    whole, frac = divmod(abs(cents), 100)
+    return f"{sign}${whole}.{frac:02d}"
+
+
 @app.command()
 def sync(
     full: Annotated[

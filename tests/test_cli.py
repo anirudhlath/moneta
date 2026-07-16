@@ -648,3 +648,13 @@ def test_setup_simplefin_saves_access_url(tmp_path: Path, monkeypatch) -> None: 
     from moneta.config import load_settings
 
     assert load_settings().simplefin_access_url == "https://u:p@bridge.example/simplefin"
+
+
+def test_fmt_money_formats_cents() -> None:
+    from moneta.cli.main import fmt_money
+
+    assert fmt_money(0) == "$0.00"
+    assert fmt_money(1599) == "$15.99"
+    assert fmt_money(-3609) == "-$36.09"
+    assert fmt_money(-5) == "-$0.05"
+    assert fmt_money(123456789) == "$1234567.89"
