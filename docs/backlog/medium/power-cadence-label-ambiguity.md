@@ -10,8 +10,8 @@ account every two weeks or per month.
 ## Context
 Real confusion (2026-07-15): the owner asked whether Lifetime Fitness's
 $575.73 was "the total or per cycle" — precisely this ambiguity (compounded
-by a cadence misdetection, tracked separately in
-`closest-cadence-needs-tolerance.md`). Monthly series are unambiguous
+by a cadence misdetection, tracked separately — since resolved). Monthly
+series are unambiguous
 (factor 1.0); weekly/biweekly/annual rows all display a number that matches
 neither the bank statement nor the label next to it.
 

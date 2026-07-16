@@ -31,7 +31,9 @@
 - A genuinely new charge on an ended series reactivates it on the next sync.
 
 ## Notes
-- Weekly-cadence series auto-end after only 21 days stale — if a weekly series
-  ended mid-month, its already-tagged charges vanish from that month's
-  spent-so-far (known hole, ticketed in
-  `docs/backlog/medium/ended-series-spend-visibility.md`).
+- Weekly-cadence series auto-end after only 21 days stale. A same-month charge
+  tagged to a series that then auto-ends used to vanish from that month's
+  `spent_so_far` entirely — since resolved (ended/discretionary-series
+  transactions now count toward `spent_so_far` in `power`); confirm step 4
+  reflects this (a recently-ended series' current-month charges still show up
+  as spend, not as a fixed cost and not as nothing).
