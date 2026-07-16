@@ -67,6 +67,7 @@ class SeriesPatch(BaseModel):
 class EventOut(BaseModel):
     id: int
     series_id: int
+    merchant: str
     kind: str
     occurred_on: date
     details: dict[str, Any]
@@ -184,11 +185,24 @@ def create_app(
     @app.get("/recurring/events")
     async def events(session: Session) -> list[EventOut]:
         rows = (
-            (await session.execute(select(SeriesEvent).order_by(SeriesEvent.occurred_on.desc())))
-            .scalars()
-            .all()
-        )
-        return [EventOut.model_validate(r, from_attributes=True) for r in rows]
+            await session.execute(
+                select(SeriesEvent, RecurringSeries.merchant)
+                .outerjoin(RecurringSeries, SeriesEvent.series_id == RecurringSeries.id)
+                .order_by(SeriesEvent.occurred_on.desc())
+            )
+        ).all()
+        return [
+            EventOut(
+                id=e.id,
+                series_id=e.series_id,
+                # outer join: an orphaned event (SQLite doesn't enforce FKs) must still surface
+                merchant=merchant or f"series {e.series_id}",
+                kind=e.kind,
+                occurred_on=e.occurred_on,
+                details=e.details,
+            )
+            for e, merchant in rows
+        ]
 
     @app.get("/accounts")
     async def accounts(session: Session) -> list[AccountOut]:

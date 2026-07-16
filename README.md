@@ -153,6 +153,7 @@ Unset = no LLM; ambiguous items go to `moneta review` instead.
 | `moneta sync [--full]` | Pull latest data and run all pipelines |
 | `moneta power` | Income, fixed costs, spending power, spent so far, remaining |
 | `moneta networth` | Net worth (vested only); unvested listed as potential |
+| `moneta cashflow [--start D --end D]` | Accrual spend vs cash out for a range (default: this month) |
 | `moneta recurring [--events] [--end ID]` | Series; missed payments and price increases; cancel a series |
 | `moneta obligations` | Loans/financing: payment, months left, deferred-interest warnings |
 | `moneta review` | Resolve ambiguous classifications interactively |

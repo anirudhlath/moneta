@@ -51,6 +51,8 @@ async def test_power_report_full_picture(session: AsyncSession) -> None:
     assert report.remaining == Decimal("3555.68")
     merchants = [line.merchant for line in report.fixed_costs]
     assert merchants == ["Landlord", "Netflix"]  # sorted by amount desc
+    income = [(line.merchant, line.cadence, line.monthly_amount) for line in report.income_sources]
+    assert income == [("Acme Payroll", Cadence.biweekly, Decimal("5416.67"))]
 
 
 async def test_credit_payment_series_excluded_from_fixed(session: AsyncSession) -> None:
