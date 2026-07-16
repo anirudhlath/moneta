@@ -116,6 +116,23 @@ async def test_patch_account(client: httpx.AsyncClient) -> None:
     assert updated["promo_expires_on"] == "2026-12-31"
 
 
+async def test_patch_financing_mode(client: httpx.AsyncClient) -> None:
+    await client.post("/sync")
+    accounts = (await client.get("/accounts")).json()
+    acct_id = accounts[0]["id"]
+    assert accounts[0]["financing_mode"] is False
+
+    r = await client.patch(f"/accounts/{acct_id}", json={"financing_mode": True})
+    assert r.status_code == 200
+    updated = (await client.get("/accounts")).json()[0]
+    assert updated["financing_mode"] is True
+
+    r = await client.patch(f"/accounts/{acct_id}", json={"financing_mode": False})
+    assert r.status_code == 200
+    updated = (await client.get("/accounts")).json()[0]
+    assert updated["financing_mode"] is False
+
+
 async def test_sync_full_param_forces_epoch_pull(
     sessionmaker: async_sessionmaker[AsyncSession], session: AsyncSession
 ) -> None:

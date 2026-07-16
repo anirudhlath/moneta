@@ -49,11 +49,13 @@ class AccountOut(BaseModel):
     type: AccountType
     balance_cents: int
     promo_expires_on: date | None
+    financing_mode: bool
 
 
 class AccountPatch(BaseModel):
     type: AccountType | None = None
     promo_expires_on: date | None = None
+    financing_mode: bool | None = None
 
 
 class SeriesOut(BaseModel):
@@ -356,6 +358,7 @@ def create_app(
                 type=a.type,
                 balance_cents=a.balance_cents,
                 promo_expires_on=a.promo_expires_on,
+                financing_mode=a.financing_mode,
             )
             for a in rows
         ]
@@ -373,6 +376,8 @@ def create_app(
             acct.type = body.type
         if "promo_expires_on" in body.model_fields_set:
             acct.promo_expires_on = body.promo_expires_on
+        if "financing_mode" in body.model_fields_set and body.financing_mode is not None:
+            acct.financing_mode = body.financing_mode
         await session.commit()
         return {"ok": True}
 

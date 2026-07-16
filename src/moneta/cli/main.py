@@ -254,25 +254,40 @@ def obligations() -> None:
         console.print("[red]! payoff lands after the promo expires — deferred interest risk[/red]")
 
 
+def _parse_bool_flag(value: str) -> bool:
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    console.print(f"[red]Error:[/red] invalid value {value!r} (expected true|false)")
+    raise typer.Exit(1)
+
+
 @app.command()
 def accounts(
     set_type: Annotated[tuple[int, str] | None, typer.Option("--set-type")] = None,
     set_promo: Annotated[tuple[int, str] | None, typer.Option("--set-promo")] = None,
+    set_financing: Annotated[tuple[int, str] | None, typer.Option("--set-financing")] = None,
 ) -> None:
-    """List accounts; --set-type ID TYPE, --set-promo ID YYYY-MM-DD."""
+    """List accounts. Flags: --set-type ID TYPE, --set-promo ID YYYY-MM-DD,
+    --set-financing ID true|false."""
     if set_type:
         request("PATCH", f"/accounts/{set_type[0]}", {"type": set_type[1]})
     if set_promo:
         promo = _parse_iso_date(set_promo[1])
         request("PATCH", f"/accounts/{set_promo[0]}", {"promo_expires_on": promo})
+    if set_financing:
+        financing_mode = _parse_bool_flag(set_financing[1])
+        request("PATCH", f"/accounts/{set_financing[0]}", {"financing_mode": financing_mode})
     rows = request("GET", "/accounts")
     table = Table("ID", "Name", "Org", "Type", "Balance", "Promo ends")
     for a in rows:
+        type_cell = f"{a['type']} (financing)" if a.get("financing_mode") else a["type"]
         table.add_row(
             str(a["id"]),
             escape(a["name"]),
             escape(a["org_name"]),
-            a["type"],
+            type_cell,
             fmt_money(a["balance_cents"]),
             str(a["promo_expires_on"] or "—"),
         )

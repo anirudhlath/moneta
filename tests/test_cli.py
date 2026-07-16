@@ -122,6 +122,88 @@ def test_set_promo_invalid_date_fails_cleanly(tmp_path: Path, monkeypatch) -> No
     assert "Traceback" not in result.output
 
 
+def test_accounts_set_financing_flag(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[tuple[str, str, Any]] = []
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        calls.append((method, path, json_body))
+        if method == "GET":
+            return []
+        return {"ok": True}
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["accounts", "--set-financing", "3", "true"])
+    assert result.exit_code == 0
+    assert ("PATCH", "/accounts/3", {"financing_mode": True}) in calls
+    assert "Traceback" not in result.output
+
+
+def test_accounts_set_financing_flag_false(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[tuple[str, str, Any]] = []
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        calls.append((method, path, json_body))
+        if method == "GET":
+            return []
+        return {"ok": True}
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["accounts", "--set-financing", "3", "false"])
+    assert result.exit_code == 0
+    assert ("PATCH", "/accounts/3", {"financing_mode": False}) in calls
+
+
+def test_accounts_set_financing_invalid_value_fails_cleanly(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        raise AssertionError("request must not be called on invalid input")
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["accounts", "--set-financing", "3", "maybe"])
+    assert result.exit_code == 1
+    assert "Error" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_accounts_shows_financing_marker(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        return [
+            {
+                "id": 1,
+                "name": "Big Bank Card",
+                "org_name": "Big Bank",
+                "type": "credit",
+                "balance_cents": -50000,
+                "promo_expires_on": None,
+                "financing_mode": True,
+            }
+        ]
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["accounts"])
+    assert result.exit_code == 0
+    assert "credit (financing)" in result.output
+
+
 def test_recurring_end_option_ends_series(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     _isolate(monkeypatch, tmp_path)
 

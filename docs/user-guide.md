@@ -158,13 +158,17 @@ the promo expiry.
 ### `moneta accounts`
 
 ```bash
-moneta accounts                              # list accounts with IDs, types, balances
-moneta accounts --set-type <ID> <TYPE>       # checking|savings|credit|brokerage|loan|unknown
-moneta accounts --set-promo <ID> YYYY-MM-DD  # promo expiry for a financing account
+moneta accounts                                    # list accounts with IDs, types, balances
+moneta accounts --set-type <ID> <TYPE>             # checking|savings|credit|brokerage|loan|unknown
+moneta accounts --set-promo <ID> YYYY-MM-DD        # promo expiry for a financing account
+moneta accounts --set-financing <ID> true|false    # mark a credit card as financing (loan semantics)
 ```
 
-Type overrides survive re-syncs. `--set-promo` is the one manual field in the whole system —
-it powers the deferred-interest warning.
+Type overrides survive re-syncs. `--set-promo` and `--set-financing` are manual fields —
+promo powers the deferred-interest warning; financing-mode gives a credit account loan
+semantics (its payments count as fixed costs instead of its purchases) without waiting on
+the `financing_account` review prompt. A financing-mode account shows as `credit (financing)`
+in the Type column.
 
 ## The review queue
 

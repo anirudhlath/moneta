@@ -56,7 +56,7 @@ A FastAPI server owns **all** logic; the typer CLI is a thin HTTP client that ru
 | **Merged sources** | With both configured, `MergedAdapter` presents them as one source — a single `moneta sync` pulls everything. |
 | **Incremental sync with overlap** | Re-syncs resume from the newest stored transaction minus a 7-day overlap; first sync and `sync --full` pull from the epoch (all history the institution retains). |
 | **Upstream correction handling** | A re-synced transaction whose amount/description changed updates in place, clears the stale merchant (normalization re-derives it), and drops any transfer link the correction invalidated — without losing its series membership. |
-| **Account type inference & overrides** | SimpleFIN gives no types, so they're inferred from name/org keywords; `moneta accounts --set-type` overrides survive re-sync; Plaid type hints win over inference. |
+| **Account type inference & overrides** | SimpleFIN gives no types, so they're inferred from name/org keywords; `moneta accounts --set-type` overrides survive re-sync; Plaid type hints win over inference. `moneta accounts --set-financing ID true\|false` manually flags/clears `financing_mode` (shown as `credit (financing)`), the same flag the `financing_account` review prompt sets — a manual escape hatch pending real behavioral detection (see roadmap). |
 | **Sync audit trail** | Every `run_sync` writes a `SyncRun` row (started/finished, success or the error, full report). `moneta status` answers "did last night's sync work?"; failures leave domain tables untouched. |
 
 ### 6.2 Pipelines (detection & classification)
@@ -121,6 +121,7 @@ Rich tables with stable IDs everywhere a follow-up action exists (`recurring --e
 | 2026-07-15 | **Review hardening** | Alembic migrations, WAL, bearer-token auth, `moneta status` + sync audit rows, `moneta backup`, rotating logs, local-timezone dates, single-currency views, upstream-correction handling, price-change outlier protection, 0600/0700 file hygiene. |
 | 2026-07-16 | **API money convention** | Every response money field is integer cents (`*_cents`); no Decimal-as-string or pre-formatted display strings. The CLI owns all formatting (`fmt_money`, one sign format everywhere); `dollars()` is prose-only (LLM prompts, review-question text). |
 | 2026-07-16 | **Recurring overrule CLI** | `moneta recurring --not-a-bill/--habit/--re-review ID` (mutually exclusive with each other and `--end`) — `POST /recurring/{id}/{not-a-bill,habit,re-review}` find-or-create the series' `recurring_cluster` ledger item and apply a manual resolution through the existing `apply_resolution` path, so a wrongly-confirmed bill or habit is always human-correctable. |
+| 2026-07-16 | **Manual financing-mode override** | `moneta accounts --set-financing ID true\|false` (`PATCH /accounts` gains `financing_mode`); accounts table shows `credit (financing)`. A manual escape hatch alongside the `financing_account` review prompt — behavioral auto-detection is still open (see roadmap). |
 
 ## 8. Roadmap
 
