@@ -90,9 +90,10 @@ moneta status          # did the last sync work? when, success/failure, what cha
 ```
 
 A sync runs the full pipeline: ingest → merchant normalization → transfer dedup →
-LLM auto-review → recurring detection → LLM verification → series events. The summary line
-tells you what changed (new transactions, transfers linked, new series, events); if items need
-your attention it points you at `moneta review`.
+financing-account detection → LLM auto-review → recurring detection → LLM verification →
+series events. The summary line tells you what changed (new transactions, transfers linked,
+new series, events); if items need your attention (including a financing check) it points
+you at `moneta review`.
 
 Every sync is recorded — success or failure — and a failed sync leaves your data untouched.
 
@@ -129,14 +130,27 @@ committed vs. how much left your accounts.
 ### `moneta recurring`
 
 ```bash
-moneta recurring               # detected series: ID, merchant, direction, cadence, amount, next expected
-moneta recurring --events      # recent events: missed payments, price increases, new series
-moneta recurring --end <ID>    # cancel a series you know is over (IDs are in the table)
+moneta recurring                  # detected series: ID, merchant, direction, cadence, amount, next expected
+moneta recurring --events         # recent events: missed payments, price increases, new series
+moneta recurring --end <ID>       # cancel a series you know is over (IDs are in the table)
+moneta recurring --not-a-bill <ID> # override: not recurring — ends the series, suppressed forever
+moneta recurring --habit <ID>      # override: discretionary habit, not a bill; reactivates if ended
+moneta recurring --re-review <ID>  # reopen the series' bill/habit/not-recurring review question
 ```
 
 Series end automatically when charges stop, and revive if a genuinely new charge appears at
 the old cadence. A price increase is only applied after two agreeing charges (or an LLM/your
 confirmation) — a single weird charge never rewrites what a bill is "supposed to" cost.
+
+`--end`, `--not-a-bill`, `--habit`, and `--re-review` are mutually exclusive with each other —
+pass exactly one. Each overrule flag writes through the same `recurring_cluster` review-item
+ledger a bill/habit/not-recurring answer would (`resolved_by: "manual"`), so a wrong LLM or
+detection verdict is always human-correctable: `--not-a-bill` ends the series immediately and
+suppresses it from every future sync; `--habit` flips it to discretionary spending and
+reactivates it if it had ended; `--re-review` reopens the ledger item so it reappears in
+`moneta review` (and a fresh answer can supersede the old one). `--re-review` only reopens
+the question — it never changes the series itself, so an ended series stays ended until you
+answer `h` (habit, reactivates) or bump it back with the API's status PATCH.
 
 ### `moneta obligations`
 
@@ -144,16 +158,58 @@ Loans and 0%-promo financing, fully derived from observed transfers: monthly pay
 estimated months left, and a **deferred interest** warning when the payoff estimate lands after
 the promo expiry.
 
+The monthly payment is derived **per loan/financing account** from its transfer-linked
+payments, grouped by which account the money lands in — not by the bank's payment
+descriptor. This matters because banks often collapse several different cards' payments
+into one shared descriptor (e.g. `"Synchrony Bank Payment Web Id"` for three unrelated
+store cards); grouping by descriptor would blend or lose individual payments, but grouping
+by the linked account keeps each obligation's amount and cadence correct.
+
+### Financing cards
+
+Some store credit cards (e.g. Synchrony-issued cards) are used purely as 0%-promo
+financing vehicles rather than for everyday spending. Moneta detects this from behavior,
+not the card issuer: a `credit`-typed account whose transaction history is (almost)
+nothing but repeated, near-equal payment credits against a positive owed balance — no
+real purchase activity since the payments began (an initial financed purchase before the
+first payment is fine) — looks like financing in use. The first time this fingerprint
+fires for an account, `moneta review` asks a one-time financing-check question (`y`/`n`);
+the answer is remembered and never asked again for that account. Answering `y` sets
+`financing_mode`, which gives the account loan semantics: its payments count as fixed
+costs (instead of its purchases), and it appears in `moneta obligations`.
+
+You can also set or clear this manually, bypassing the detection question:
+
+```bash
+moneta accounts --set-financing <ID> true|false
+```
+
+After confirming financing this way (review answer or `--set-financing`), any old
+credit-payment series over that card is replaced by the derived per-account payment line
+on the next `moneta sync` — numbers self-heal automatically, with no double-counting in
+the interim.
+
+**Limitation:** a *hybrid* card — one carrying both everyday spending and a promo
+financing plan at the same time — can't be split apart from transaction data alone, so
+the fingerprint won't fire cleanly and moneta can't separate "this payment is financing"
+from "this payment is a normal statement balance." Treat financing-mode as correct only
+for cards used exclusively as financing vehicles; a hybrid card should stay a plain
+`credit` account (or be handled with `--set-financing false` if it's misdetected).
+
 ### `moneta accounts`
 
 ```bash
-moneta accounts                              # list accounts with IDs, types, balances
-moneta accounts --set-type <ID> <TYPE>       # checking|savings|credit|brokerage|loan|unknown
-moneta accounts --set-promo <ID> YYYY-MM-DD  # promo expiry for a financing account
+moneta accounts                                    # list accounts with IDs, types, balances
+moneta accounts --set-type <ID> <TYPE>             # checking|savings|credit|brokerage|loan|unknown
+moneta accounts --set-promo <ID> YYYY-MM-DD        # promo expiry for a financing account
+moneta accounts --set-financing <ID> true|false    # mark a credit card as financing (loan semantics)
 ```
 
-Type overrides survive re-syncs. `--set-promo` is the one manual field in the whole system —
-it powers the deferred-interest warning.
+Type overrides survive re-syncs. `--set-promo` and `--set-financing` are manual fields —
+promo powers the deferred-interest warning; financing-mode gives a credit account loan
+semantics (its payments count as fixed costs instead of its purchases) without waiting on
+the `financing_account` review prompt. A financing-mode account shows as `credit (financing)`
+in the Type column.
 
 ## The review queue
 
@@ -169,7 +225,8 @@ You'll see an upfront summary, then one question at a time:
 | Question type | How to answer |
 |---|---|
 | Transfer match ("which inflow matches…") | Type the number of the right candidate, or Enter to skip |
-| Recurring bill ("Is X a recurring bill?") | `y` / `n` |
+| Bill, habit, or not recurring ("Is X a recurring bill?") | `b` bill (fixed cost) / `h` habit (discretionary, still tracked) / `n` not recurring |
+| Financing check ("X looks like promo financing being paid down…") | `y` treat its payments as fixed costs / `n` leave it as a plain credit card |
 | Price change ("Did X change price from $A to $B?") | `y` (applies the new amount) / `n` |
 | Merchant name | Type the real merchant name, or Enter to skip |
 
@@ -273,6 +330,9 @@ Files in the config dir (all owner-only, dir is 0700):
 | Account has the wrong type | `moneta accounts --set-type <ID> <TYPE>` — sticks across syncs. |
 | Merchant names look wrong | Answer the merchant questions in `moneta review`; after rule improvements, `moneta renormalize` re-applies naming to all history. |
 | A subscription shows as active but is cancelled | `moneta recurring --end <ID>`. |
+| A series was wrongly confirmed as a recurring bill | `moneta recurring --not-a-bill <ID>` — ends it and suppresses it from every future sync. |
+| A recurring series is really discretionary spending | `moneta recurring --habit <ID>` — reactivates it if ended, tags it discretionary (not a fixed cost). |
+| An overrule was a mistake | `moneta recurring --re-review <ID>` reopens the question in `moneta review`. |
 | A price change looks wrong | It only applies after two agreeing charges or a confirmation; deny it in `moneta review` and the old expected amount stands. |
 | Numbers exclude an account | Foreign-currency accounts are excluded from aggregates by design and reported in `networth`. |
 | Remote CLI gets 401 | `MONETA_API_TOKEN` on the client must match the server's. |

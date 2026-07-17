@@ -1,15 +1,15 @@
 import statistics
-from calendar import monthrange
-from datetime import date, timedelta
+from datetime import date
+from typing import NamedTuple
 
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.llm import Classifier
+from moneta.cadence import CADENCE_DAYS, GRACE_DAYS, TOLERANCE, advance_expected_on, match_cadence
+from moneta.llm import CLASSIFICATION_TAXONOMY, Classifier
 from moneta.models import (
     Account,
-    AccountType,
     Cadence,
     Direction,
     EventKind,
@@ -20,29 +20,11 @@ from moneta.models import (
     SeriesEvent,
     SeriesStatus,
     Transaction,
+    recurring_cluster_item,
     series_key,
 )
 from moneta.queries import classified_links, primary_currency
 
-CADENCE_DAYS: dict[Cadence, int] = {
-    Cadence.weekly: 7,
-    Cadence.biweekly: 14,
-    Cadence.monthly: 30,
-    Cadence.annual: 365,
-}
-_TOLERANCE: dict[Cadence, int] = {
-    Cadence.weekly: 2,
-    Cadence.biweekly: 3,
-    Cadence.monthly: 6,
-    Cadence.annual: 20,
-}
-# days around next_expected_on within which a charge counts as "on time"
-GRACE_DAYS: dict[Cadence, int] = {
-    Cadence.weekly: 3,
-    Cadence.biweekly: 4,
-    Cadence.monthly: 7,
-    Cadence.annual: 30,
-}
 _MIN_OCCURRENCES = 3
 _AMOUNT_TOLERANCE = 0.20
 _STALE_PERIODS = 3
@@ -51,31 +33,6 @@ _MINOR_FRACTION = 0.25
 # cadence-miss groups only warrant a review question when timing is bill-like,
 # not habitual spending (coffee, rideshare) with sub-weekly bursts
 _MIN_REVIEW_GAP_DAYS = 10
-_PER_MONTH: dict[Cadence, float] = {
-    Cadence.weekly: 52 / 12,
-    Cadence.biweekly: 26 / 12,
-    Cadence.monthly: 1.0,
-    Cadence.annual: 1 / 12,
-}
-
-
-def _add_months(d: date, months: int) -> date:
-    total = d.month - 1 + months
-    year, month = d.year + total // 12, total % 12 + 1
-    return date(year, month, min(d.day, monthrange(year, month)[1]))
-
-
-def advance_expected_on(d: date, cadence: Cadence) -> date:
-    """One period after d — calendar-aware for monthly/annual so day-of-month holds."""
-    match cadence:
-        case Cadence.weekly:
-            return d + timedelta(days=7)
-        case Cadence.biweekly:
-            return d + timedelta(days=14)
-        case Cadence.monthly:
-            return _add_months(d, 1)
-        case Cadence.annual:
-            return _add_months(d, 12)
 
 
 def missed_event(series_id: int, window: date) -> SeriesEvent:
@@ -94,9 +51,13 @@ def reactivate_series(series: RecurringSeries, today: date) -> None:
     series.status = SeriesStatus.active
 
 
-_LLM_PROMPT = """Is this group of bank transactions one recurring bill/subscription?
-Merchant: {merchant!r}; amounts (cents) and dates: {rows}
-Respond with JSON: {{"is_recurring": true/false}}"""
+_LLM_PROMPT = (
+    "Classify this group of bank transactions from one merchant.\n"
+    f"{CLASSIFICATION_TAXONOMY}\n"
+    "Merchant: {merchant!r}; amount cents min/median/max: {lo}/{med}/{hi}\n"
+    "Amounts (cents) and dates: {rows}\n"
+    'Respond with JSON: {{"classification": "bill" | "habit" | "not_recurring"}}'
+)
 
 
 class RecurringStats(BaseModel):
@@ -105,33 +66,16 @@ class RecurringStats(BaseModel):
     review: int = 0
 
 
-def monthly_cents(series: RecurringSeries) -> int:
-    return round(series.expected_cents * _PER_MONTH[series.cadence])
+class ForcedAnswer(NamedTuple):
+    """A resolved recurring_cluster ReviewItem's answer, keyed by (merchant, direction)."""
+
+    is_recurring: bool
+    discretionary: bool
 
 
 def _stale(last_seen: date, cadence: Cadence, today: date) -> bool:
     """A series is stale once its newest occurrence is over 3 cadence periods old."""
     return (today - last_seen).days > _STALE_PERIODS * CADENCE_DAYS[cadence]
-
-
-def _match_cadence(dates: list[date]) -> tuple[Cadence, date] | None:
-    """Best cadence and the start date of the newest run matching it.
-
-    Deep history contains breaks (pauses, resubscriptions, card reissues); judging
-    cadence on the maximal recent run keeps ancient gaps from poisoning a
-    currently-clean series.
-    """
-    gaps = [(b - a).days for a, b in zip(dates, dates[1:], strict=False)]
-    for cadence, days in CADENCE_DAYS.items():
-        tol = _TOLERANCE[cadence]
-        start = len(dates) - 1
-        while start > 0 and abs(gaps[start - 1] - days) <= tol * 2:
-            start -= 1
-        if len(dates) - start < _MIN_OCCURRENCES:
-            continue
-        if abs(statistics.median(gaps[start:]) - days) <= tol:
-            return cadence, dates[start]
-    return None
 
 
 def _median_gap(dates: list[date]) -> float:
@@ -140,27 +84,38 @@ def _median_gap(dates: list[date]) -> float:
 
 
 def _closest_cadence(dates: list[date]) -> Cadence:
-    med = _median_gap(dates)
-    return min(CADENCE_DAYS, key=lambda c: abs(CADENCE_DAYS[c] - med))
+    """Forced-in groups have no clean run; the newest gap is the least-stale evidence.
+    A between-buckets median once billed a $265.72 gym at biweekly ($575/mo)."""
+    if len(dates) < 2:
+        return Cadence.monthly
+    newest_gap = (dates[-1] - dates[-2]).days
+    candidate = min(CADENCE_DAYS, key=lambda c: abs(CADENCE_DAYS[c] - newest_gap))
+    if abs(CADENCE_DAYS[candidate] - newest_gap) <= TOLERANCE[candidate]:
+        return candidate
+    return Cadence.monthly  # safest: factor 1.0 can't inflate the monthly number
 
 
-async def _excluded_txn_ids(session: AsyncSession) -> set[int]:
-    """Transfer-linked txns are excluded UNLESS the link pays into a loan account."""
+async def _excluded_txn_ids(session: AsyncSession) -> tuple[set[int], set[int]]:
+    """All transfer-linked txns are excluded from merchant grouping. Loan-like payment
+    outflows are additionally untagged — their per-account derivation lives in
+    queries.loan_payment_stats, not in a merchant series (design 2026-07-16 §3)."""
     excluded: set[int] = set()
+    loan_payment_outflows: set[int] = set()
     for link in await classified_links(session):
-        excluded.add(link.inflow_id)  # inflow side is never a spend/income signal
-        if link.inflow_account_type != AccountType.loan:
-            excluded.add(link.outflow_id)
-    return excluded
+        excluded.add(link.inflow_id)
+        excluded.add(link.outflow_id)
+        if link.inflow_is_loan_like:
+            loan_payment_outflows.add(link.outflow_id)
+    return excluded, loan_payment_outflows
 
 
 async def detect_recurring(
     session: AsyncSession, llm: Classifier | None, today: date
 ) -> RecurringStats:
     stats = RecurringStats()
-    excluded = await _excluded_txn_ids(session)
+    excluded, loan_payment_outflows = await _excluded_txn_ids(session)
     reviewed: set[tuple[str, str]] = set()
-    force: dict[tuple[str, str], bool] = {}
+    force: dict[tuple[str, str], ForcedAnswer] = {}
     for item in (
         await session.execute(
             select(ReviewItem).where(ReviewItem.kind == ReviewKind.recurring_cluster)
@@ -175,7 +130,10 @@ async def detect_recurring(
         elif isinstance(item.resolution, dict) and isinstance(
             item.resolution.get("is_recurring"), bool
         ):
-            force[key] = item.resolution["is_recurring"]
+            force[key] = ForcedAnswer(
+                is_recurring=item.resolution["is_recurring"],
+                discretionary=bool(item.resolution.get("discretionary")),
+            )
     existing = {
         (s.merchant, s.direction): s
         for s in (await session.execute(select(RecurringSeries))).scalars()
@@ -206,6 +164,16 @@ async def detect_recurring(
             if owner is not None and owner.merchant != t.merchant:
                 t.series_id = None
 
+    # loan-like payment outflows no longer belong to a merchant series — their
+    # per-account cadence/amount is derived in queries.loan_payment_stats instead
+    # (design 2026-07-16 §3). Untag them and remember which series they leave behind
+    # so an orphaned series (no tagged txns left) can be ended in the final sweep.
+    untagged_series: set[int] = set()
+    for t in txns:
+        if t.id in loan_payment_outflows and t.series_id is not None:
+            untagged_series.add(t.series_id)
+            t.series_id = None
+
     groups: dict[tuple[str, Direction], list[Transaction]] = {}
     for t in txns:
         if t.id in excluded or t.merchant is None:
@@ -219,7 +187,7 @@ async def detect_recurring(
         if len(significant) < _MIN_OCCURRENCES:
             continue
         dates = sorted({t.posted_on for t in significant})  # dedup: double-posts aren't 0-day gaps
-        match = _match_cadence(dates)
+        match = match_cadence(dates)
         if match is None:
             cadence, run = None, significant
         else:
@@ -231,40 +199,55 @@ async def detect_recurring(
         stable = all(abs(a - med) <= med * _AMOUNT_TOLERANCE for a in amounts)
         expected = -round(med) if direction == Direction.outflow else round(med)
         forced = force.get((merchant, str(direction)))
-        if forced is False:
+        if forced is not None and forced.is_recurring is False:
             continue  # user-resolved as not recurring — suppress silently, forever
+        discretionary = forced.discretionary if forced is not None else False
+        forced_recurring = forced is not None and forced.is_recurring
 
-        def _open_review(merchant: str = merchant, direction: Direction = direction) -> None:
+        def _open_review(
+            merchant: str = merchant,
+            direction: Direction = direction,
+            *,
+            llm_flagged: bool = False,
+        ) -> None:
             if (merchant, str(direction)) not in reviewed:
-                session.add(
-                    ReviewItem(
-                        kind=ReviewKind.recurring_cluster,
-                        question=f"Is {merchant!r} a recurring bill?",
-                        payload={"merchant": merchant, "direction": direction},
-                    )
-                )
+                item = recurring_cluster_item(merchant, direction)
+                if llm_flagged:
+                    item.payload = {**item.payload, "llm_flagged": True}
+                session.add(item)
                 stats.review += 1
 
         if cadence is None:
-            if forced is not True:  # irregular timing needs a human, not the LLM
+            if not forced_recurring:  # irregular timing needs a human
                 # only ask when it plausibly IS a bill: steady amounts at bill-like intervals
-                if stable and _median_gap(dates) >= _MIN_REVIEW_GAP_DAYS:
+                # (a single date is never bill-like timing — nothing to measure a gap from)
+                if stable and len(dates) >= 2 and _median_gap(dates) >= _MIN_REVIEW_GAP_DAYS:
                     _open_review()
                 continue
             cadence = _closest_cadence(dates)
-        elif not stable and forced is not True:
+        elif not stable and not forced_recurring:
             answer = (
                 await llm.classify_json(
                     _LLM_PROMPT.format(
                         merchant=merchant,
+                        lo=min(amounts),
+                        med=round(med),
+                        hi=max(amounts),
                         rows=[(t.amount_cents, t.posted_on.isoformat()) for t in run],
                     )
                 )
                 if llm
                 else None
             )
-            if not (answer and answer.get("is_recurring")):
-                _open_review()
+            classification = answer.get("classification") if answer else None
+            if classification == "habit":
+                discretionary = True
+            elif classification != "bill":
+                # an actual (even malformed) LLM answer means the LLM already looked —
+                # mirror verify_series: human-only from here, autoreview must not re-ask
+                # the binary bill/one-off prompt and rubber-stamp it as a fixed cost.
+                # A classify_json failure (answer is None) never looked; leave it askable.
+                _open_review(llm_flagged=answer is not None)
                 continue
         next_on = advance_expected_on(dates[-1], cadence)
         stale = _stale(dates[-1], cadence, today)
@@ -277,6 +260,7 @@ async def detect_recurring(
                 expected_cents=expected,
                 next_expected_on=next_on,
                 status=SeriesStatus.ended if stale else SeriesStatus.active,
+                discretionary=discretionary,
             )
             session.add(series)
             await session.flush()
@@ -316,10 +300,12 @@ async def detect_recurring(
                 series.next_expected_on != advanced_on
                 or series.cadence != cadence
                 or series.status != status
+                or series.discretionary != discretionary
             )
             series.cadence = cadence
             series.next_expected_on = advanced_on
             series.status = status
+            series.discretionary = discretionary
             if changed:
                 stats.updated += 1
         for t in significant:
@@ -338,10 +324,17 @@ async def detect_recurring(
     for series in existing.values():
         if series.status != SeriesStatus.active:
             continue
-        # detect_recurring tags every occurrence it matches, so an active series always
-        # has tagged txns; without any there is no evidence to judge — leave it alone.
+        # detect_recurring tags every occurrence it matches, so an active series
+        # normally always has tagged txns. Zero tagged txns means either there's no
+        # evidence to judge (leave it alone) or every txn it had was just untagged as
+        # a loan payment (its per-account derivation owns it now — end it here).
         last_seen = newest_by_series.get(series.id)
-        if last_seen is not None and _stale(last_seen, series.cadence, today):
+        if last_seen is None:
+            if series.id in untagged_series:
+                series.status = SeriesStatus.ended
+                stats.updated += 1
+            continue
+        if _stale(last_seen, series.cadence, today):
             series.status = SeriesStatus.ended
             stats.updated += 1
     await session.commit()

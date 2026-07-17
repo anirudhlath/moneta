@@ -13,7 +13,7 @@ from sqlalchemy.pool import StaticPool
 _BASELINE = "0001"
 # newest revision in migrations/versions/ — bump alongside each new migration;
 # tests/test_migrations.py pins this against the script directory
-_HEAD = "0002"
+_HEAD = "0003"
 
 
 def make_sessionmaker(db_url: str) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:

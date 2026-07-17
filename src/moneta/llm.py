@@ -22,6 +22,17 @@ class Classifier(Protocol):
     async def classify_json(self, prompt: str) -> dict[str, Any] | None: ...
 
 
+# Shared bill/habit/not_recurring definitions for every recurring-classification prompt
+# (initial detection, LLM verification) — one place to keep the taxonomy consistent.
+CLASSIFICATION_TAXONOMY = (
+    '- "bill": a fixed obligation — subscription, rent, insurance, loan or membership payment; '
+    "roughly stable amount; there are consequences if unpaid.\n"
+    '- "habit": recurring discretionary spending — restaurants, coffee, bars, groceries, '
+    "rideshare; variable amounts; a fresh choice each time.\n"
+    '- "not_recurring": neither — coincidental repetition.'
+)
+
+
 def confident_yes(answer: dict[str, Any] | None, key: str) -> bool:
     """True only when the classifier answered {key: true, confident: true}."""
     return answer is not None and answer.get(key) is True and answer.get("confident") is True

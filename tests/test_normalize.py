@@ -28,6 +28,14 @@ def test_rule_normalize() -> None:
     assert rule_normalize("PAYPAL *SPOTIFY") == "Spotify"
 
 
+def test_rule_normalize_keeps_hyphen_joined_digit_runs() -> None:
+    # a hyphen-joined digit run (e.g. a vanity phone number) is not a store number
+    # and must survive normalization intact.
+    assert rule_normalize("1-800-FLOWERS.COM") == "1-800-Flowers.Com"
+    assert rule_normalize("BLUE BOTTLE #1234") == "Blue Bottle"
+    assert rule_normalize("STORE 4521") == "Store"
+
+
 def test_looks_clean() -> None:
     assert looks_clean("Netflix.Com")
     assert not looks_clean("X4529182")

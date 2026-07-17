@@ -9,6 +9,7 @@ from moneta.aggregator.base import AggregatorAdapter
 from moneta.llm import Classifier
 from moneta.models import SyncRun, Transaction
 from moneta.pipelines.events import emit_series_events
+from moneta.pipelines.financing import detect_financing
 from moneta.pipelines.ingest import IngestStats, ingest_snapshot
 from moneta.pipelines.normalize import normalize_merchants
 from moneta.pipelines.recurring import RecurringStats, detect_recurring
@@ -35,6 +36,7 @@ class SyncReport(BaseModel):
     ingest: IngestStats
     normalized: int
     transfers: TransferStats
+    financing_questions: int
     auto_resolved: int
     recurring: RecurringStats
     verify: VerifyStats
@@ -56,6 +58,7 @@ async def run_sync(
         ingest = await ingest_snapshot(session, snap)
         normalized = await normalize_merchants(session, llm)
         transfers = await link_transfers(session, llm)
+        financing_questions = await detect_financing(session)
         # auto-review before detection so confident LLM answers (incl. last sync's
         # recurring questions) influence this run's series and exclusions
         auto_resolved = await autoreview_items(session, llm) if llm else 0
@@ -74,6 +77,7 @@ async def run_sync(
         ingest=ingest,
         normalized=normalized,
         transfers=transfers,
+        financing_questions=financing_questions,
         auto_resolved=auto_resolved,
         recurring=recurring,
         verify=verify,

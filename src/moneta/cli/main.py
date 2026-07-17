@@ -139,12 +139,53 @@ def networth() -> None:
 @app.command()
 def recurring(
     events: Annotated[bool, typer.Option("--events")] = False,
-    end: Annotated[int | None, typer.Option("--end")] = None,
+    end: Annotated[int | None, typer.Option("--end", help="Cancel a series.")] = None,
+    not_a_bill: Annotated[
+        int | None,
+        typer.Option(
+            "--not-a-bill", help="Not recurring: ends the series and suppresses it forever."
+        ),
+    ] = None,
+    habit: Annotated[
+        int | None,
+        typer.Option(
+            "--habit", help="Discretionary habit, not a bill; reactivates the series if ended."
+        ),
+    ] = None,
+    re_review: Annotated[
+        int | None,
+        typer.Option("--re-review", help="Reopen the series' bill/habit review question."),
+    ] = None,
 ) -> None:
-    """List detected recurring series (or recent events with --events); --end ID to cancel one."""
+    """List detected recurring series (or recent events with --events).
+
+    --end ID cancels a series. --not-a-bill / --habit / --re-review ID overrule
+    detection instead; all four are mutually exclusive with each other.
+    """
+    overrules = [v for v in (end, not_a_bill, habit, re_review) if v is not None]
+    if len(overrules) > 1:
+        console.print(
+            "[red]Error:[/red] --end, --not-a-bill, --habit, and --re-review "
+            "are mutually exclusive."
+        )
+        raise typer.Exit(1)
     if end is not None:
         request("PATCH", f"/recurring/{end}", {"status": "ended"})
         console.print(f"[green]Series {end} ended.[/green]")
+    if not_a_bill is not None:
+        request("POST", f"/recurring/{not_a_bill}/not-a-bill")
+        console.print(
+            f"[green]Series {not_a_bill} marked not-a-bill — "
+            "suppressed from future detection.[/green]"
+        )
+    if habit is not None:
+        request("POST", f"/recurring/{habit}/habit")
+        console.print(
+            f"[green]Series {habit} marked habit — discretionary, not a fixed cost.[/green]"
+        )
+    if re_review is not None:
+        request("POST", f"/recurring/{re_review}/re-review")
+        console.print(f"[green]Series {re_review} reopened for review.[/green]")
     if events:
         rows = request("GET", "/recurring/events")
         table = Table("When", "ID", "Merchant", "Event", "Details")
@@ -213,25 +254,40 @@ def obligations() -> None:
         console.print("[red]! payoff lands after the promo expires — deferred interest risk[/red]")
 
 
+def _parse_bool_flag(value: str) -> bool:
+    if value.lower() == "true":
+        return True
+    if value.lower() == "false":
+        return False
+    console.print(f"[red]Error:[/red] invalid value {value!r} (expected true|false)")
+    raise typer.Exit(1)
+
+
 @app.command()
 def accounts(
     set_type: Annotated[tuple[int, str] | None, typer.Option("--set-type")] = None,
     set_promo: Annotated[tuple[int, str] | None, typer.Option("--set-promo")] = None,
+    set_financing: Annotated[tuple[int, str] | None, typer.Option("--set-financing")] = None,
 ) -> None:
-    """List accounts; --set-type ID TYPE, --set-promo ID YYYY-MM-DD."""
+    """List accounts. Flags: --set-type ID TYPE, --set-promo ID YYYY-MM-DD,
+    --set-financing ID true|false."""
     if set_type:
         request("PATCH", f"/accounts/{set_type[0]}", {"type": set_type[1]})
     if set_promo:
         promo = _parse_iso_date(set_promo[1])
         request("PATCH", f"/accounts/{set_promo[0]}", {"promo_expires_on": promo})
+    if set_financing:
+        financing_mode = _parse_bool_flag(set_financing[1])
+        request("PATCH", f"/accounts/{set_financing[0]}", {"financing_mode": financing_mode})
     rows = request("GET", "/accounts")
     table = Table("ID", "Name", "Org", "Type", "Balance", "Promo ends")
     for a in rows:
+        type_cell = f"{a['type']} (financing)" if a.get("financing_mode") else a["type"]
         table.add_row(
             str(a["id"]),
             escape(a["name"]),
             escape(a["org_name"]),
-            a["type"],
+            type_cell,
             fmt_money(a["balance_cents"]),
             str(a["promo_expires_on"] or "—"),
         )
@@ -240,8 +296,8 @@ def accounts(
 
 _REVIEW_KINDS = {
     "recurring_cluster": (
-        "recurring bill question",
-        "your answers set the fixed costs and income behind `moneta power`",
+        "bill or habit question",
+        "bills become fixed costs; habits stay discretionary spending in moneta power",
     ),
     "transfer_pair": (
         "transfer match",
@@ -254,6 +310,10 @@ _REVIEW_KINDS = {
     "price_change": (
         "price change",
         "confirming updates the expected amount behind `moneta power`",
+    ),
+    "financing_account": (
+        "financing check",
+        "confirming counts this card's payments as fixed costs in moneta power",
     ),
 }
 
@@ -279,9 +339,25 @@ def _review_one(item: dict[str, object]) -> dict[str, object] | None:
         for s in ctx.get("samples", []):
             console.print(f"    {s['posted_on']}  {fmt_money(abs(s['amount_cents']))}")
         if ctx.get("direction") == "inflow":
-            console.print("    [dim](these are deposits — answering y counts them as income)[/dim]")
-        answer = _prompt_yes_no("Recurring? [y/n]")
-        return None if answer is None else {"is_recurring": answer}
+            console.print("    [dim](these are deposits — answering b counts them as income)[/dim]")
+        payload = item.get("payload") or {}
+        assert isinstance(payload, dict)
+        if leaning := payload.get("llm_leaning"):
+            console.print(f"    [dim](LLM leaned: {leaning})[/dim]")
+        answer = typer.prompt(
+            "Bill, habit, or not recurring? [b/h/n]", default="", show_default=False
+        )
+        normalized = answer.strip().lower()
+        if not normalized:
+            return None
+        if normalized in ("b", "bill", "y", "yes"):
+            return {"is_recurring": True}
+        if normalized in ("h", "habit"):
+            return {"is_recurring": True, "discretionary": True}
+        if normalized in ("n", "no", "not"):
+            return {"is_recurring": False}
+        console.print("[red]invalid input, skipping[/red]")
+        return None
     if item["kind"] == "price_change":
         for s in ctx.get("samples", []):
             console.print(f"    {s['posted_on']}  {fmt_money(abs(s['amount_cents']))}")
@@ -334,6 +410,9 @@ def _review_one(item: dict[str, object]) -> dict[str, object] | None:
             console.print(f"    current guess: {suggested!r}")
         answer = typer.prompt("Merchant name (Enter to skip)", default="", show_default=False)
         return {"merchant": answer} if answer else None
+    if item["kind"] == "financing_account":
+        answer = _prompt_yes_no("Treat as financing? [y/n]")
+        return None if answer is None else {"financing": answer}
     answer = typer.prompt("Answer (blank to skip)", default="", show_default=False)
     return {"note": answer} if answer else None
 

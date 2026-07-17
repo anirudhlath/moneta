@@ -5,13 +5,9 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.models import (
-    Account,
-    AccountType,
-    RecurringSeries,
-)
-from moneta.pipelines.recurring import monthly_cents
-from moneta.queries import ClassifiedLink, classified_links
+from moneta.cadence import monthlyize
+from moneta.models import Account, AccountType
+from moneta.queries import classified_links, loan_payment_stats
 
 
 class Obligation(BaseModel):
@@ -25,47 +21,31 @@ class Obligation(BaseModel):
     deferred_interest_risk: bool
 
 
-def _payment_series_id(loan_account_id: int, links: list[ClassifiedLink]) -> int | None:
-    """Series of outflows transfer-linked into this loan account, newest first."""
-    candidates = [
-        link
-        for link in links
-        if link.inflow_account_id == loan_account_id and link.outflow_series_id is not None
-    ]
-    if not candidates:
-        return None
-    newest = max(candidates, key=lambda link: (link.outflow_posted_on, link.outflow_id))
-    return newest.outflow_series_id
-
-
 async def compute_obligations(session: AsyncSession, today: date) -> list[Obligation]:
     loans = (
         (
             await session.execute(
-                select(Account).where(Account.type == AccountType.loan, Account.balance_cents != 0)
+                select(Account).where(
+                    (Account.type == AccountType.loan) | (Account.financing_mode.is_(True)),
+                    Account.balance_cents != 0,
+                )
             )
         )
         .scalars()
         .all()
     )
     links = await classified_links(session)
+    payments = loan_payment_stats(links)
     result: list[Obligation] = []
     for loan in loans:
         balance_owed_cents = abs(loan.balance_cents)
-        payment_cents: int | None = None
         months_left: int | None = None
         payoff: date | None = None
-        series_id = _payment_series_id(loan.id, links)
-        if series_id is not None:
-            series = (
-                await session.execute(
-                    select(RecurringSeries).where(RecurringSeries.id == series_id)
-                )
-            ).scalar_one()
-            payment_cents = abs(monthly_cents(series))
-            if payment_cents > 0:
-                months_left = math.ceil(balance_owed_cents / payment_cents)
-                payoff = today + timedelta(days=30 * months_left)
+        lp = payments.get(loan.id)
+        payment_cents = abs(monthlyize(lp.expected_cents, lp.cadence)) if lp else None
+        if payment_cents is not None and payment_cents > 0:
+            months_left = math.ceil(balance_owed_cents / payment_cents)
+            payoff = today + timedelta(days=30 * months_left)
         risk = bool(
             payoff is not None
             and loan.promo_expires_on is not None

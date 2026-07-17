@@ -143,6 +143,44 @@ async def test_confident_recurring_answer_feeds_next_detection(session: AsyncSes
     assert stats.new_series == 1
 
 
+async def test_llm_declined_detection_item_stays_human_only(session: AsyncSession) -> None:
+    """The unstable-amount branch in detect_recurring consults the LLM; when it declines
+    (anything but "bill"), the review item it opens must be llm_flagged — mirroring
+    verify_series's "LLM already looked" rule — so autoreview's binary is_recurring
+    prompt can never rubber-stamp it into a fixed cost on a later sync (the exact
+    failure this wave exists to fix: architect finding, 2026-07-16, task 16)."""
+    acct = await make_account(session)
+    for d, cents in (
+        (date(2026, 6, 1), -2176),
+        (date(2026, 6, 8), -12035),
+        (date(2026, 6, 15), -3886),
+        (date(2026, 6, 22), -4100),
+    ):
+        await make_txn(
+            session, acct, amount_cents=cents, merchant="Neighborhood Bistro", posted_on=d
+        )
+    detect_llm = ScriptedLLM({"Neighborhood Bistro": {"classification": "not_recurring"}})
+    stats = await detect_recurring(session, llm=detect_llm, today=date(2026, 7, 1))
+    assert stats.new_series == 0 and stats.review == 1
+    assert (await session.execute(select(RecurringSeries))).scalars().all() == []
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.status == ReviewStatus.open
+    assert item.payload["llm_flagged"] is True
+
+    # next sync: autoreview must not even ask its old binary bill/one-off question
+    autoreview_llm = ScriptedLLM({"Neighborhood Bistro": {"is_recurring": True, "confident": True}})
+    resolved = await autoreview_items(session, autoreview_llm)
+    assert resolved == 0
+    assert autoreview_llm.prompts == []
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.status == ReviewStatus.open  # still open — not silently affirmed
+
+    # and detection itself must still create no series while the item sits open
+    stats2 = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats2.new_series == 0
+    assert (await session.execute(select(RecurringSeries))).scalars().all() == []
+
+
 async def _series_with_occurrences(session: AsyncSession) -> RecurringSeries:
     acct = await make_account(session)
     series = await make_series(session, merchant="Netflix")
@@ -157,9 +195,9 @@ async def _series_with_occurrences(session: AsyncSession) -> RecurringSeries:
     return series
 
 
-async def test_verify_confident_yes_writes_resolved_ledger_item(session: AsyncSession) -> None:
+async def test_verify_confident_bill_resolves(session: AsyncSession) -> None:
     await _series_with_occurrences(session)
-    llm = ScriptedLLM({"Netflix": {"is_recurring": True, "confident": True}})
+    llm = ScriptedLLM({"Netflix": {"classification": "bill", "confident": True}})
     stats = await verify_series(session, llm)
     assert stats == VerifyStats(verified=1, flagged=0)
     item = (await session.execute(select(ReviewItem))).scalar_one()
@@ -172,7 +210,7 @@ async def test_verify_confident_yes_writes_resolved_ledger_item(session: AsyncSe
 
 async def test_verify_prompt_carries_amounts_and_dates(session: AsyncSession) -> None:
     await _series_with_occurrences(session)
-    llm = ScriptedLLM({"Netflix": {"is_recurring": True, "confident": True}})
+    llm = ScriptedLLM({"Netflix": {"classification": "bill", "confident": True}})
     await verify_series(session, llm)
     assert "15.99" in llm.prompts[0] and "2026-06-15" in llm.prompts[0]
 
@@ -182,25 +220,49 @@ def test_prompt_txn_converts_every_cents_key() -> None:
     assert out == {"posted_on": "2026-07-01", "amount": "15.99", "old_amount": "10.00"}
 
 
-async def test_verify_unconfident_flags_for_human(session: AsyncSession) -> None:
+async def test_verify_confident_habit_flags_with_leaning(session: AsyncSession) -> None:
     series = await _series_with_occurrences(session)
-    llm = ScriptedLLM({"Netflix": {"is_recurring": True, "confident": False}})
+    llm = ScriptedLLM({"Netflix": {"classification": "habit", "confident": True}})
     stats = await verify_series(session, llm)
     assert stats == VerifyStats(verified=0, flagged=1)
     item = (await session.execute(select(ReviewItem))).scalar_one()
     assert item.status == ReviewStatus.open
     assert item.payload["llm_flagged"] is True
+    assert item.payload["llm_leaning"] == "habit"
+    assert series.status == SeriesStatus.active  # keeps counting until a human rules
+    assert series.discretionary is False  # the LLM never suppresses/demotes on its own
+
+
+async def test_verify_unconfident_flags_for_human(session: AsyncSession) -> None:
+    series = await _series_with_occurrences(session)
+    llm = ScriptedLLM({"Netflix": {"classification": "bill", "confident": False}})
+    stats = await verify_series(session, llm)
+    assert stats == VerifyStats(verified=0, flagged=1)
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.status == ReviewStatus.open
+    assert item.payload["llm_flagged"] is True
+    assert item.payload["llm_leaning"] == "bill"
     assert series.status == SeriesStatus.active  # keeps counting until a human rules
 
 
 async def test_verify_confident_no_flags_rather_than_suppresses(session: AsyncSession) -> None:
     series = await _series_with_occurrences(session)
-    llm = ScriptedLLM({"Netflix": {"is_recurring": False, "confident": True}})
+    llm = ScriptedLLM({"Netflix": {"classification": "not_recurring", "confident": True}})
     stats = await verify_series(session, llm)
     assert stats == VerifyStats(verified=0, flagged=1)
     assert series.status == SeriesStatus.active  # the LLM never suppresses determinism
     item = (await session.execute(select(ReviewItem))).scalar_one()
     assert item.status == ReviewStatus.open
+    assert item.payload["llm_leaning"] == "not_recurring"
+
+
+async def test_verify_malformed_answer_flags_unparseable(session: AsyncSession) -> None:
+    await _series_with_occurrences(session)
+    llm = ScriptedLLM({"Netflix": {"confident": True}})  # no classification key
+    stats = await verify_series(session, llm)
+    assert stats == VerifyStats(verified=0, flagged=1)
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.payload["llm_leaning"] == "unparseable"
 
 
 async def test_verify_skips_merchants_with_existing_items(session: AsyncSession) -> None:
@@ -213,14 +275,14 @@ async def test_verify_skips_merchants_with_existing_items(session: AsyncSession)
         )
     )
     await session.flush()
-    llm = ScriptedLLM({"Netflix": {"is_recurring": True, "confident": True}})
+    llm = ScriptedLLM({"Netflix": {"classification": "bill", "confident": True}})
     assert await verify_series(session, llm) == VerifyStats()
     assert llm.prompts == []
 
 
 async def test_verify_skips_ended_series(session: AsyncSession) -> None:
     await make_series(session, merchant="Old Gym", status=SeriesStatus.ended)
-    llm = ScriptedLLM({"Old Gym": {"is_recurring": True, "confident": True}})
+    llm = ScriptedLLM({"Old Gym": {"classification": "bill", "confident": True}})
     assert await verify_series(session, llm) == VerifyStats()
     assert llm.prompts == []
 
@@ -244,6 +306,25 @@ async def test_autoreview_skips_llm_flagged_items(session: AsyncSession) -> None
     assert await autoreview_items(session, llm) == 0
     assert llm.prompts == []  # the LLM already looked once; re-asking is circular
     assert len(await _open_items(session)) == 1
+
+
+async def test_autoreview_skips_financing_account(session: AsyncSession) -> None:
+    acct = await make_account(session, type=AccountType.credit, balance_cents=-16000)
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.financing_account,
+            question="'Test' looks like promo financing being paid down — "
+            "treat its payments as fixed costs?",
+            payload={"account_id": acct.id},
+        )
+    )
+    await session.flush()
+    llm = ScriptedLLM({"": {"financing": True, "confident": True}})
+    assert await autoreview_items(session, llm) == 0
+    assert llm.prompts == []  # human-only kind — autoreview never builds a prompt for it
+    items = await _open_items(session)
+    assert len(items) == 1
+    assert items[0].kind == ReviewKind.financing_account
 
 
 async def test_not_recurring_resolution_ends_live_series(session: AsyncSession) -> None:
@@ -323,11 +404,25 @@ async def test_force_map_is_direction_scoped(session: AsyncSession) -> None:
 
 async def test_verify_covers_each_direction_separately(session: AsyncSession) -> None:
     await make_series(session, merchant="Venmo")  # outflow
-    llm = ScriptedLLM({"Venmo": {"is_recurring": True, "confident": True}})
+    llm = ScriptedLLM({"Venmo": {"classification": "bill", "confident": True}})
     assert await verify_series(session, llm) == VerifyStats(verified=1, flagged=0)
     # inflow series appears later (e.g. next sync); outflow's ledger must not mask it
     await make_series(session, merchant="Venmo", direction=Direction.inflow, expected_cents=1599)
     assert await verify_series(session, llm) == VerifyStats(verified=1, flagged=0)
+
+
+async def test_apply_resolution_habit_sets_discretionary(session: AsyncSession) -> None:
+    series = await make_series(session, merchant="Costco")
+    item = ReviewItem(
+        kind=ReviewKind.recurring_cluster,
+        question="Is 'Costco' a recurring bill?",
+        payload={"merchant": "Costco", "direction": "outflow"},
+    )
+    session.add(item)
+    await session.flush()
+    await apply_resolution(session, item, {"is_recurring": True, "discretionary": True})
+    assert series.discretionary is True
+    assert item.status == ReviewStatus.resolved
 
 
 async def test_price_change_context_includes_recent_occurrences(session: AsyncSession) -> None:

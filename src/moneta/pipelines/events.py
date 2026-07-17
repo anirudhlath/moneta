@@ -3,6 +3,7 @@ from datetime import date, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from moneta.cadence import GRACE_DAYS, advance_expected_on
 from moneta.llm import Classifier, confident_yes
 from moneta.models import (
     EventKind,
@@ -15,7 +16,7 @@ from moneta.models import (
     Transaction,
     dollars,
 )
-from moneta.pipelines.recurring import GRACE_DAYS, advance_expected_on, missed_event
+from moneta.pipelines.recurring import missed_event
 
 _PRICE_CHANGE_THRESHOLD = 0.05
 

@@ -41,10 +41,12 @@ Existing apps (Origin, Copilot) fail in four specific ways that moneta is built 
   unvested reported separately, never summed in. Vesting quantities import via CSV
   (`symbol,vested_quantity,unvested_quantity`; a direct Fidelity NetBenefits
   export mapping is tracked in `docs/backlog/high/`).
-- **Financing obligations** — derived, not entered: any loan account with a
-  detected payment series gets balance ÷ payment = months left, and a
-  deferred-interest warning when payoff lands after `promo_expires_on` (the one
-  optional manual field in the whole system).
+- **Financing obligations** — derived, not entered: any loan or financing-mode
+  account's monthly payment is derived per-account from its transfer-linked
+  payments (not merchant-string grouping, so shared bank descriptors across
+  cards can't blend or drop a payment), giving balance ÷ payment = months
+  left, and a deferred-interest warning when payoff lands after
+  `promo_expires_on` (the one optional manual field in the whole system).
 - **LLM as a gated second opinion** — ambiguous classifications go to an LLM in
   strict JSON mode; anything it isn't confident about lands in a human review
   queue. See [the LLM boundary](#the-llm-boundary) below.
@@ -169,10 +171,10 @@ Unset = no LLM; ambiguous items go to `moneta review` instead.
 | `moneta power` | Income, fixed costs, spending power, spent so far, remaining |
 | `moneta networth` | Net worth (vested only); unvested listed as potential |
 | `moneta cashflow [--start D --end D]` | Accrual spend vs cash out for a range (default: this month) |
-| `moneta recurring [--events] [--end ID]` | Series; missed payments and price increases; cancel a series |
+| `moneta recurring [--events] [--end\|--not-a-bill\|--habit\|--re-review ID]` | Series; missed payments/price increases; cancel, overrule, or reopen a series |
 | `moneta obligations` | Loans/financing: payment, months left, deferred-interest warnings |
 | `moneta review` | Resolve ambiguous classifications interactively |
-| `moneta accounts [--set-type ID TYPE] [--set-promo ID DATE]` | List accounts; set type / promo expiry |
+| `moneta accounts [--set-type ID TYPE] [--set-promo ID DATE] [--set-financing ID true\|false]` | List accounts; set type / promo expiry / financing-mode flag |
 | `moneta import vesting <file.csv>` | Vesting data (`symbol,vested_quantity,unvested_quantity`) |
 | `moneta renormalize` | Re-apply improved merchant rules to already-synced data |
 | `moneta status` | Last sync run: when, success/failure, counts |
