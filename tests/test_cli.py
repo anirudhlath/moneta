@@ -408,6 +408,26 @@ def test_txns_table_renders_counted_and_excluded_rows(tmp_path: Path, monkeypatc
     assert "Through today (power's spent-so-far): -$25.00" in result.output
 
 
+def test_txns_footer_drops_power_parity_claim_when_filtered(  # type: ignore[no-untyped-def]
+    tmp_path: Path, monkeypatch
+) -> None:
+    _isolate(monkeypatch, tmp_path)
+    today = date.today()
+
+    async def _seed(session: AsyncSession) -> None:
+        checking = await make_account(session, type=AccountType.checking)
+        await make_txn(
+            session, checking, amount_cents=-2500, merchant="Coffee Shop", posted_on=today
+        )
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["txns", "--merchant", "Coffee"])
+    assert result.exit_code == 0
+    assert "Counted as spend: -$25.00" in result.output
+    assert "Through today: -$25.00" in result.output
+    assert "power's spent-so-far" not in result.output
+
+
 def test_txns_month_and_start_are_mutually_exclusive(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     _isolate(monkeypatch, tmp_path)
     result = runner.invoke(app, ["txns", "--month", "2026-07", "--start", "2026-07-01"])

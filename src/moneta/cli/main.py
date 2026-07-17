@@ -384,10 +384,11 @@ def txns(
     console.print(table)
     console.print(f"Counted as spend: {fmt_outflow(r['counted_total_cents'])}")
     if r["through_today_cents"] is not None:
-        console.print(
-            f"[dim]Through today (power's spent-so-far): "
-            f"{fmt_outflow(r['through_today_cents'])}[/dim]"
-        )
+        if account is not None or merchant is not None:
+            label = "Through today"
+        else:
+            label = "Through today (power's spent-so-far)"
+        console.print(f"[dim]{label}: {fmt_outflow(r['through_today_cents'])}[/dim]")
 
 
 @app.command()

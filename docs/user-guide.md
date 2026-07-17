@@ -163,11 +163,15 @@ The footer has two lines:
 
 - `Counted as spend: -$X.YY` — always printed; the sum of every counted row in the
   requested range, regardless of date.
-- `Through today (power's spent-so-far): -$X.YY` (dim) — printed only when the requested
-  range includes today; sums counted rows dated on or before today. This is the number
-  that matches `moneta power`'s "Spent so far" exactly (both clamp to today). The first
-  line does *not* claim that parity — a full-month view includes future-dated rows that
-  `power` hasn't counted yet, and a past month has no "through today" concept at all.
+- `Through today: -$X.YY` (dim) — printed only when the requested range includes today;
+  sums counted rows dated on or before today. On the unfiltered current-month view (no
+  `--account`/`--merchant`) this line reads `Through today (power's spent-so-far): -$X.YY`
+  and is the number that matches `moneta power`'s "Spent so far" exactly (both clamp to
+  today, over every account). Add `--account` or `--merchant` and the parenthetical drops —
+  the total is now scoped to the filter, so it no longer equals `power`'s whole-portfolio
+  number even though it's still "through today" for that filter. The first line does *not*
+  claim any parity — a full-month view includes future-dated rows that `power` hasn't
+  counted yet, and a past month has no "through today" concept at all.
 
 ### `moneta networth`
 
