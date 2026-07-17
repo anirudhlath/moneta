@@ -2,7 +2,8 @@ import asyncio
 import json
 from calendar import monthrange
 from collections.abc import Awaitable, Callable
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -68,15 +69,145 @@ def test_networth_runs(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-
     assert "Net worth" in result.output
 
 
+def test_power_footer_absent_when_no_sync_has_run(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["power"])
+    assert result.exit_code == 0
+    assert "no successful sync yet" in result.output
+
+
+def test_power_footer_present_when_stale(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def seed(session: AsyncSession) -> None:
+        session.add(SyncRun(success=True, finished_at=datetime.now() - timedelta(hours=48)))
+
+    _seed_db(tmp_path, seed)
+    result = runner.invoke(app, ["power"])
+    assert result.exit_code == 0
+    assert "data as of" in result.output
+    assert "run moneta sync" in result.output
+
+
+def test_power_footer_absent_when_fresh(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def seed(session: AsyncSession) -> None:
+        session.add(SyncRun(success=True, finished_at=datetime.now()))
+
+    _seed_db(tmp_path, seed)
+    result = runner.invoke(app, ["power"])
+    assert result.exit_code == 0
+    assert "data as of" not in result.output
+    assert "no successful sync yet" not in result.output
+
+
+def test_networth_footer_present_when_stale(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def seed(session: AsyncSession) -> None:
+        session.add(SyncRun(success=True, finished_at=datetime.now() - timedelta(hours=48)))
+
+    _seed_db(tmp_path, seed)
+    result = runner.invoke(app, ["networth"])
+    assert result.exit_code == 0
+    assert "data as of" in result.output
+
+
+def test_networth_footer_absent_when_fresh(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def seed(session: AsyncSession) -> None:
+        session.add(SyncRun(success=True, finished_at=datetime.now()))
+
+    _seed_db(tmp_path, seed)
+    result = runner.invoke(app, ["networth"])
+    assert result.exit_code == 0
+    assert "data as of" not in result.output
+
+
 def test_sync_without_setup_fails_cleanly(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     _isolate(monkeypatch, tmp_path)
     result = runner.invoke(app, ["sync"])
     assert result.exit_code == 1
     assert "simplefin" in result.output
     assert "plaid" in result.output
+    # regression: the in-process progress sink (registered before the request) must
+    # survive build_app()'s own configure_logging() call, or its later removal in
+    # sync()'s finally raises ValueError and masks the clean typer.Exit(1) above
+    assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
-def test_sync_full_flag_requests_full_sync(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_remote_dead_port_connection_error_is_clean(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Ticket acceptance: a dead-port remote server must exit 1 with a clean message,
+    never a raw httpx traceback (design 2026-07-16 §4)."""
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("MONETA_API_URL", "http://127.0.0.1:1")  # nothing listens on port 1
+    result = runner.invoke(app, ["power"])
+    assert result.exit_code == 1
+    assert "could not reach" in result.output
+    assert "http://127.0.0.1:1" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_in_process_unreachable_aggregator_connection_error_is_clean(  # type: ignore[no-untyped-def]
+    tmp_path: Path, monkeypatch
+) -> None:
+    """In-process mode has no client socket of its own — the SimpleFIN adapter's
+    httpx call raises through the ASGI app instead; same clean-message contract."""
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv(
+        "MONETA_SIMPLEFIN_ACCESS_URL", "https://u:p@127.0.0.1:1/simplefin"
+    )  # nothing listens on port 1
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 1
+    assert "could not reach a configured aggregator" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_sync_in_process_progress_sink_is_registered_and_cleanly_removed(  # type: ignore[no-untyped-def]
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A real in-process sync must leave loguru exactly as configure_logging set it
+    up (stderr + file sink) — no leaked or double-removed progress sink."""
+    _isolate(monkeypatch, tmp_path)
+    import moneta.api as api_mod
+    from moneta.aggregator.base import AccountDTO, Snapshot
+
+    class FakeAdapter:
+        source = "fake"
+
+        async def fetch(self, since: date | None = None) -> Snapshot:
+            return Snapshot(
+                accounts=[
+                    AccountDTO(
+                        id="A-1",
+                        name="Checking",
+                        org_name="Bank",
+                        currency="USD",
+                        balance=Decimal("10.00"),
+                        balance_date=date.today(),
+                        source="fake",
+                    )
+                ],
+                transactions=[],
+                holdings=[],
+            )
+
+    monkeypatch.setattr(api_mod, "_build_adapters", lambda settings: [FakeAdapter()])
+    from loguru import logger
+
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 0
+    assert "Synced:" in result.output
+    # a fresh tmp_path config dir makes configure_logging wipe+reinstall exactly its
+    # own two sinks (stderr + file) — any extra handler means the progress sink leaked
+    assert len(logger._core.handlers) == 2  # type: ignore[attr-defined]
+
+
+def test_sync_full_flag_requests_full_sync(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)  # sync() now reads settings.api_url too — must not
+    # pick up a real developer config
     calls: list[tuple[str, str, Any]] = []
 
     def fake_request(
@@ -121,6 +252,27 @@ def test_import_vesting(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no
 def test_set_promo_invalid_date_fails_cleanly(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     _isolate(monkeypatch, tmp_path)
     result = runner.invoke(app, ["accounts", "--set-promo", "1", "not-a-date"])
+    assert result.exit_code == 1
+    assert "invalid date" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_set_promo_bad_date_leaves_set_type_unapplied(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """design 2026-07-16 §7: --set-promo's date is validated BEFORE any PATCH
+    fires, so a bad date must leave --set-type unapplied too (no partial mutation)."""
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        raise AssertionError("request must not be called when --set-promo's date is invalid")
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(
+        app, ["accounts", "--set-type", "1", "savings", "--set-promo", "1", "not-a-date"]
+    )
     assert result.exit_code == 1
     assert "invalid date" in result.output
     assert "Traceback" not in result.output
@@ -274,6 +426,36 @@ def test_recurring_habit_and_re_review_flags_post(monkeypatch) -> None:  # type:
     assert "reopened" in result.output
 
 
+def test_recurring_reactivate_flag_patches_active(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[tuple[str, str, Any, Any]] = []
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        calls.append((method, path, json_body, params))
+        if method == "GET":
+            return []
+        return {"ok": True}
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["recurring", "--reactivate", "11"])
+    assert result.exit_code == 0
+    assert ("PATCH", "/recurring/11", {"status": "active"}, None) in calls
+    assert "reactivated" in result.output.lower()
+    assert "Traceback" not in result.output
+
+
+def test_recurring_reactivate_unknown_id_is_clean_404(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["recurring", "--reactivate", "999999"])
+    assert result.exit_code == 1
+    assert "Error" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_recurring_overrule_flags_mutually_exclusive(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     calls: list[tuple[str, str]] = []
 
@@ -289,13 +471,20 @@ def test_recurring_overrule_flags_mutually_exclusive(monkeypatch) -> None:  # ty
     monkeypatch.setattr("moneta.cli.main.request", fake_request)
     result = runner.invoke(app, ["recurring", "--not-a-bill", "4", "--habit", "5"])
     assert result.exit_code == 1
-    assert "mutually exclusive" in result.output
+    # normalize whitespace: rich soft-wraps the long flag list, so a newline can
+    # land inside "mutually exclusive" depending on terminal width
+    assert "mutually exclusive" in " ".join(result.output.split())
     assert "Traceback" not in result.output
     assert calls == []
 
     result = runner.invoke(app, ["recurring", "--end", "4", "--re-review", "5"])
     assert result.exit_code == 1
-    assert "mutually exclusive" in result.output
+    assert "mutually exclusive" in " ".join(result.output.split())
+    assert calls == []
+
+    result = runner.invoke(app, ["recurring", "--end", "4", "--reactivate", "5"])
+    assert result.exit_code == 1
+    assert "mutually exclusive" in " ".join(result.output.split())
     assert calls == []
 
 
@@ -949,7 +1138,9 @@ def test_renormalize_command_runs(tmp_path: Path, monkeypatch) -> None:  # type:
     assert "Updated 0 merchant name(s)" in result.output
 
 
-def test_sync_prints_verification_line(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_sync_prints_verification_line(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
     def fake_request(
         method: str,
         path: str,
@@ -971,6 +1162,65 @@ def test_sync_prints_verification_line(monkeypatch) -> None:  # type: ignore[no-
     result = runner.invoke(app, ["sync"])
     assert result.exit_code == 0
     assert "LLM verified 2 series; flagged 1 for review." in result.output
+
+
+def test_sync_prints_warnings(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        if path == "/sync":
+            return {
+                "ingest": {"new_transactions": 0},
+                "transfers": {"linked": 0},
+                "recurring": {"new_series": 0},
+                "events": 0,
+                "auto_resolved": 0,
+                "verify": {"verified": 0, "flagged": 0},
+                "warnings": [
+                    "simplefin: bridge error: re-authenticate at the institution",
+                    "Plaid item Old Bank skipped (ITEM_LOGIN_REQUIRED: re-link)"
+                    " — re-link with: moneta setup plaid-link",
+                ],
+            }
+        return []
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 0
+    assert "⚠ simplefin: bridge error: re-authenticate at the institution" in result.output
+    assert "⚠ Plaid item Old Bank skipped" in result.output
+
+
+def test_sync_omits_warnings_section_when_healthy(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        if path == "/sync":
+            return {
+                "ingest": {"new_transactions": 0},
+                "transfers": {"linked": 0},
+                "recurring": {"new_series": 0},
+                "events": 0,
+                "auto_resolved": 0,
+                "verify": {"verified": 0, "flagged": 0},
+                "warnings": [],
+            }
+        return []
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 0
+    assert "⚠" not in result.output
 
 
 def _seed_price_change_review(tmp_path: Path) -> None:
@@ -1122,6 +1372,47 @@ def test_status_before_any_sync(tmp_path: Path, monkeypatch) -> None:  # type: i
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0
     assert "No sync has run yet" in result.output
+
+
+def test_status_shows_accounts_and_configured_sources(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("MONETA_SIMPLEFIN_ACCESS_URL", "https://user:pass@bridge.example/simplefin")
+
+    async def seed(session: AsyncSession) -> None:
+        await make_account(session)
+
+    _seed_db(tmp_path, seed)
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert "Accounts: 1" in result.output
+    assert "simplefin" in result.output
+    assert "LLM: not configured" in result.output
+    # never echo secrets
+    assert "user:pass" not in result.output
+    assert "bridge.example" not in result.output
+
+
+def test_status_renders_last_sync_warnings(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def seed(session: AsyncSession) -> None:
+        session.add(
+            SyncRun(
+                finished_at=datetime.now(),
+                success=True,
+                report={
+                    "ingest": {"new_transactions": 0},
+                    "recurring": {"new_series": 0},
+                    "events": 0,
+                    "warnings": ["simplefin: Auth required for Apple Card"],
+                },
+            )
+        )
+
+    _seed_db(tmp_path, seed)
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert "Auth required for Apple Card" in result.output
 
 
 def test_status_shows_in_flight_sync_as_incomplete(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -1386,7 +1677,12 @@ def test_status_json_output_null_before_any_sync(  # type: ignore[no-untyped-def
     _isolate(monkeypatch, tmp_path)
     result = runner.invoke(app, ["status", "--json"])
     assert result.exit_code == 0
-    assert result.stdout.strip() == "null"
+    body = json.loads(result.stdout)
+    assert body["last_sync_at"] is None
+    assert body["last_sync_ok"] is None
+    assert body["accounts"] == 0
+    assert body["open_reviews"] == 0
+    assert body["last_sync"] is None
 
 
 def test_status_json_output_with_sync(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -1399,7 +1695,8 @@ def test_status_json_output_with_sync(tmp_path: Path, monkeypatch) -> None:  # t
     result = runner.invoke(app, ["status", "--json"])
     assert result.exit_code == 0
     body = json.loads(result.stdout)
-    assert body["status"] == "incomplete"
+    assert body["last_sync"]["status"] == "incomplete"
+    assert body["last_sync_ok"] is None  # unfinished: unknown, not a failure
 
 
 def test_recurring_json_with_write_flag_errors_before_request(monkeypatch) -> None:  # type: ignore[no-untyped-def]

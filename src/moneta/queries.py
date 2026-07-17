@@ -9,14 +9,14 @@ re-scan TransferLink and rebuild their own txn->account/type/series maps.
 
 import statistics
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.cadence import match_cadence
-from moneta.models import Account, AccountType, Cadence, Transaction, TransferLink
+from moneta.models import Account, AccountType, Cadence, SyncRun, Transaction, TransferLink
 
 
 @dataclass(frozen=True)
@@ -43,6 +43,17 @@ async def primary_currency(session: AsyncSession) -> str:
     if not counts:
         return "USD"
     return max(counts, key=lambda r: (r[1], r[0] == "USD", r[0]))[0]
+
+
+async def latest_successful_sync_at(session: AsyncSession) -> datetime | None:
+    """Newest successful SyncRun.finished_at — the staleness clock power/networth
+    report as `data_as_of`. A failed run may have rolled back mid-sync, so only a
+    success reflects what the current tables actually show."""
+    return (
+        await session.execute(
+            select(func.max(SyncRun.finished_at)).where(SyncRun.success.is_(True))
+        )
+    ).scalar_one_or_none()
 
 
 async def account_type_map(session: AsyncSession) -> dict[int, AccountType]:

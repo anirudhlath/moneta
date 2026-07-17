@@ -1,10 +1,10 @@
 import asyncio
-from collections.abc import Awaitable, Iterable, Sequence
+from collections.abc import Awaitable, Iterable
 from datetime import date
 from decimal import Decimal
 from typing import Any, Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from moneta.models import AccountType
 
@@ -17,6 +17,7 @@ class AccountDTO(BaseModel):
     balance: Decimal
     balance_date: date
     type_hint: AccountType | None = None
+    source: str = ""
 
 
 class TransactionDTO(BaseModel):
@@ -39,10 +40,24 @@ class Snapshot(BaseModel):
     accounts: list[AccountDTO]
     transactions: list[TransactionDTO]
     holdings: list[HoldingDTO]
+    warnings: list[str] = Field(default_factory=list)
 
 
 class AggregatorAdapter(Protocol):
+    @property
+    def source(self) -> str: ...  # "simplefin" / "plaid" / a test fake's own name
+
     async def fetch(self, since: date | None = None) -> Snapshot: ...
+
+
+def concat_snapshots(snaps: list[Snapshot]) -> Snapshot:
+    """Merge snapshots into one, concatenating all four fields in order."""
+    return Snapshot(
+        accounts=[a for s in snaps for a in s.accounts],
+        transactions=[t for s in snaps for t in s.transactions],
+        holdings=[h for s in snaps for h in s.holdings],
+        warnings=[w for s in snaps for w in s.warnings],
+    )
 
 
 async def gather_snapshots(fetches: Iterable[Awaitable[Snapshot]]) -> Snapshot:
@@ -56,18 +71,4 @@ async def gather_snapshots(fetches: Iterable[Awaitable[Snapshot]]) -> Snapshot:
         if isinstance(r, BaseException):
             raise r
     snaps = [r for r in results if isinstance(r, Snapshot)]
-    return Snapshot(
-        accounts=[a for s in snaps for a in s.accounts],
-        transactions=[t for s in snaps for t in s.transactions],
-        holdings=[h for s in snaps for h in s.holdings],
-    )
-
-
-class MergedAdapter:
-    """Fans fetch() out to several adapters and concatenates their snapshots."""
-
-    def __init__(self, adapters: Sequence[AggregatorAdapter]) -> None:
-        self._adapters = list(adapters)
-
-    async def fetch(self, since: date | None = None) -> Snapshot:
-        return await gather_snapshots(a.fetch(since) for a in self._adapters)
+    return concat_snapshots(snaps)

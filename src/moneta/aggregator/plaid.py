@@ -192,6 +192,7 @@ def _parse_account(acct: dict[str, Any], org_name: str) -> AccountDTO:
         balance=balance,
         balance_date=balance_date,
         type_hint=_map_type(acct.get("type", ""), acct.get("subtype")),
+        source="plaid",
     )
 
 
@@ -199,6 +200,10 @@ class PlaidAdapter:
     def __init__(self, client: PlaidClient, items: list[PlaidItem]) -> None:
         self._client = client
         self._items = items
+
+    @property
+    def source(self) -> str:
+        return "plaid"
 
     async def fetch(self, since: date | None = None) -> Snapshot:
         # `since` is deliberately ignored: /transactions/sync replays from an empty
@@ -220,13 +225,9 @@ class PlaidAdapter:
                 if exc.error_code == "ITEM_LOGIN_REQUIRED"
                 else ""
             )
-            logger.warning(
-                "Plaid item {} skipped ({}){}",
-                item.institution_name or item.item_id,
-                exc,
-                hint,
-            )
-            return Snapshot(accounts=[], transactions=[], holdings=[])
+            message = f"Plaid item {item.institution_name or item.item_id} skipped ({exc}){hint}"
+            logger.warning(message)
+            return Snapshot(accounts=[], transactions=[], holdings=[], warnings=[message])
 
     async def _fetch_item(self, item: PlaidItem) -> Snapshot:
         # Built locally and merged only on success: a skipped item must not leave

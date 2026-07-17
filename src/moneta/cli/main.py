@@ -1,9 +1,11 @@
 import json
-from datetime import date
+from contextlib import suppress
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
+from loguru import logger
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
@@ -12,6 +14,8 @@ from moneta.cadence import month_bounds
 from moneta.cli.client import request
 
 if TYPE_CHECKING:
+    from loguru import Message
+
     from moneta.aggregator.plaid import PlaidClient
     from moneta.config import Settings
 
@@ -44,6 +48,20 @@ def fmt_outflow(magnitude_cents: int) -> str:
 
 
 _CADENCE_PHRASE = {"weekly": "every week", "biweekly": "every 2 weeks", "annual": "every year"}
+
+_STALE_AFTER = timedelta(hours=24)
+
+
+def _staleness_footer(data_as_of: str | None) -> str | None:
+    """Dim footer text for power/networth when the underlying data is stale (design
+    2026-07-16 §3): None when no successful sync has ever run, or when the newest
+    successful sync is older than 24h. Returns None (no footer) when fresh."""
+    if data_as_of is None:
+        return "no successful sync yet — run moneta sync"
+    as_of = datetime.fromisoformat(data_as_of)
+    if datetime.now() - as_of > _STALE_AFTER:
+        return f"data as of {as_of.date().isoformat()} — run moneta sync"
+    return None
 
 
 def _series_line_amount(line: dict[str, Any]) -> str:
@@ -91,7 +109,37 @@ def sync(
     ] = False,
 ) -> None:
     """Pull latest data and run all pipelines."""
-    report = request("POST", "/sync", params={"full": True} if full else None)
+    from moneta.config import load_settings
+
+    settings = load_settings()
+    in_process = not settings.api_url  # remote mode: spinner only, no local sink to read
+    if in_process:
+        # build_app() calls this too, but only the first call per directory does
+        # anything (it's idempotent) — calling it here first means the later,
+        # no-op call won't logger.remove() out from under the sink we add next
+        from moneta.logs import configure_logging
+
+        configure_logging(settings.config_dir)
+    with console.status("Syncing…") as live:
+        sink_id: int | None = None
+        if in_process:
+
+            def _show_progress(message: "Message") -> None:
+                live.update(f"Syncing… {message.record['message']}")
+
+            sink_id = logger.add(
+                _show_progress,
+                level="INFO",
+                filter=lambda record: (record["name"] or "").startswith("moneta.aggregator"),
+            )
+        try:
+            report = request("POST", "/sync", params={"full": True} if full else None)
+        finally:
+            if sink_id is not None:
+                # already removed (e.g. configure_logging reset sinks mid-sync) — ordering-
+                # independent robustness, not a hidden failure mode
+                with suppress(ValueError):
+                    logger.remove(sink_id)
     console.print(
         f"Synced: [bold]{report['ingest']['new_transactions']}[/bold] new transactions, "
         f"{report['transfers']['linked']} transfers linked, "
@@ -109,6 +157,8 @@ def sync(
         console.print(
             f"{report['ingest']['updated_transactions']} transaction(s) corrected upstream."
         )
+    for warning in report.get("warnings", []):
+        console.print(f"[yellow]⚠ {warning}[/yellow]")
     open_reviews = request("GET", "/review")
     if open_reviews:
         console.print(f"[yellow]{len(open_reviews)} items need review:[/yellow] moneta review")
@@ -116,25 +166,40 @@ def sync(
 
 @app.command()
 def status(json_output: JsonOption = False) -> None:
-    """Show the most recent sync run and its outcome."""
-    r = request("GET", "/sync/last")
-    if emit_json(r, json_output):
+    """Show overall health (accounts, review queue, configured sources) plus the
+    most recent sync run's outcome."""
+    st = request("GET", "/status")
+    last = request("GET", "/sync/last")
+    if json_output:
+        print(json.dumps({**st, "last_sync": last}))
         return
-    if not r:
+    if not last:
         console.print("No sync has run yet. Run: [bold]moneta sync[/bold]")
-        return
-    outcome = {
-        "ok": "[green]ok[/green]",
-        "failed": f"[red]failed[/red] — {r['error']}",
-        "incomplete": "[yellow]incomplete[/yellow] — still running, or the process died mid-sync",
-    }[r["status"]]
-    console.print(f"Last sync: {r['started_at']} → {outcome}")
-    if r["report"]:
-        rep = r["report"]
-        console.print(
-            f"  {rep['ingest']['new_transactions']} new txns, "
-            f"{rep['recurring']['new_series']} new series, {rep['events']} events"
-        )
+    else:
+        outcome = {
+            "ok": "[green]ok[/green]",
+            "failed": f"[red]failed[/red] — {last['error']}",
+            "incomplete": (
+                "[yellow]incomplete[/yellow] — still running, or the process died mid-sync"
+            ),
+        }[last["status"]]
+        console.print(f"Last sync: {last['started_at']} → {outcome}")
+        if last["report"]:
+            rep = last["report"]
+            console.print(
+                f"  {rep['ingest']['new_transactions']} new txns, "
+                f"{rep['recurring']['new_series']} new series, {rep['events']} events"
+            )
+            for warning in rep.get("warnings", []):
+                console.print(f"  [yellow]⚠ {warning}[/yellow]")
+    aggregators = (
+        ", ".join(st["aggregators"]) if st["aggregators"] else "[dim]none configured[/dim]"
+    )
+    console.print(
+        f"Accounts: {st['accounts']}  ·  Open review items: {st['open_reviews']}\n"
+        f"Aggregators: {aggregators}  ·  "
+        f"LLM: {'configured' if st['llm_configured'] else 'not configured'}"
+    )
 
 
 @app.command()
@@ -186,6 +251,8 @@ def power(
             for u in r["upcoming"]
         ]
         console.print(f"[dim]Upcoming this month: {' · '.join(parts)}[/dim]")
+    if footer := _staleness_footer(r.get("data_as_of")):
+        console.print(f"[dim]{footer}[/dim]")
 
 
 @app.command()
@@ -211,6 +278,8 @@ def networth(json_output: JsonOption = False) -> None:
             f"[yellow]{r['foreign_accounts']} account(s) in a non-primary currency are "
             f"excluded from these totals[/yellow]"
         )
+    if footer := _staleness_footer(r.get("data_as_of")):
+        console.print(f"[dim]{footer}[/dim]")
 
 
 @app.command()
@@ -233,24 +302,31 @@ def recurring(
         int | None,
         typer.Option("--re-review", help="Reopen the series' bill/habit review question."),
     ] = None,
+    reactivate: Annotated[
+        int | None,
+        typer.Option("--reactivate", help="Reactivate an ended series."),
+    ] = None,
     json_output: JsonOption = False,
 ) -> None:
     """List detected recurring series (or recent events with --events).
 
-    --end ID cancels a series. --not-a-bill / --habit / --re-review ID overrule
-    detection instead; all four are mutually exclusive with each other.
+    --end ID cancels a series. --not-a-bill / --habit / --re-review / --reactivate
+    ID overrule detection instead; all five are mutually exclusive with each other.
     """
-    overrules = [v for v in (end, not_a_bill, habit, re_review) if v is not None]
+    overrules = [v for v in (end, not_a_bill, habit, re_review, reactivate) if v is not None]
     if len(overrules) > 1:
         console.print(
-            "[red]Error:[/red] --end, --not-a-bill, --habit, and --re-review "
-            "are mutually exclusive."
+            "[red]Error:[/red] --end, --not-a-bill, --habit, --re-review, and "
+            "--reactivate are mutually exclusive."
         )
         raise typer.Exit(1)
-    reject_json_with_writes(json_output, end, not_a_bill, habit, re_review)
+    reject_json_with_writes(json_output, end, not_a_bill, habit, re_review, reactivate)
     if end is not None:
         request("PATCH", f"/recurring/{end}", {"status": "ended"})
         console.print(f"[green]Series {end} ended.[/green]")
+    if reactivate is not None:
+        request("PATCH", f"/recurring/{reactivate}", {"status": "active"})
+        console.print(f"[green]Series {reactivate} reactivated.[/green]")
     if not_a_bill is not None:
         request("POST", f"/recurring/{not_a_bill}/not-a-bill")
         console.print(
@@ -433,10 +509,12 @@ def accounts(
     """List accounts. Flags: --set-type ID TYPE, --set-promo ID YYYY-MM-DD,
     --set-financing ID true|false."""
     reject_json_with_writes(json_output, set_type, set_promo, set_financing)
+    # Validate --set-promo's date BEFORE firing any PATCH: an invalid date must
+    # leave --set-type unapplied too, not partially mutate the account server-side.
+    promo = _parse_iso_date(set_promo[1]) if set_promo else None
     if set_type:
         request("PATCH", f"/accounts/{set_type[0]}", {"type": set_type[1]})
     if set_promo:
-        promo = _parse_iso_date(set_promo[1])
         request("PATCH", f"/accounts/{set_promo[0]}", {"promo_expires_on": promo})
     if set_financing:
         financing_mode = _parse_bool_flag(set_financing[1])

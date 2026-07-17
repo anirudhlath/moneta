@@ -1,5 +1,5 @@
 from collections.abc import Iterable
-from datetime import date
+from datetime import date, datetime
 
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -15,7 +15,12 @@ from moneta.models import (
     SeriesStatus,
     Transaction,
 )
-from moneta.queries import classified_links, loan_payment_stats, primary_currency
+from moneta.queries import (
+    classified_links,
+    latest_successful_sync_at,
+    loan_payment_stats,
+    primary_currency,
+)
 from moneta.views.transactions import link_field, spend_reason
 
 
@@ -44,6 +49,7 @@ class PowerReport(BaseModel):
     days_left: int
     per_day_remaining_cents: int
     upcoming: list[UpcomingCharge]
+    data_as_of: datetime | None  # newest successful SyncRun.finished_at (design 2026-07-16 §3)
 
 
 def _series_lines(series: Iterable[RecurringSeries]) -> tuple[list[SeriesLine], int]:
@@ -179,6 +185,7 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
     power = monthly_income - total_fixed
     remaining = power - spent_cents
     days_left = (month_end - today).days + 1
+    data_as_of = await latest_successful_sync_at(session)
     return PowerReport(
         month=f"{today.year:04d}-{today.month:02d}",
         monthly_income_cents=monthly_income,
@@ -191,4 +198,5 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
         days_left=days_left,
         per_day_remaining_cents=round(remaining / days_left),
         upcoming=upcoming,
+        data_as_of=data_as_of,
     )

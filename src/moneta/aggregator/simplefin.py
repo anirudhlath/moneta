@@ -1,6 +1,7 @@
 """SimpleFIN Bridge adapter. Protocol docs: https://www.simplefin.org/protocol.html"""
 
 import base64
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -39,6 +40,10 @@ def _date_to_ts(d: date) -> int:
     return int(datetime(d.year, d.month, d.day, tzinfo=UTC).timestamp())
 
 
+def _default_today() -> date:
+    return datetime.now(UTC).date()
+
+
 async def claim_setup_token(token: str, client: httpx.AsyncClient | None = None) -> str:
     claim_url = base64.b64decode(token).decode()
     own = client or httpx.AsyncClient()
@@ -52,9 +57,19 @@ async def claim_setup_token(token: str, client: httpx.AsyncClient | None = None)
 
 
 class SimpleFINAdapter:
-    def __init__(self, access_url: str, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        access_url: str,
+        client: httpx.AsyncClient | None = None,
+        today: Callable[[], date] | None = None,
+    ) -> None:
         self._url, self._auth = _split_auth(access_url)
         self._client = client
+        self._today = today
+
+    @property
+    def source(self) -> str:
+        return "simplefin"
 
     async def fetch(self, since: date | None = None) -> Snapshot:
         own = self._client or httpx.AsyncClient()
@@ -68,9 +83,11 @@ class SimpleFINAdapter:
             # would put the exclusive end-date in the past, clipping today's txns.
             # max(…, since) guarantees at least one window even for a future `since`,
             # so account balances always refresh.
-            end = max(datetime.now(UTC).date(), since) + timedelta(days=1)
+            today = (self._today or _default_today)()
+            end = max(today, since) + timedelta(days=1)
             while end > since and empty_streak < _MAX_EMPTY_WINDOWS:
                 start = max(since, end - timedelta(days=_WINDOW_DAYS))
+                logger.info("SimpleFIN: fetching {} – {}", start, end)
                 window = _parse_snapshot(
                     await self._get(
                         own,
@@ -88,6 +105,7 @@ class SimpleFINAdapter:
                     snap.transactions = fresh
                 else:
                     snap.transactions.extend(fresh)
+                    snap.warnings.extend(window.warnings)
                 empty_streak = 0 if fresh else empty_streak + 1
                 end = start
             return snap or Snapshot(accounts=[], transactions=[], holdings=[])
@@ -117,6 +135,7 @@ def _parse_snapshot(data: dict[str, Any]) -> Snapshot:
                 currency=acct.get("currency", "USD"),
                 balance=Decimal(acct["balance"]),
                 balance_date=_ts_to_date(acct["balance-date"]),
+                source="simplefin",
             )
         )
         for txn in acct.get("transactions", []):
@@ -141,4 +160,7 @@ def _parse_snapshot(data: dict[str, Any]) -> Snapshot:
                     market_value=Decimal(h.get("market_value", "0")),
                 )
             )
-    return Snapshot(accounts=accounts, transactions=transactions, holdings=holdings)
+    warnings = [f"simplefin: {err}" for err in data.get("errors", [])]
+    return Snapshot(
+        accounts=accounts, transactions=transactions, holdings=holdings, warnings=warnings
+    )

@@ -9,10 +9,10 @@ from typing import Annotated, Any, Literal
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from loguru import logger
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from moneta.aggregator.base import AggregatorAdapter, MergedAdapter
+from moneta.aggregator.base import AggregatorAdapter
 from moneta.aggregator.plaid import PlaidAdapter, PlaidClient, items_path, load_items
 from moneta.aggregator.simplefin import SimpleFINAdapter
 from moneta.cadence import month_bounds
@@ -30,6 +30,7 @@ from moneta.models import (
     SeriesEvent,
     SeriesStatus,
     SyncRun,
+    TransferLink,
     recurring_cluster_item,
 )
 from moneta.pipelines.normalize import renormalize_merchants
@@ -130,6 +131,15 @@ class TransactionsReport(BaseModel):
     transactions: list[TxnRow]
 
 
+class StatusOut(BaseModel):
+    last_sync_at: datetime | None
+    last_sync_ok: bool | None
+    accounts: int
+    open_reviews: int
+    aggregators: list[str]
+    llm_configured: bool
+
+
 class SyncRunOut(BaseModel):
     status: Literal["ok", "failed", "incomplete"]
     started_at: datetime
@@ -143,9 +153,17 @@ class BackupIn(BaseModel):
     dest: str | None = None
 
 
+async def _latest_sync_run(session: AsyncSession) -> SyncRun | None:
+    """The newest `SyncRun` row, or None before any sync has run. Shared by
+    /sync/last and /status so the "most recent run" query lives in one place."""
+    return (
+        await session.execute(select(SyncRun).order_by(SyncRun.id.desc()).limit(1))
+    ).scalar_one_or_none()
+
+
 def create_app(
     sessionmaker: async_sessionmaker[AsyncSession],
-    adapter: AggregatorAdapter | None,
+    adapters: list[AggregatorAdapter],
     llm: Classifier | None,
     engine: AsyncEngine | None = None,
     api_token: str | None = None,
@@ -188,7 +206,7 @@ def create_app(
 
     @app.post("/sync")
     async def sync(session: Session, full: bool = False) -> SyncReport:
-        if adapter is None:
+        if not adapters:
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -196,13 +214,11 @@ def create_app(
                     "moneta setup simplefin <token> or moneta setup plaid <client_id> <secret>"
                 ),
             )
-        return await run_sync(session, adapter, llm, today=date.today(), full=full)
+        return await run_sync(session, adapters, llm, today=date.today(), full=full)
 
     @app.get("/sync/last")
     async def sync_last(session: Session) -> SyncRunOut | None:
-        row = (
-            await session.execute(select(SyncRun).order_by(SyncRun.id.desc()).limit(1))
-        ).scalar_one_or_none()
+        row = await _latest_sync_run(session)
         if row is None:
             return None
         # the outcome rule lives here, not in each consumer: an unfinished row means
@@ -218,6 +234,35 @@ def create_app(
             success=row.success,
             error=row.error,
             report=row.report,
+        )
+
+    @app.get("/status")
+    async def status(session: Session) -> StatusOut:
+        """Overall health: booleans/counters only, never secrets (design 2026-07-16 §3)."""
+        last_run = await _latest_sync_run(session)
+        last_sync_at = last_run.finished_at if last_run is not None else None
+        # last_sync_ok is unknown (None), not False, while the newest run is still in
+        # flight — a bare boolean would misreport an unfinished sync as a failure
+        last_sync_ok = (
+            last_run.success if last_run is not None and last_run.finished_at is not None else None
+        )
+        accounts_count = (
+            await session.execute(select(func.count()).select_from(Account))
+        ).scalar_one()
+        open_reviews_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(ReviewItem)
+                .where(ReviewItem.status == ReviewStatus.open)
+            )
+        ).scalar_one()
+        return StatusOut(
+            last_sync_at=last_sync_at,
+            last_sync_ok=last_sync_ok,
+            accounts=accounts_count,
+            open_reviews=open_reviews_count,
+            aggregators=[a.source for a in adapters],
+            llm_configured=llm is not None,
         )
 
     @app.get("/power")
@@ -473,6 +518,24 @@ def create_app(
         required = _REQUIRED_BOOL.get(item.kind)
         if required is not None and not isinstance(body.resolution.get(required), bool):
             raise HTTPException(status_code=422, detail=f"resolution.{required} must be a bool")
+        if item.kind == ReviewKind.transfer_pair:
+            outflow_id = item.payload.get("outflow_id")
+            inflow_id = body.resolution.get("inflow_id")
+            legs = []
+            if isinstance(outflow_id, int):
+                legs.append(TransferLink.outflow_id == outflow_id)
+            if isinstance(inflow_id, int):
+                legs.append(TransferLink.inflow_id == inflow_id)
+            # .first(), not scalar_one_or_none(): each leg can already be linked in a
+            # SEPARATE row (e.g. a greedy-loser item resolved after both legs were
+            # linked elsewhere) — two matches must still 409, not MultipleResultsFound.
+            existing_link = (
+                (await session.execute(select(TransferLink).where(or_(*legs)))).scalars().first()
+                if legs
+                else None
+            )
+            if existing_link is not None:
+                raise HTTPException(status_code=409, detail="transaction already linked")
         await apply_resolution(session, item, body.resolution, resolved_by="manual")
         await session.commit()
         return {"ok": True}
@@ -514,7 +577,7 @@ def create_app(
     return app
 
 
-def _build_adapter(settings: Settings) -> AggregatorAdapter | None:
+def _build_adapters(settings: Settings) -> list[AggregatorAdapter]:
     adapters: list[AggregatorAdapter] = []
     if settings.simplefin_access_url:
         adapters.append(SimpleFINAdapter(settings.simplefin_access_url))
@@ -535,9 +598,7 @@ def _build_adapter(settings: Settings) -> AggregatorAdapter | None:
                     items,
                 )
             )
-    if not adapters:
-        return None
-    return adapters[0] if len(adapters) == 1 else MergedAdapter(adapters)
+    return adapters
 
 
 def build_app() -> FastAPI:
@@ -547,7 +608,7 @@ def build_app() -> FastAPI:
     engine, sessionmaker = make_sessionmaker(f"sqlite+aiosqlite:///{settings.db_path}")
     return create_app(
         sessionmaker,
-        _build_adapter(settings),
+        _build_adapters(settings),
         build_classifier(settings.llm_model),
         engine=engine,
         api_token=settings.api_token,

@@ -12,6 +12,8 @@ This guide covers day-to-day usage. For what the product is and why, see the [PR
 - [Quickstart](#quickstart)
 - [Connecting data sources](#connecting-data-sources)
 - [Syncing](#syncing)
+  - [`moneta status`](#moneta-status)
+  - [Staleness footers](#staleness-footers)
 - [Reading the numbers](#reading-the-numbers)
 - [The review queue](#the-review-queue)
 - [LLM assist (optional)](#llm-assist-optional)
@@ -85,23 +87,109 @@ Notes:
 
 ```bash
 moneta sync            # incremental: resumes from your newest transaction (with overlap)
-moneta sync --full     # re-pull all history — use after linking a new SimpleFIN account
-moneta status          # did the last sync work? when, success/failure, what changed
+moneta sync --full     # re-pull all history — use after linking a new source
+moneta status          # is data fresh? did the last sync work? what changed
 ```
 
 A sync runs the full pipeline: ingest → merchant normalization → transfer dedup →
 financing-account detection → LLM auto-review → recurring detection → LLM verification →
 series events. The summary line tells you what changed (new transactions, transfers linked,
 new series, events); if items need your attention (including a financing check) it points
-you at `moneta review`.
+you at `moneta review`. While a sync is running, the terminal shows a `Syncing…` spinner;
+running in-process (the default, no `MONETA_API_URL`) the spinner also live-updates with the
+current fetch window (e.g. `Syncing… SimpleFIN: fetching 2026-05-01 – 2026-06-15`) so a long
+first sync isn't a silent wait. Pointed at a remote server (`MONETA_API_URL` set) you only see
+the spinner — the fetch itself is happening on the server, out of the client's view.
+
+Each configured source (SimpleFIN, Plaid, ...) syncs on its **own** incremental window,
+computed from that source's own newest stored transaction — not a single global window. This
+means a SimpleFIN outage, or a bank that's been silently failing for weeks, self-heals on the
+next successful sync instead of staying masked by Plaid's daily full-history replay. The
+tradeoff: a brand-new source's first-ever sync on an already-populated database inherits the
+existing global newest date as its starting point rather than pulling full history — run
+`moneta sync --full` once after adding a new source to be sure you have everything.
+
+If a source fails to fetch (bad credentials, bridge down, network error) but at least one
+other configured source succeeds, the sync still completes — the failure is reported as a
+yellow warning, not a hard failure:
+
+```
+Synced: 12 new transactions, 1 transfers linked, 0 new series, 0 events.
+⚠ simplefin: ConnectError: [Errno 61] Connection refused
+```
+
+(A real example: a Plaid item losing its login shows `⚠ Plaid item Apple Card skipped
+(ITEM_LOGIN_REQUIRED) — re-link with: moneta setup plaid-link` — previously this only reached
+the log file; now it's visible in the sync summary the moment it happens.) Only when **every**
+configured source fails does the sync itself fail (nothing gets ingested, so `moneta status`
+correctly reports the run as failed rather than a quiet success over an empty pull).
 
 Every sync is recorded — success or failure — and a failed sync leaves your data untouched.
+
+If the CLI can't reach the server (remote mode) or the aggregator itself can't be reached
+(in-process mode, e.g. SimpleFIN unreachable), you get a clean one-line error instead of a
+traceback: `Error: could not reach http://your-server:8300 (...)` or
+`Error: could not reach a configured aggregator (...)`, followed by a non-zero exit.
 
 There is no built-in scheduler. To sync nightly, use cron/launchd, e.g.:
 
 ```
 0 6 * * * cd ~/code/private/moneta && uv run moneta sync
 ```
+
+### `moneta status`
+
+One command answers both "is moneta healthy?" and "did last night's sync work?":
+
+```bash
+moneta status
+```
+
+```
+Last sync: 2026-07-16T06:00:03 → ok
+  12 new txns, 1 new series, 0 events
+Accounts: 8  ·  Open review items: 2
+Aggregators: simplefin, plaid  ·  LLM: configured
+```
+
+The first two lines come from the most recent sync run (as before): timestamp, outcome
+(`ok` / `failed` — with the error / `incomplete` — still running or the process died
+mid-sync), and a one-line summary of what changed. The last two lines are new: total
+accounts, open review-queue items, which sources are configured (`aggregators`, from
+`AggregatorAdapter.source` — `simplefin` and/or `plaid`), and whether an LLM is configured.
+These are booleans/counts only — never credentials. On a fresh database with no sync yet,
+you still see the accounts/reviews/aggregators/LLM summary; only the "Last sync" line is
+replaced with "No sync has run yet."
+
+`moneta status --json` merges both API calls into one object: the `/status` fields
+(`last_sync_at`, `last_sync_ok`, `accounts`, `open_reviews`, `aggregators`, `llm_configured`)
+plus a `last_sync` key holding the full `/sync/last` detail (`null` if no sync has ever run):
+
+```json
+{"last_sync_at": "2026-07-16T06:00:03", "last_sync_ok": true, "accounts": 8,
+ "open_reviews": 2, "aggregators": ["simplefin", "plaid"], "llm_configured": true,
+ "last_sync": {"status": "ok", "started_at": "...", "finished_at": "...",
+               "success": true, "error": null, "report": {...}}}
+```
+
+### Staleness footers
+
+`moneta power` and `moneta networth` print a dim footer whenever the data behind them isn't
+fresh — either no sync has ever succeeded, or the newest successful sync is more than 24 hours
+old:
+
+```
+data as of 2026-07-14 — run moneta sync
+```
+
+or, on a database that's never synced:
+
+```
+no successful sync yet — run moneta sync
+```
+
+The footer is silent (nothing printed) once you've synced within the last 24 hours — it only
+speaks up when the numbers you're looking at might be stale.
 
 ## Reading the numbers
 
@@ -192,21 +280,28 @@ moneta recurring --end <ID>       # cancel a series you know is over (IDs are in
 moneta recurring --not-a-bill <ID> # override: not recurring — ends the series, suppressed forever
 moneta recurring --habit <ID>      # override: discretionary habit, not a bill; reactivates if ended
 moneta recurring --re-review <ID>  # reopen the series' bill/habit/not-recurring review question
+moneta recurring --reactivate <ID> # bring an auto- or manually-ended series back to active
 ```
 
 Series end automatically when charges stop, and revive if a genuinely new charge appears at
 the old cadence. A price increase is only applied after two agreeing charges (or an LLM/your
 confirmation) — a single weird charge never rewrites what a bill is "supposed to" cost.
 
-`--end`, `--not-a-bill`, `--habit`, and `--re-review` are mutually exclusive with each other —
-pass exactly one. Each overrule flag writes through the same `recurring_cluster` review-item
-ledger a bill/habit/not-recurring answer would (`resolved_by: "manual"`), so a wrong LLM or
-detection verdict is always human-correctable: `--not-a-bill` ends the series immediately and
-suppresses it from every future sync; `--habit` flips it to discretionary spending and
-reactivates it if it had ended; `--re-review` reopens the ledger item so it reappears in
-`moneta review` (and a fresh answer can supersede the old one). `--re-review` only reopens
-the question — it never changes the series itself, so an ended series stays ended until you
-answer `h` (habit, reactivates) or bump it back with the API's status PATCH.
+`--end`, `--not-a-bill`, `--habit`, `--re-review`, and `--reactivate` are mutually exclusive
+with each other — pass exactly one. `--end`/`--not-a-bill`/`--habit`/`--re-review` each write
+through the same `recurring_cluster` review-item ledger a bill/habit/not-recurring answer
+would (`resolved_by: "manual"`), so a wrong LLM or detection verdict is always
+human-correctable: `--not-a-bill` ends the series immediately and suppresses it from every
+future sync; `--habit` flips it to discretionary spending and reactivates it if it had ended;
+`--re-review` reopens the ledger item so it reappears in `moneta review` (and a fresh answer
+can supersede the old one). `--re-review` only reopens the question — it never changes the
+series itself, so an ended series stays ended until you answer `h` (habit, reactivates) or
+bring it back directly.
+
+`--reactivate ID` is that direct path: it flips an ended series (auto-ended from inactivity,
+or ended via `--end`) straight back to active and bumps `next_expected_on` forward to today,
+with no review-queue detour — use it when you already know a bill you previously ended (or
+that auto-ended after a gap) has resumed. A 404 for an unknown ID prints a clean error.
 
 ### `moneta obligations`
 
@@ -272,9 +367,13 @@ in the Type column.
 Every read command above (`power`, `networth`, `cashflow`, `recurring`,
 `obligations`, `accounts`, `txns`, `status`) accepts `--json`: it prints the
 raw API response to stdout with no rich markup, ready to pipe into `jq` or a
-script, and returns before any table is built. `moneta status --json` prints
-`null` when no sync has run yet. Combining `--json` with a write flag
-(`recurring --end/--not-a-bill/--habit/--re-review`,
+script, and returns before any table is built. `moneta status --json` merges
+`GET /status` and `GET /sync/last` into one object — the `/status` fields
+(`last_sync_at`, `last_sync_ok`, `accounts`, `open_reviews`, `aggregators`,
+`llm_configured`) plus a `last_sync` key holding the full `/sync/last` payload,
+which is `null` when no sync has ever run (the rest of the object is still
+populated). Combining `--json` with a write flag
+(`recurring --end/--not-a-bill/--habit/--re-review/--reactivate`,
 `accounts --set-type/--set-promo/--set-financing`) is a clean error — no
 request fires.
 
@@ -414,14 +513,18 @@ Files in the config dir (all owner-only, dir is 0700):
 |---|---|
 | "Did my sync run last night?" | `moneta status` — shows the last run, success/failure, and the error if it failed. |
 | Sync failed | `moneta status` for the error; details in `~/.config/moneta/moneta.log`. Failures never corrupt data — fix the cause and re-sync. |
-| A bank's history is missing | `moneta sync --full` re-pulls everything the institution retains (needed after adding a SimpleFIN account, or after an outage longer than the 7-day overlap). |
+| One source failed but the sync "succeeded" | That's by design when at least one other source is configured and healthy — check the `⚠` warning line the sync prints (or `moneta status`/the log) for which source and why; a source only fails the whole sync when it's the only one configured, or every configured source fails together. |
+| A bank's history is missing | `moneta sync --full` re-pulls everything the institution retains for every configured source (needed after adding a new source, or after an outage longer than the 7-day overlap). |
 | Account has the wrong type | `moneta accounts --set-type <ID> <TYPE>` — sticks across syncs. |
 | Merchant names look wrong | Answer the merchant questions in `moneta review`; after rule improvements, `moneta renormalize` re-applies naming to all history. |
 | A subscription shows as active but is cancelled | `moneta recurring --end <ID>`. |
 | A series was wrongly confirmed as a recurring bill | `moneta recurring --not-a-bill <ID>` — ends it and suppresses it from every future sync. |
 | A recurring series is really discretionary spending | `moneta recurring --habit <ID>` — reactivates it if ended, tags it discretionary (not a fixed cost). |
+| A series ended but the bill actually resumed | `moneta recurring --reactivate <ID>` — flips it straight back to active, no review-queue detour. |
 | An overrule was a mistake | `moneta recurring --re-review <ID>` reopens the question in `moneta review`. |
 | A price change looks wrong | It only applies after two agreeing charges or a confirmation; deny it in `moneta review` and the old expected amount stands. |
 | Numbers exclude an account | Foreign-currency accounts are excluded from aggregates by design and reported in `networth`. |
+| `power`/`networth` show a dim "data as of ..." line | The newest successful sync is more than 24h old (or there's never been one) — run `moneta sync`. See [Staleness footers](#staleness-footers). |
+| `Error: could not reach ...` on any command | Remote mode: the server at `MONETA_API_URL` is down or unreachable — check it's running and the URL/port are right. In-process mode: the aggregator itself (e.g. SimpleFIN) couldn't be reached — check your network. Either way this is a clean exit, not a traceback. |
 | Remote CLI gets 401 | `MONETA_API_TOKEN` on the client must match the server's. |
 | Sync says "setup simplefin or setup plaid" | No source is configured — see [Connecting data sources](#connecting-data-sources). |

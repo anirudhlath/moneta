@@ -15,14 +15,14 @@ from moneta.models import (
     Transaction,
     TransferLink,
 )
-from moneta.pipelines.run import RESYNC_OVERLAP_DAYS, run_sync
+from moneta.pipelines.run import RESYNC_OVERLAP_DAYS, _sync_since, run_sync
 from tests.conftest import FakeAdapter, RecordingAdapter
 from tests.factories import make_account, make_txn
 
 
 async def test_first_sync_requests_all_history(session: AsyncSession) -> None:
     adapter = RecordingAdapter()
-    await run_sync(session, adapter, llm=None, today=date(2026, 7, 9))
+    await run_sync(session, [adapter], llm=None, today=date(2026, 7, 9))
     assert adapter.since == date(1970, 1, 1)
 
 
@@ -31,7 +31,7 @@ async def test_resync_requests_from_newest_txn_with_overlap(session: AsyncSessio
     await make_txn(session, acct, posted_on=date(2026, 6, 1))
     await make_txn(session, acct, posted_on=date(2026, 7, 5))
     adapter = RecordingAdapter()
-    await run_sync(session, adapter, llm=None, today=date(2026, 7, 9))
+    await run_sync(session, [adapter], llm=None, today=date(2026, 7, 9))
     assert adapter.since == date(2026, 7, 5) - timedelta(days=RESYNC_OVERLAP_DAYS)
 
 
@@ -39,8 +39,50 @@ async def test_full_sync_forces_epoch_pull_despite_existing_txns(session: AsyncS
     acct = await make_account(session)
     await make_txn(session, acct, posted_on=date(2026, 7, 5))
     adapter = RecordingAdapter()
-    await run_sync(session, adapter, llm=None, today=date(2026, 7, 9), full=True)
+    await run_sync(session, [adapter], llm=None, today=date(2026, 7, 9), full=True)
     assert adapter.since == date(1970, 1, 1)
+
+
+async def test_two_sources_get_independent_since_values(session: AsyncSession) -> None:
+    """Distinct adapters carry distinct sources, so each gets its own window
+    computed from only its own accounts' newest transaction."""
+    sf_acct = await make_account(session, source="simplefin")
+    await make_txn(session, sf_acct, posted_on=date(2026, 5, 1))
+    plaid_acct = await make_account(session, source="plaid")
+    await make_txn(session, plaid_acct, posted_on=date(2026, 7, 5))
+
+    simplefin = RecordingAdapter(source="simplefin")
+    plaid = RecordingAdapter(source="plaid")
+    await run_sync(session, [simplefin, plaid], llm=None, today=date(2026, 7, 9))
+    assert simplefin.since == date(2026, 5, 1) - timedelta(days=RESYNC_OVERLAP_DAYS)
+    assert plaid.since == date(2026, 7, 5) - timedelta(days=RESYNC_OVERLAP_DAYS)
+
+
+async def test_simplefin_outage_self_heals_despite_fresh_plaid_txns(
+    session: AsyncSession,
+) -> None:
+    """The bug this design fixes: a stale SimpleFIN source must not have its
+    window pinned near today by Plaid's daily-replay-fresh transactions."""
+    sf_acct = await make_account(session, source="simplefin")
+    await make_txn(session, sf_acct, posted_on=date(2026, 6, 1))  # SimpleFIN went stale here
+    plaid_acct = await make_account(session, source="plaid")
+    await make_txn(session, plaid_acct, posted_on=date(2026, 7, 9))  # Plaid replays daily
+
+    simplefin = RecordingAdapter(source="simplefin")
+    await run_sync(session, [simplefin], llm=None, today=date(2026, 7, 9))
+    # derives from SimpleFIN's OWN newest txn, not Plaid's
+    assert simplefin.since == date(2026, 6, 1) - timedelta(days=RESYNC_OVERLAP_DAYS)
+
+
+async def test_sync_since_falls_back_to_global_max_when_source_has_no_accounts_yet(
+    session: AsyncSession,
+) -> None:
+    """First run after upgrading onto source-attributed accounts: an adapter whose
+    source no account carries yet must not re-pull full history."""
+    acct = await make_account(session, source="")  # pre-migration account
+    await make_txn(session, acct, posted_on=date(2026, 6, 15))
+    since = await _sync_since(session, full=False, source="simplefin")
+    assert since == date(2026, 6, 15) - timedelta(days=RESYNC_OVERLAP_DAYS)
 
 
 async def test_run_sync_autoreview_resolves_before_detection(session: AsyncSession) -> None:
@@ -65,7 +107,9 @@ async def test_run_sync_autoreview_resolves_before_detection(session: AsyncSessi
                 return {"merchant": "Quix Labs", "confident": True}
             return None
 
-    report = await run_sync(session, RecordingAdapter(), llm=ConfidentLLM(), today=date(2026, 7, 9))
+    report = await run_sync(
+        session, [RecordingAdapter()], llm=ConfidentLLM(), today=date(2026, 7, 9)
+    )
     assert report.auto_resolved == 1
     item = (await session.execute(select(ReviewItem))).scalar_one()
     assert item.status == ReviewStatus.resolved
@@ -92,7 +136,7 @@ async def test_sync_verifies_new_deterministic_series(session: AsyncSession) -> 
                 return {"classification": "bill", "confident": True}
             return None
 
-    report = await run_sync(session, RecordingAdapter(), llm=VerifyLLM(), today=date(2026, 7, 9))
+    report = await run_sync(session, [RecordingAdapter()], llm=VerifyLLM(), today=date(2026, 7, 9))
     assert report.recurring.new_series == 1
     assert report.verify == VerifyStats(verified=1, flagged=0)
 
@@ -100,12 +144,12 @@ async def test_sync_verifies_new_deterministic_series(session: AsyncSession) -> 
 async def test_sync_without_llm_reports_zero_verification(session: AsyncSession) -> None:
     from moneta.pipelines.review import VerifyStats
 
-    report = await run_sync(session, RecordingAdapter(), llm=None, today=date(2026, 7, 9))
+    report = await run_sync(session, [RecordingAdapter()], llm=None, today=date(2026, 7, 9))
     assert report.verify == VerifyStats()
 
 
 async def test_run_sync_records_success_audit_row(session: AsyncSession) -> None:
-    await run_sync(session, RecordingAdapter(), llm=None, today=date(2026, 7, 9))
+    await run_sync(session, [RecordingAdapter()], llm=None, today=date(2026, 7, 9))
     run = (await session.execute(select(SyncRun))).scalar_one()
     assert run.success is True
     assert run.finished_at is not None
@@ -114,11 +158,73 @@ async def test_run_sync_records_success_audit_row(session: AsyncSession) -> None
 
 async def test_run_sync_records_failure_and_reraises(session: AsyncSession) -> None:
     class FailingAdapter:
+        source = "fake"
+
         async def fetch(self, since: date | None = None) -> Snapshot:
             raise RuntimeError("bridge down")
 
     with pytest.raises(RuntimeError, match="bridge down"):
-        await run_sync(session, FailingAdapter(), llm=None, today=date(2026, 7, 9))
+        await run_sync(session, [FailingAdapter()], llm=None, today=date(2026, 7, 9))
+    run = (await session.execute(select(SyncRun))).scalar_one()
+    assert run.success is False
+    assert run.error is not None and "bridge down" in run.error
+    txn_count = (await session.execute(select(func.count()).select_from(Transaction))).scalar_one()
+    assert txn_count == 0  # failed fetch leaves domain tables untouched
+
+
+async def test_one_of_two_adapter_failure_warns_and_ingests_the_other(
+    session: AsyncSession,
+) -> None:
+    class FailingAdapter:
+        source = "simplefin"
+
+        async def fetch(self, since: date | None = None) -> Snapshot:
+            raise RuntimeError("bridge down")
+
+    healthy = FakeAdapter(
+        Snapshot(
+            accounts=[
+                AccountDTO(
+                    id="A-1",
+                    name="Checking",
+                    org_name="Chase",
+                    currency="USD",
+                    balance=Decimal("100.00"),
+                    balance_date=date(2026, 7, 9),
+                    source="plaid",
+                )
+            ],
+            transactions=[],
+            holdings=[],
+        ),
+        source="plaid",
+    )
+    report = await run_sync(session, [FailingAdapter(), healthy], llm=None, today=date(2026, 7, 9))
+    assert report.ingest.new_accounts == 1
+    assert report.warnings == ["simplefin: RuntimeError: bridge down"]
+    run = (await session.execute(select(SyncRun))).scalar_one()
+    assert run.success is True  # a partial failure is not a failed sync
+
+
+async def test_all_adapters_failing_fails_the_sync(session: AsyncSession) -> None:
+    """Every adapter failing must behave like the sole-adapter case (re-raise, SyncRun
+    marked failed) — not a quiet 'success' over an empty snapshot with two warnings,
+    which would leave data_as_of/staleness lying about having fresh data."""
+
+    class FailingAdapter:
+        def __init__(self, source: str) -> None:
+            self.source = source
+
+        async def fetch(self, since: date | None = None) -> Snapshot:
+            raise RuntimeError(f"{self.source} bridge down")
+
+    with pytest.raises(RuntimeError, match="bridge down"):
+        await run_sync(
+            session,
+            [FailingAdapter("simplefin"), FailingAdapter("plaid")],
+            llm=None,
+            today=date(2026, 7, 9),
+        )
     run = (await session.execute(select(SyncRun))).scalar_one()
     assert run.success is False
     assert run.error is not None and "bridge down" in run.error
@@ -152,7 +258,7 @@ async def test_second_identical_sync_is_a_full_noop(session: AsyncSession) -> No
         holdings=[],
     )
     today = date(2026, 7, 9)
-    await run_sync(session, FakeAdapter(snap), llm=None, today=today)
+    await run_sync(session, [FakeAdapter(snap)], llm=None, today=today)
 
     async def counts() -> dict[str, int]:
         out: dict[str, int] = {}
@@ -163,7 +269,7 @@ async def test_second_identical_sync_is_a_full_noop(session: AsyncSession) -> No
         return out
 
     before = await counts()
-    report = await run_sync(session, FakeAdapter(snap), llm=None, today=today)
+    report = await run_sync(session, [FakeAdapter(snap)], llm=None, today=today)
     assert report.ingest.new_transactions == 0
     assert report.ingest.updated_transactions == 0
     assert report.recurring.new_series == 0

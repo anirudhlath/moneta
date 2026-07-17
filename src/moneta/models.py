@@ -125,6 +125,7 @@ class Account(Base):
     balance_date: Mapped[date] = mapped_column(Date)
     promo_expires_on: Mapped[date | None] = mapped_column(Date, default=None)
     financing_mode: Mapped[bool] = mapped_column(default=False)
+    source: Mapped[str] = mapped_column(default="")
 
 
 class Transaction(Base):

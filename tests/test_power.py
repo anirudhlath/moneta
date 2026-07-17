@@ -1,9 +1,9 @@
 from calendar import monthrange
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.models import AccountType, Cadence, Direction, SeriesStatus, TransferLink
+from moneta.models import AccountType, Cadence, Direction, SeriesStatus, SyncRun, TransferLink
 from moneta.pipelines.recurring import detect_recurring
 from moneta.views.power import UpcomingCharge, power_report
 from tests.factories import make_account, make_series, make_txn
@@ -390,3 +390,24 @@ async def test_upcoming_sorted_by_expected_on(session: AsyncSession) -> None:
     )
     report = await power_report(session, today=date(2026, 7, 7))
     assert [u.merchant for u in report.upcoming] == ["Netflix", "Rent"]
+
+
+async def test_data_as_of_is_none_with_no_sync_run(session: AsyncSession) -> None:
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert report.data_as_of is None
+
+
+async def test_data_as_of_ignores_failed_runs(session: AsyncSession) -> None:
+    session.add(SyncRun(success=False, finished_at=datetime(2026, 7, 6, 9, 0)))
+    await session.flush()
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert report.data_as_of is None
+
+
+async def test_data_as_of_reports_newest_successful_run(session: AsyncSession) -> None:
+    session.add(SyncRun(success=True, finished_at=datetime(2026, 7, 5, 9, 0)))
+    session.add(SyncRun(success=True, finished_at=datetime(2026, 7, 6, 10, 0)))
+    session.add(SyncRun(success=False, finished_at=datetime(2026, 7, 7, 11, 0)))
+    await session.flush()
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert report.data_as_of == datetime(2026, 7, 6, 10, 0)

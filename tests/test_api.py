@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -10,10 +11,10 @@ from fastapi import FastAPI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from moneta.aggregator.base import AccountDTO, MergedAdapter, Snapshot, TransactionDTO
+from moneta.aggregator.base import AccountDTO, Snapshot, TransactionDTO
 from moneta.aggregator.plaid import PlaidAdapter, PlaidItem, items_path, save_items
 from moneta.aggregator.simplefin import SimpleFINAdapter
-from moneta.api import _build_adapter, create_app
+from moneta.api import _build_adapters, create_app
 from moneta.cadence import month_bounds
 from moneta.config import Settings
 from moneta.db import init_db, make_sessionmaker
@@ -78,7 +79,7 @@ async def _client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
 async def client(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> AsyncIterator[httpx.AsyncClient]:
-    async with _client(create_app(sessionmaker, adapter=FakeAdapter(SNAP), llm=None)) as c:
+    async with _client(create_app(sessionmaker, adapters=[FakeAdapter(SNAP)], llm=None)) as c:
         yield c
 
 
@@ -141,7 +142,7 @@ async def test_sync_full_param_forces_epoch_pull(
     await make_txn(session, acct, posted_on=date(2026, 7, 5))
     await session.commit()
     adapter = RecordingAdapter()
-    async with _client(create_app(sessionmaker, adapter=adapter, llm=None)) as c:
+    async with _client(create_app(sessionmaker, adapters=[adapter], llm=None)) as c:
         assert (await c.post("/sync")).status_code == 200
         assert adapter.since == date(2026, 7, 5) - timedelta(days=RESYNC_OVERLAP_DAYS)
         assert (await c.post("/sync", params={"full": "true"})).status_code == 200
@@ -151,7 +152,7 @@ async def test_sync_full_param_forces_epoch_pull(
 async def test_sync_without_adapter_is_400(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    async with _client(create_app(sessionmaker, adapter=None, llm=None)) as c:
+    async with _client(create_app(sessionmaker, adapters=[], llm=None)) as c:
         r = await c.post("/sync")
         assert r.status_code == 400
         assert "setup simplefin" in r.json()["detail"]
@@ -486,7 +487,7 @@ async def test_review_context_enrichment(
         )
         await session.commit()
 
-    async with _client(create_app(sessionmaker, adapter=None, llm=None)) as client:
+    async with _client(create_app(sessionmaker, adapters=[], llm=None)) as client:
         items = (await client.get("/review")).json()
 
     tp = next(i for i in items if i["kind"] == "transfer_pair")
@@ -538,28 +539,29 @@ def _settings(tmp_path: Path, **kwargs: object) -> Settings:
     return Settings(config_dir=tmp_path, db_path=tmp_path / "m.db", **kwargs)  # type: ignore[arg-type]
 
 
-def test_build_adapter_none_when_nothing_configured(tmp_path: Path) -> None:
+def test_build_adapters_empty_when_nothing_configured(tmp_path: Path) -> None:
     # conftest's autouse _clean_moneta_env fixture already strips MONETA_* env vars
-    assert _build_adapter(_settings(tmp_path)) is None
+    assert _build_adapters(_settings(tmp_path)) == []
 
 
-def test_build_adapter_simplefin_only(tmp_path: Path) -> None:
-    adapter = _build_adapter(
+def test_build_adapters_simplefin_only(tmp_path: Path) -> None:
+    adapters = _build_adapters(
         _settings(tmp_path, simplefin_access_url="https://u:p@bridge.example/simplefin")
     )
-    assert isinstance(adapter, SimpleFINAdapter)
+    assert len(adapters) == 1 and isinstance(adapters[0], SimpleFINAdapter)
 
 
-def test_build_adapter_plaid_requires_items(tmp_path: Path) -> None:
+def test_build_adapters_plaid_requires_items(tmp_path: Path) -> None:
     s = _settings(tmp_path, plaid_client_id="cid", plaid_secret="sec", plaid_env="sandbox")
-    assert _build_adapter(s) is None  # creds but no linked items
+    assert _build_adapters(s) == []  # creds but no linked items
     save_items(items_path(tmp_path), [PlaidItem(item_id="it-1", access_token="a")])
-    assert isinstance(_build_adapter(s), PlaidAdapter)
+    adapters = _build_adapters(s)
+    assert len(adapters) == 1 and isinstance(adapters[0], PlaidAdapter)
 
 
-def test_build_adapter_merges_simplefin_and_plaid(tmp_path: Path) -> None:
+def test_build_adapters_returns_both_simplefin_and_plaid(tmp_path: Path) -> None:
     save_items(items_path(tmp_path), [PlaidItem(item_id="it-1", access_token="a")])
-    adapter = _build_adapter(
+    adapters = _build_adapters(
         _settings(
             tmp_path,
             simplefin_access_url="https://u:p@bridge.example/simplefin",
@@ -567,13 +569,13 @@ def test_build_adapter_merges_simplefin_and_plaid(tmp_path: Path) -> None:
             plaid_secret="sec",
         )
     )
-    assert isinstance(adapter, MergedAdapter)
+    assert {type(a) for a in adapters} == {SimpleFINAdapter, PlaidAdapter}
 
 
-def test_build_adapter_tolerates_corrupt_items_file(tmp_path: Path) -> None:
+def test_build_adapters_tolerates_corrupt_items_file(tmp_path: Path) -> None:
     items_path(tmp_path).write_text("{not json")
     s = _settings(tmp_path, plaid_client_id="cid", plaid_secret="sec")
-    assert _build_adapter(s) is None  # no crash: sync just runs without Plaid
+    assert _build_adapters(s) == []  # no crash: sync just runs without Plaid
 
 
 async def test_sync_last_endpoint(client: httpx.AsyncClient) -> None:
@@ -585,10 +587,54 @@ async def test_sync_last_endpoint(client: httpx.AsyncClient) -> None:
     assert body["report"]["ingest"]["new_transactions"] == 3
 
 
+async def test_status_endpoint_fresh_db(client: httpx.AsyncClient) -> None:
+    body = (await client.get("/status")).json()
+    assert body == {
+        "last_sync_at": None,
+        "last_sync_ok": None,
+        "accounts": 0,
+        "open_reviews": 0,
+        "aggregators": ["fake"],  # the client fixture's FakeAdapter source
+        "llm_configured": False,
+    }
+
+
+async def test_status_endpoint_after_successful_sync(client: httpx.AsyncClient) -> None:
+    await client.post("/sync")
+    body = (await client.get("/status")).json()
+    assert body["last_sync_at"] is not None
+    assert body["last_sync_ok"] is True
+    assert body["accounts"] == 1
+    assert isinstance(body["open_reviews"], int)
+
+
+async def test_status_endpoint_reflects_open_review_count(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    client: httpx.AsyncClient,
+) -> None:
+    async with sessionmaker() as session:
+        session.add(ReviewItem(kind=ReviewKind.merchant, question="?", payload={}))
+        await session.commit()
+    body = (await client.get("/status")).json()
+    assert body["open_reviews"] == 1
+
+
+async def test_status_endpoint_llm_configured_flag(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    class StubLLM:
+        async def classify_json(self, prompt: str) -> dict[str, Any] | None:
+            return None
+
+    async with _client(create_app(sessionmaker, adapters=[], llm=StubLLM())) as c:
+        body = (await c.get("/status")).json()
+        assert body["llm_configured"] is True
+
+
 async def test_bearer_token_enforced_when_configured(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    async with _client(create_app(sessionmaker, adapter=None, llm=None, api_token="s3cret")) as c:
+    async with _client(create_app(sessionmaker, adapters=[], llm=None, api_token="s3cret")) as c:
         assert (await c.get("/accounts")).status_code == 401
         assert (
             await c.get("/accounts", headers={"Authorization": "Bearer wrong"})
@@ -605,7 +651,7 @@ async def test_backup_vacuum_into(tmp_path: Path) -> None:
     engine, sm = make_sessionmaker(f"sqlite+aiosqlite:///{tmp_path / 'm.db'}")
     await init_db(engine)
     dest = tmp_path / "out.db"
-    async with _client(create_app(sm, adapter=None, llm=None, engine=engine)) as c:
+    async with _client(create_app(sm, adapters=[], llm=None, engine=engine)) as c:
         r = await c.post("/backup", json={"dest": str(dest)})
         assert r.status_code == 200
         assert r.json() == {"path": str(dest)}
@@ -619,7 +665,7 @@ async def test_backup_requires_file_backed_db(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     # no engine → nothing to back up
-    async with _client(create_app(sessionmaker, adapter=None, llm=None)) as c:
+    async with _client(create_app(sessionmaker, adapters=[], llm=None)) as c:
         assert (await c.post("/backup", json={})).status_code == 400
 
 
@@ -631,6 +677,115 @@ async def test_patch_unknown_account_is_404(client: httpx.AsyncClient) -> None:
 async def test_resolve_unknown_review_item_is_404(client: httpx.AsyncClient) -> None:
     r = await client.post("/review/999999/resolve", json={"resolution": {}})
     assert r.status_code == 404
+
+
+async def test_transfer_pair_resolve_twice_is_409_not_500(
+    client: httpx.AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """Design 2026-07-16 §7: a transfer_pair resolved twice (or resolved after the
+    link already exists another way) must 409, not IntegrityError-500."""
+    from moneta.models import AccountType, TransferLink
+
+    async with sessionmaker() as session:
+        checking = await make_account(session, type=AccountType.checking)
+        savings = await make_account(session, type=AccountType.savings)
+        out = await make_txn(
+            session,
+            checking,
+            amount_cents=-5000,
+            posted_on=date(2026, 7, 1),
+            description="ACH TRANSFER",
+        )
+        inn = await make_txn(
+            session, savings, amount_cents=5000, posted_on=date(2026, 7, 2), description="DEPOSIT"
+        )
+        item = ReviewItem(
+            kind="transfer_pair",
+            question="which?",
+            payload={"outflow_id": out.id, "candidates": [inn.id]},
+        )
+        session.add(item)
+        await session.commit()
+        item_id, inflow_id = item.id, inn.id
+
+    resolution = {"resolution": {"inflow_id": inflow_id}}
+    r1 = await client.post(f"/review/{item_id}/resolve", json=resolution)
+    assert r1.status_code == 200
+
+    r2 = await client.post(f"/review/{item_id}/resolve", json=resolution)
+    assert r2.status_code == 409
+    assert r2.json()["detail"] == "transaction already linked"
+
+    async with sessionmaker() as session:
+        links = (await session.execute(select(TransferLink))).scalars().all()
+    assert len(links) == 1
+
+
+async def test_transfer_pair_resolve_with_two_distinct_preexisting_links_is_409(
+    client: httpx.AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """The 409 guard's either-leg query can match TWO distinct rows — the item's
+    outflow already linked to some other inflow in one row, and the picked inflow
+    already linked to some other outflow in another (a greedy-loser item resolved
+    after both legs were separately linked by later runs). That must still 409,
+    not blow up in scalar_one_or_none() as MultipleResultsFound → 500."""
+    from moneta.models import AccountType, LinkMethod, TransferLink
+
+    async with sessionmaker() as session:
+        checking = await make_account(session, type=AccountType.checking)
+        savings = await make_account(session, type=AccountType.savings)
+        out_x = await make_txn(
+            session,
+            checking,
+            amount_cents=-5000,
+            posted_on=date(2026, 7, 1),
+            description="ACH TRANSFER",
+        )
+        inn_y = await make_txn(
+            session, savings, amount_cents=5000, posted_on=date(2026, 7, 2), description="DEPOSIT"
+        )
+        inn_z = await make_txn(
+            session,
+            savings,
+            amount_cents=5000,
+            posted_on=date(2026, 7, 1),
+            description="DEPOSIT Z",
+        )
+        out_w = await make_txn(
+            session,
+            checking,
+            amount_cents=-5000,
+            posted_on=date(2026, 7, 2),
+            description="ACH TRANSFER W",
+        )
+        # two DISTINCT pre-existing links, one per leg: X↔Z and W↔Y
+        session.add(
+            TransferLink(
+                outflow_id=out_x.id, inflow_id=inn_z.id, confidence=1.0, method=LinkMethod.manual
+            )
+        )
+        session.add(
+            TransferLink(
+                outflow_id=out_w.id, inflow_id=inn_y.id, confidence=1.0, method=LinkMethod.manual
+            )
+        )
+        item = ReviewItem(
+            kind="transfer_pair",
+            question="which?",
+            payload={"outflow_id": out_x.id, "candidates": [inn_y.id]},
+        )
+        session.add(item)
+        await session.commit()
+        item_id, inflow_id = item.id, inn_y.id
+
+    resolution = {"resolution": {"inflow_id": inflow_id}}
+    r = await client.post(f"/review/{item_id}/resolve", json=resolution)
+    assert r.status_code == 409
+    assert r.json()["detail"] == "transaction already linked"
+
+    async with sessionmaker() as session:
+        links = (await session.execute(select(TransferLink))).scalars().all()
+    assert len(links) == 2  # the two pre-existing links; no third was inserted
 
 
 async def test_import_vesting_malformed_csv_is_422(client: httpx.AsyncClient) -> None:
@@ -648,7 +803,7 @@ async def test_reactivating_stale_series_bumps_next_expected_forward(
     await session.commit()
     series_id = s.id
 
-    async with _client(create_app(sessionmaker, adapter=None, llm=None)) as c:
+    async with _client(create_app(sessionmaker, adapters=[], llm=None)) as c:
         assert (
             await c.patch(f"/recurring/{series_id}", json={"status": "active"})
         ).status_code == 200
@@ -795,7 +950,7 @@ async def test_power_history_multi_month_rows_newest_first(
         )
         await session.commit()
 
-    async with _client(create_app(sessionmaker, adapter=None, llm=None)) as c:
+    async with _client(create_app(sessionmaker, adapters=[], llm=None)) as c:
         r = await c.get("/power/history", params={"months": 2})
     assert r.status_code == 200
     rows = r.json()

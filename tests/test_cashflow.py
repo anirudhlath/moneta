@@ -67,7 +67,7 @@ async def test_cashflow_endpoint_returns_accrual_and_cash_out(
     await _cc_purchase_and_payment(session)
     await session.commit()
 
-    app = create_app(sessionmaker, adapter=None, llm=None)
+    app = create_app(sessionmaker, adapters=[], llm=None)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         r = await client.get("/cashflow", params={"start": "2026-07-01", "end": "2026-07-31"})

@@ -8,7 +8,6 @@ from typing import Any
 import httpx
 import pytest
 
-from moneta.aggregator.base import AccountDTO, AggregatorAdapter, MergedAdapter, Snapshot
 from moneta.aggregator.plaid import (
     PlaidAdapter,
     PlaidClient,
@@ -22,33 +21,6 @@ from moneta.aggregator.plaid import (
     save_items,
 )
 from moneta.models import AccountType
-from tests.conftest import FakeAdapter
-
-
-def _snap(account_id: str) -> Snapshot:
-    return Snapshot(
-        accounts=[
-            AccountDTO(
-                id=account_id,
-                name=f"acct {account_id}",
-                org_name="org",
-                currency="USD",
-                balance=Decimal("1.00"),
-                balance_date=date(2026, 7, 1),
-            )
-        ],
-        transactions=[],
-        holdings=[],
-    )
-
-
-async def test_merged_adapter_concatenates_and_passes_since() -> None:
-    a, b = FakeAdapter(_snap("A")), FakeAdapter(_snap("B"))
-    adapters: list[AggregatorAdapter] = [a, b]
-    merged = MergedAdapter(adapters)
-    snap = await merged.fetch(since=date(2026, 1, 1))
-    assert [acct.id for acct in snap.accounts] == ["A", "B"]
-    assert a.since == b.since == date(2026, 1, 1)
 
 
 def _plaid_client(handler: Callable[[httpx.Request], httpx.Response]) -> PlaidClient:
@@ -246,6 +218,7 @@ async def test_fetch_parses_accounts() -> None:
         return httpx.Response(200, json=_ACCOUNTS_PAYLOAD)
 
     adapter = PlaidAdapter(_plaid_client(handle), [_item()])
+    assert adapter.source == "plaid"
     snap = await adapter.fetch()
     chk, card, brok = snap.accounts
     assert chk.id == "acc-chk"
@@ -254,6 +227,7 @@ async def test_fetch_parses_accounts() -> None:
     assert chk.balance == Decimal("110.94")
     assert chk.balance_date == date(2026, 7, 8)
     assert chk.type_hint == AccountType.checking
+    assert chk.source == "plaid" and card.source == "plaid" and brok.source == "plaid"
     # liability balances negated: Plaid positive-owed -> moneta negative
     assert card.balance == Decimal("-410.00")
     assert card.type_hint == AccountType.credit
@@ -462,6 +436,10 @@ async def test_item_login_required_skips_item_but_not_sync() -> None:
     alive = PlaidItem(item_id="it-1", access_token="access-1", products=[])
     snap = await PlaidAdapter(_plaid_client(handle), [dead, alive]).fetch()
     assert len(snap.accounts) == 3  # only the healthy item's accounts
+    assert snap.warnings == [
+        "Plaid item Old Bank skipped (ITEM_LOGIN_REQUIRED: re-link)"
+        " — re-link with: moneta setup plaid-link"
+    ]
 
 
 async def test_other_plaid_errors_propagate() -> None:
@@ -525,14 +503,3 @@ def test_save_items_leaves_no_tmp_file(tmp_path: Path) -> None:
     path = items_path(tmp_path)
     save_items(path, [PlaidItem(item_id="it-1", access_token="a")])
     assert [p.name for p in tmp_path.iterdir()] == ["plaid_items.json"]
-
-
-class _BoomAdapter:
-    async def fetch(self, since: date | None = None) -> Snapshot:
-        raise RuntimeError("boom")
-
-
-async def test_merged_adapter_propagates_child_failure() -> None:
-    adapters: list[AggregatorAdapter] = [FakeAdapter(_snap("A")), _BoomAdapter()]
-    with pytest.raises(RuntimeError, match="boom"):
-        await MergedAdapter(adapters).fetch()

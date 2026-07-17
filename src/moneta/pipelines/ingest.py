@@ -48,6 +48,7 @@ async def ingest_snapshot(session: AsyncSession, snap: Snapshot) -> IngestStats:
                 type=dto.type_hint or infer_account_type(dto.name, dto.org_name),
                 balance_cents=to_cents(dto.balance),
                 balance_date=dto.balance_date,
+                source=dto.source,
             )
             session.add(existing)
             await session.flush()
@@ -55,6 +56,7 @@ async def ingest_snapshot(session: AsyncSession, snap: Snapshot) -> IngestStats:
         else:
             existing.balance_cents = to_cents(dto.balance)
             existing.balance_date = dto.balance_date
+            existing.source = dto.source  # natural backfill for pre-attribution accounts
         acct_ids[dto.id] = existing.id
 
     # comparison columns as plain tuples — ORM rows are only fetched for the rare correction
