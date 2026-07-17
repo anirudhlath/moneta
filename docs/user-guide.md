@@ -14,6 +14,7 @@ This guide covers day-to-day usage. For what the product is and why, see the [PR
 - [Syncing](#syncing)
   - [`moneta status`](#moneta-status)
   - [Staleness footers](#staleness-footers)
+  - [`moneta digest` — notifications](#moneta-digest--notifications)
 - [Reading the numbers](#reading-the-numbers)
 - [The review queue](#the-review-queue)
 - [LLM assist (optional)](#llm-assist-optional)
@@ -190,6 +191,41 @@ no successful sync yet — run moneta sync
 
 The footer is silent (nothing printed) once you've synced within the last 24 hours — it only
 speaks up when the numbers you're looking at might be stale.
+
+### `moneta digest` — notifications
+
+Push new series events (missed payments, price increases, new subscriptions) and financing
+promo-expiry warnings to your phone via [ntfy.sh](https://ntfy.sh) — no app account needed,
+just a topic:
+
+1. Pick a hard-to-guess topic name (anyone who knows it can read your digest) and subscribe
+   to it in the ntfy app or at `https://ntfy.sh/<your-topic>`.
+2. Set it: `MONETA_NTFY_TOPIC=https://ntfy.sh/<your-topic>` (env var), or add
+   `ntfy_topic = "https://ntfy.sh/<your-topic>"` to `config.toml`.
+3. `moneta digest` — sends one plain-text push containing every series event since the last
+   digest, plus any financing obligation newly showing `deferred_interest_risk` (a risk that
+   clears re-notifies if it later reappears). Nothing new → nothing sent (no empty pings), but
+   moneta still remembers it has "seen" everything up to now.
+
+```bash
+$ moneta digest
+Digest sent: 3 events, 1 warning
+$ moneta digest
+Nothing new.
+```
+
+`moneta digest` is a write (it commits its own cursor), so run it after a sync, not instead
+of one. There's no `sync --notify` flag — compose the two yourself, e.g. in cron:
+
+```
+0 6 * * * cd ~/code/private/moneta && uv run moneta sync && uv run moneta digest
+```
+
+A delivery failure (ntfy.sh unreachable, etc.) logs a warning and leaves the cursor
+untouched — the same events/warnings are retried on the next `moneta digest` rather than
+silently lost. `moneta digest --json` prints the raw `{"sent": bool, "events": int,
+"warnings": int}` response — the one write command where `--json` is allowed, since printing
+the result *is* the point. Unset `ntfy_topic` is a clean 400 with a setup hint, not a crash.
 
 ## Reading the numbers
 
@@ -497,6 +533,7 @@ file values. The `setup` commands write the file for you.
 | `MONETA_LLM_MODEL` / `llm_model` | LiteLLM model string; unset = no LLM |
 | `MONETA_API_URL` / `api_url` | Point the CLI at a remote server |
 | `MONETA_API_TOKEN` / `api_token` | Bearer token (server enforcement + client header) |
+| `MONETA_NTFY_TOPIC` / `ntfy_topic` | ntfy.sh topic URL for `moneta digest` (e.g. `https://ntfy.sh/moneta-xyz123`); unset = `/digest` 400s |
 | `MONETA_DB_PATH` / `db_path` | Database file (default `<config dir>/moneta.db`) |
 | `MONETA_CONFIG_DIR` | Config directory (default `~/.config/moneta`) |
 

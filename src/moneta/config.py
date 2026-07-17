@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     llm_model: str | None = None
     api_url: str | None = None
     api_token: str | None = None
+    ntfy_topic: str | None = None
 
 
 def _read_config_file(config_dir: Path) -> dict[str, Any]:

@@ -164,6 +164,35 @@ def sync(
         console.print(f"[yellow]{len(open_reviews)} items need review:[/yellow] moneta review")
 
 
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+@app.command()
+def digest(json_output: JsonOption = False) -> None:
+    """Send a digest of new series events and financing warnings to ntfy.sh.
+
+    A write, not a read — `--json` prints the POST result (printing it IS the
+    point), so it's deliberately exempt from `reject_json_with_writes`. Cron
+    recipe: `moneta sync && moneta digest`.
+    """
+    r = request("POST", "/digest")
+    if emit_json(r, json_output):
+        return
+    if r["sent"]:
+        console.print(
+            f"Digest sent: {_plural(r['events'], 'event')}, {_plural(r['warnings'], 'warning')}"
+        )
+    elif r["events"] or r["warnings"]:
+        console.print(
+            f"[yellow]Digest failed to send[/yellow] "
+            f"({_plural(r['events'], 'event')}, {_plural(r['warnings'], 'warning')} pending — "
+            "see logs)"
+        )
+    else:
+        console.print("Nothing new.")
+
+
 @app.command()
 def status(json_output: JsonOption = False) -> None:
     """Show overall health (accounts, review queue, configured sources) plus the

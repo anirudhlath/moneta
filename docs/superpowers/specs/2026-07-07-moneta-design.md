@@ -172,5 +172,4 @@ Liquid + vested holdings − liabilities. Unvested shown as a separate "potentia
 
 - Plaid adapter where SimpleFIN coverage is weak.
 - Web frontend (same API), then iOS.
-- Push notifications for series events and promo-expiry warnings.
 - Postgres if the dataset or a multi-device setup demands it.

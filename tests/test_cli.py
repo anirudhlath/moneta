@@ -1753,3 +1753,68 @@ def test_json_output_has_no_rich_table_chars(tmp_path: Path, monkeypatch) -> Non
         result = runner.invoke(app, args)
         assert result.exit_code == 0, f"{args}: {result.output}"
         assert "│" not in result.stdout, f"{args}: rich table leaked into --json output"
+
+
+def _fake_digest_request(
+    response: dict[str, Any],
+) -> Callable[..., Any]:
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        return response
+
+    return fake_request
+
+
+def test_digest_prints_sent_summary(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(
+        "moneta.cli.main.request",
+        _fake_digest_request({"sent": True, "events": 3, "warnings": 1}),
+    )
+    result = runner.invoke(app, ["digest"])
+    assert result.exit_code == 0
+    assert "Digest sent: 3 events, 1 warning" in result.output
+
+
+def test_digest_prints_nothing_new(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(
+        "moneta.cli.main.request",
+        _fake_digest_request({"sent": False, "events": 0, "warnings": 0}),
+    )
+    result = runner.invoke(app, ["digest"])
+    assert result.exit_code == 0
+    assert "Nothing new." in result.output
+
+
+def test_digest_prints_failure_summary(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(
+        "moneta.cli.main.request",
+        _fake_digest_request({"sent": False, "events": 2, "warnings": 0}),
+    )
+    result = runner.invoke(app, ["digest"])
+    assert result.exit_code == 0
+    assert "Digest failed to send" in result.output
+    assert "2 events" in result.output
+
+
+def test_digest_json_output(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(
+        "moneta.cli.main.request",
+        _fake_digest_request({"sent": True, "events": 1, "warnings": 0}),
+    )
+    result = runner.invoke(app, ["digest", "--json"])
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {"sent": True, "events": 1, "warnings": 0}
+
+
+def test_digest_unset_topic_400_passthrough(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`--json` is exempt from `reject_json_with_writes` for this command (design
+    2026-07-16 §1) — verify a clean 400, not a crash, when ntfy_topic is unset."""
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["digest"])
+    assert result.exit_code == 1
+    assert "ntfy_topic" in result.output
+    assert "Traceback" not in result.output

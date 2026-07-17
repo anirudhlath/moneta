@@ -112,6 +112,7 @@ Provider-agnostic via LiteLLM (any model string), JSON mode, temperature 0, conf
 | **Durability** | WAL + busy-timeout on file-backed SQLite (server + CLI can write concurrently); config dir 0700 and every file 0600 (credentials, DB, snapshots, logs). |
 | **Logging & status** | Rotating log file in the config dir; warnings mirror to stderr; `moneta status` shows the last sync run (including in-flight/incomplete). |
 | **Vesting import** | `moneta import vesting file.csv` (`symbol,vested_quantity,unvested_quantity`) — vested truth from a NetBenefits export, not a manually maintained schedule. |
+| **Notifications digest** | `moneta digest` (`POST /digest`, migration `0005`'s single-row `digest_state` cursor) pushes new series events and newly-at-risk financing obligations to an [ntfy.sh](https://ntfy.sh) topic (`ntfy_topic` config key). Nothing new → nothing sent (no empty pings), but the event cursor still advances; a delivery failure logs a warning and leaves the cursor untouched so nothing is lost. A cleared deferred-interest risk drops out of the warned-account set so a later re-appearance re-notifies. No `sync --notify` flag — compose it yourself (`moneta sync && moneta digest`, e.g. via cron). Unset `ntfy_topic` is a clean `400` with a setup hint. |
 
 ### 6.7 CLI experience
 
@@ -146,6 +147,7 @@ Rich tables with stable IDs everywhere a follow-up action exists (`recurring --e
 | 2026-07-16 | **Clean connection errors; sync progress** | `cli/client.py`'s `_arequest` catches `httpx.ConnectError`/`ConnectTimeout`/`ReadTimeout` around every request and prints `Error: could not reach {target} (...)` with a clean exit 1 — covers a down remote server and an unreachable in-process aggregator alike, replacing a raw traceback. `moneta sync` wraps the request in a `Syncing…` spinner; in-process mode additionally registers a temporary loguru sink (INFO, `moneta.aggregator`) that live-updates the spinner with the current fetch window, removed when the sync finishes. `SimpleFINAdapter.fetch` now logs each window fetch at INFO for this to render. |
 | 2026-07-16 | **`--reactivate`; transfer-dedup edge cases; atomic account flags** | `moneta recurring --reactivate ID` (mutually exclusive with `--end`/`--not-a-bill`/`--habit`/`--re-review`) PATCHes a series straight back to active. Transfer-dedup decided two edge cases explicitly: a "greedy loser" (every candidate consumed by a higher-confidence group) opens a `transfer_pair` review item instead of vanishing; an originally-ambiguous outflow (2+ candidates) never late-auto-links even if rivals' consumption leaves exactly one candidate standing. `POST /review/{id}/resolve` on an already-linked `transfer_pair` returns a clean `409` instead of a server error. `moneta accounts --set-type`/`--set-promo` now validates the promo date before firing either PATCH, so a bad date can't partially apply. |
 | 2026-07-16 | **Injectable SimpleFIN clock** | `SimpleFINAdapter.__init__` takes an optional `today: Callable[[], date]` (defaults to `datetime.now(UTC).date()`); `fetch`'s window-walk anchors on it. Pure test-seam refactor — the `AggregatorAdapter` protocol is unchanged. |
+| 2026-07-16 | **Notifications digest** | `moneta digest` / `POST /digest` (migration `0005`, `digest_state` single-row cursor): pushes new series events and newly-at-risk financing obligations to an ntfy.sh topic (`ntfy_topic` config key, `MONETA_NTFY_TOPIC`). Nothing new advances the cursor without sending; a delivery failure logs a warning and leaves the cursor untouched; a cleared risk drops out of the warned set so it can re-notify later. `--json` is deliberately exempt from `reject_json_with_writes` since printing the POST result is the command's whole point. Cron recipe: `moneta sync && moneta digest` — no `sync --notify` flag. |
 
 ## 8. Roadmap
 
@@ -156,7 +158,7 @@ Sourced from `docs/backlog/` (one file per ticket — see each for context and a
 - Fidelity NetBenefits CSV mapping (direct export → vesting import).
 
 **Low**
-- Notifications digest; transaction categorization; Plaid cursor-based incremental sync; Plaid Link update mode; vesting source adapter seam; test-coverage gaps.
+- Transaction categorization; Plaid cursor-based incremental sync; Plaid Link update mode; vesting source adapter seam; test-coverage gaps.
 
 ## 9. Risks & open questions
 

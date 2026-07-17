@@ -33,6 +33,7 @@ from moneta.models import (
     TransferLink,
     recurring_cluster_item,
 )
+from moneta.pipelines.digest import DigestResult, run_digest
 from moneta.pipelines.normalize import renormalize_merchants
 from moneta.pipelines.recurring import reactivate_series
 from moneta.pipelines.review import apply_resolution, review_context
@@ -167,6 +168,7 @@ def create_app(
     llm: Classifier | None,
     engine: AsyncEngine | None = None,
     api_token: str | None = None,
+    ntfy_topic: str | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -215,6 +217,18 @@ def create_app(
                 ),
             )
         return await run_sync(session, adapters, llm, today=date.today(), full=full)
+
+    @app.post("/digest")
+    async def digest(session: Session) -> DigestResult:
+        if not ntfy_topic:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "ntfy_topic not configured. Set MONETA_NTFY_TOPIC or ntfy_topic in "
+                    "config.toml to a topic URL (get one free at https://ntfy.sh)."
+                ),
+            )
+        return await run_digest(session, ntfy_topic, today=date.today())
 
     @app.get("/sync/last")
     async def sync_last(session: Session) -> SyncRunOut | None:
@@ -612,4 +626,5 @@ def build_app() -> FastAPI:
         build_classifier(settings.llm_model),
         engine=engine,
         api_token=settings.api_token,
+        ntfy_topic=settings.ntfy_topic,
     )
