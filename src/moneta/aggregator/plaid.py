@@ -112,7 +112,11 @@ def save_items(path: Path, items: list[PlaidItem]) -> None:
     tmp.replace(path)
 
 
-async def create_hosted_link(client: PlaidClient, products: list[str]) -> tuple[str, str]:
+async def create_hosted_link(
+    client: PlaidClient, products: list[str], access_token: str | None = None
+) -> tuple[str, str]:
+    """`access_token` set = update mode: re-authorize an existing item in place
+    (e.g. after `ITEM_LOGIN_REQUIRED`) instead of creating a new one."""
     payload: dict[str, Any] = {
         "client_name": "moneta",
         "user": {"client_user_id": "moneta"},
@@ -123,6 +127,8 @@ async def create_hosted_link(client: PlaidClient, products: list[str]) -> tuple[
     }
     if "transactions" in products:
         payload["transactions"] = {"days_requested": _DAYS_REQUESTED}
+    if access_token is not None:
+        payload["access_token"] = access_token
     data = await client.post("/link/token/create", payload)
     return data["link_token"], data["hosted_link_url"]
 
@@ -221,7 +227,7 @@ class PlaidAdapter:
             if exc.error_type != "ITEM_ERROR":
                 raise
             hint = (
-                " — re-link with: moneta setup plaid-link"
+                f" — repair with: moneta setup plaid-relink {item.item_id}"
                 if exc.error_code == "ITEM_LOGIN_REQUIRED"
                 else ""
             )

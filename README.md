@@ -152,7 +152,9 @@ uv run moneta sync
 ```
 
 `plaid-link` links one institution per run (re-run it for each bank);
-`moneta setup plaid-list` / `plaid-unlink <item-id>` manage linked banks.
+`moneta setup plaid-list` / `plaid-unlink <item-id>` manage linked banks. If sync
+starts warning `ITEM_LOGIN_REQUIRED`, repair it in place (no duplicate accounts):
+`moneta setup plaid-relink <item-id>`.
 
 The first sync pulls all history your institutions retain. `moneta sync --full`
 re-pulls everything — use it after linking a new SimpleFIN account so its history
@@ -181,6 +183,7 @@ Unset = no LLM; ambiguous items go to `moneta review` instead.
 | `moneta recurring [--events] [--end\|--not-a-bill\|--habit\|--re-review ID]` | Series; missed payments/price increases; cancel, overrule, or reopen a series |
 | `moneta obligations` | Loans/financing: payment, months left, deferred-interest warnings |
 | `moneta review` | Resolve ambiguous classifications interactively |
+| `moneta digest [--json]` | Push new series events + financing warnings to ntfy.sh (cursor-tracked); cron with `moneta sync && moneta digest` |
 | `moneta accounts [--set-type ID TYPE] [--set-promo ID DATE] [--set-financing ID true\|false]` | List accounts; set type / promo expiry / financing-mode flag |
 | `moneta import vesting <file.csv>` | Vesting data (`symbol,vested_quantity,unvested_quantity`) |
 | `moneta renormalize` | Re-apply improved merchant rules to already-synced data |
@@ -199,7 +202,8 @@ Env vars (`MONETA_*`) override `~/.config/moneta/config.toml`:
 `MONETA_SIMPLEFIN_ACCESS_URL`, `MONETA_PLAID_CLIENT_ID`, `MONETA_PLAID_SECRET`,
 `MONETA_PLAID_ENV` (`production` (default) or `sandbox`), `MONETA_LLM_MODEL` (any
 LiteLLM model string; unset = no LLM, ambiguous items go to `moneta review`),
-`MONETA_API_URL`, `MONETA_API_TOKEN`, `MONETA_DB_PATH`, `MONETA_CONFIG_DIR`
+`MONETA_API_URL`, `MONETA_API_TOKEN`, `MONETA_NTFY_TOPIC` (ntfy.sh topic URL for
+`moneta digest`; unset = `/digest` 400s), `MONETA_DB_PATH`, `MONETA_CONFIG_DIR`
 (config-file location; default `~/.config/moneta`). Linked Plaid banks (item ids +
 access tokens) live in `~/.config/moneta/plaid_items.json`.
 

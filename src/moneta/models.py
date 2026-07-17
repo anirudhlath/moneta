@@ -214,6 +214,19 @@ class SyncRun(Base):
     report: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=None)
 
 
+class DigestState(Base):
+    """Single-row (id=1) cursor for the notifications digest (design 2026-07-16 §1):
+    the newest `SeriesEvent.id` already sent, plus the set of financing account ids
+    already warned about deferred-interest risk (a cleared risk drops out so a
+    re-appearance re-notifies)."""
+
+    __tablename__ = "digest_state"
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    last_event_id: Mapped[int] = mapped_column(default=0)
+    warned_account_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
+
+
 class ReviewItem(Base):
     __tablename__ = "review_items"
 

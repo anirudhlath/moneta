@@ -273,6 +273,22 @@ async def test_discretionary_inflow_not_income(session: AsyncSession) -> None:
     assert report.monthly_income_cents == 0
 
 
+async def test_power_report_empty_db_is_zeroed(session: AsyncSession) -> None:
+    """No accounts, no series, no transactions — power_report must return zeroed
+    values (no exception from sum() of an empty sequence or a None division)."""
+    report = await power_report(session, today=date(2026, 7, 15))
+    assert report.monthly_income_cents == 0
+    assert report.income_sources == []
+    assert report.fixed_costs == []
+    assert report.total_fixed_cents == 0
+    assert report.spending_power_cents == 0
+    assert report.spent_so_far_cents == 0
+    assert report.remaining_cents == 0
+    assert report.per_day_remaining_cents == 0
+    assert report.upcoming == []
+    assert report.data_as_of is None
+
+
 async def test_per_day_remaining_mid_month(session: AsyncSession) -> None:
     today = date(2026, 7, 15)
     last_day = monthrange(today.year, today.month)[1]

@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Any
 
 import httpx
+import pytest
 
 from moneta.aggregator.simplefin import (
     SimpleFINAdapter,
@@ -98,6 +99,45 @@ async def test_bridge_errors_surface_as_warnings() -> None:
     )
     snap = await adapter.fetch()
     assert snap.warnings == ["simplefin: ACT-1: re-authenticate at the institution"]
+
+
+async def test_bridge_errors_log_warning_and_populate_snapshot_warnings() -> None:
+    """The `for err in data.get("errors", [])` branch in `_get` both logs at WARNING
+    (so a running server surfaces it) and feeds Snapshot.warnings (so callers who
+    persist warnings, e.g. sync reports, see it too) — assert both effects."""
+    from loguru import logger
+
+    payload = json.loads(json.dumps(SIMPLEFIN_PAYLOAD))
+    payload["errors"] = ["ACT-1: re-authenticate at the institution"]
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    adapter = SimpleFINAdapter(
+        "https://u:p@bridge.example/simplefin",
+        client=_mock_client(httpx.MockTransport(handle)),
+    )
+    messages: list[str] = []
+    sink_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING")
+    try:
+        snap = await adapter.fetch()
+    finally:
+        logger.remove(sink_id)
+
+    assert any("SimpleFIN error: ACT-1: re-authenticate at the institution" in m for m in messages)
+    assert snap.warnings == ["simplefin: ACT-1: re-authenticate at the institution"]
+
+
+async def test_non_2xx_response_raises() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="bridge unavailable")
+
+    adapter = SimpleFINAdapter(
+        "https://u:p@bridge.example/simplefin",
+        client=_mock_client(httpx.MockTransport(handle)),
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        await adapter.fetch()
 
 
 async def test_fetch_since_sends_start_date() -> None:

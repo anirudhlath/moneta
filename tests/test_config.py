@@ -61,8 +61,25 @@ def test_save_config_value_restricts_permissions(tmp_path: Path, monkeypatch) ->
     assert tmp_path.stat().st_mode & 0o777 == 0o700
 
 
+def test_ntfy_topic_default_and_env_override(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("MONETA_CONFIG_DIR", str(tmp_path))
+    assert load_settings().ntfy_topic is None
+    monkeypatch.setenv("MONETA_NTFY_TOPIC", "https://ntfy.sh/moneta-xyz123")
+    assert load_settings().ntfy_topic == "https://ntfy.sh/moneta-xyz123"
+
+
 def test_malformed_config_file_raises_toml_error(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setenv("MONETA_CONFIG_DIR", str(tmp_path))
     (tmp_path / "config.toml").write_text("not = = valid\n")
     with pytest.raises(tomllib.TOMLDecodeError):
         load_settings()
+
+
+def test_env_wins_when_file_and_env_both_set_same_key(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """load_settings's del-loop drops the file value for any key with a MONETA_<KEY>
+    env var present, so the env var (not the file) reaches Settings for that key."""
+    monkeypatch.setenv("MONETA_CONFIG_DIR", str(tmp_path))
+    save_config_value("llm_model", "file-value")
+    assert load_settings().llm_model == "file-value"  # file value applies with no env var yet
+    monkeypatch.setenv("MONETA_LLM_MODEL", "env-value")
+    assert load_settings().llm_model == "env-value"  # env now wins over the same file key

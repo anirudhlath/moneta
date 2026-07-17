@@ -587,6 +587,24 @@ async def test_sync_last_endpoint(client: httpx.AsyncClient) -> None:
     assert body["report"]["ingest"]["new_transactions"] == 3
 
 
+async def test_digest_requires_ntfy_topic(client: httpx.AsyncClient) -> None:
+    r = await client.post("/digest")
+    assert r.status_code == 400
+    assert "ntfy_topic" in r.json()["detail"]
+    assert "ntfy.sh" in r.json()["detail"]
+
+
+async def test_digest_endpoint_nothing_new(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with _client(
+        create_app(sessionmaker, adapters=[], llm=None, ntfy_topic="https://ntfy.sh/test-topic")
+    ) as c:
+        r = await c.post("/digest")
+        assert r.status_code == 200
+        assert r.json() == {"sent": False, "events": 0, "warnings": 0}
+
+
 async def test_status_endpoint_fresh_db(client: httpx.AsyncClient) -> None:
     body = (await client.get("/status")).json()
     assert body == {
