@@ -1,3 +1,4 @@
+from calendar import monthrange
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -258,6 +259,74 @@ def cashflow(
     table.add_row("Accrual spend", fmt_money(r["accrual_cents"]))
     table.add_row("Cash out", fmt_money(r["cash_out_cents"]))
     console.print(table)
+
+
+@app.command()
+def txns(
+    month: Annotated[
+        str | None, typer.Option("--month", help="YYYY-MM (expands to the full month).")
+    ] = None,
+    start: Annotated[
+        str | None, typer.Option("--start", help="YYYY-MM-DD (default: current month).")
+    ] = None,
+    end: Annotated[
+        str | None, typer.Option("--end", help="YYYY-MM-DD (default: current month).")
+    ] = None,
+    account: Annotated[int | None, typer.Option("--account", help="Filter by account ID.")] = None,
+    merchant: Annotated[
+        str | None, typer.Option("--merchant", help="Case-insensitive substring match.")
+    ] = None,
+) -> None:
+    """List transactions with why each is or isn't counted as spend (the trust view).
+
+    --month YYYY-MM and --start/--end are mutually exclusive.
+    """
+    if month is not None and (start is not None or end is not None):
+        console.print("[red]Error:[/red] --month and --start/--end are mutually exclusive.")
+        raise typer.Exit(1)
+    params: dict[str, Any] = {}
+    if month is not None:
+        try:
+            year_s, month_s = month.split("-")
+            year, mon = int(year_s), int(month_s)
+            if not 1 <= mon <= 12:
+                raise ValueError
+        except ValueError:
+            console.print(f"[red]Error:[/red] invalid month {month!r} (expected YYYY-MM)")
+            raise typer.Exit(1) from None
+        last_day = monthrange(year, mon)[1]
+        params["start"] = date(year, mon, 1).isoformat()
+        params["end"] = date(year, mon, last_day).isoformat()
+    else:
+        if start is not None:
+            params["start"] = _parse_iso_date(start)
+        if end is not None:
+            params["end"] = _parse_iso_date(end)
+    if account is not None:
+        params["account_id"] = account
+    if merchant is not None:
+        params["merchant"] = merchant
+
+    rows = request("GET", "/transactions", params=params or None)
+    table = Table("Date", "Account", "Merchant", "Amount", "Counted")
+    counted_magnitude = 0
+    for r in rows:
+        counted = r["counted_in_spend"]
+        cell = "✓" if counted else (r["excluded_because"] or "")
+        table.add_row(
+            r["posted_on"],
+            escape(r["account"]),
+            escape(r["merchant"] or r["description"]),
+            fmt_money(r["amount_cents"]),
+            cell,
+            style=None if counted else "dim",
+        )
+        if counted:
+            counted_magnitude += -r["amount_cents"]
+    console.print(table)
+    console.print(
+        f"Counted as spend: {fmt_outflow(counted_magnitude)} (power's spent-so-far for this range)"
+    )
 
 
 @app.command()

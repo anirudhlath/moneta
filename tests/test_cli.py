@@ -382,6 +382,152 @@ def test_cashflow_invalid_date_fails_cleanly(tmp_path: Path, monkeypatch) -> Non
     assert "Traceback" not in result.output
 
 
+def test_txns_table_renders_counted_and_excluded_rows(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    today = date.today()
+
+    async def _seed(session: AsyncSession) -> None:
+        checking = await make_account(session, type=AccountType.checking)
+        await make_txn(
+            session, checking, amount_cents=-2500, merchant="Coffee Shop", posted_on=today
+        )
+        await make_txn(
+            session, checking, amount_cents=300000, merchant="Acme Payroll", posted_on=today
+        )
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["txns"])
+    assert result.exit_code == 0
+    assert "Coffee Shop" in result.output
+    assert "Acme Payroll" in result.output
+    assert "✓" in result.output
+    assert "inflow" in result.output
+    assert "Counted as spend: -$25.00" in result.output
+
+
+def test_txns_month_and_start_are_mutually_exclusive(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["txns", "--month", "2026-07", "--start", "2026-07-01"])
+    assert result.exit_code == 1
+    assert "mutually exclusive" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_txns_filters_pass_through_as_query_params(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[tuple[str, str, Any]] = []
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        calls.append((method, path, params))
+        return []
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(
+        app,
+        [
+            "txns",
+            "--start",
+            "2026-01-01",
+            "--end",
+            "2026-01-31",
+            "--account",
+            "3",
+            "--merchant",
+            "netflix",
+        ],
+    )
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            "GET",
+            "/transactions",
+            {
+                "start": "2026-01-01",
+                "end": "2026-01-31",
+                "account_id": 3,
+                "merchant": "netflix",
+            },
+        )
+    ]
+
+
+def test_txns_month_flag_expands_to_full_month(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[tuple[str, str, Any]] = []
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        calls.append((method, path, params))
+        return []
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["txns", "--month", "2026-02"])
+    assert result.exit_code == 0
+    assert calls == [("GET", "/transactions", {"start": "2026-02-01", "end": "2026-02-28"})]
+
+
+def test_txns_invalid_month_fails_cleanly(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["txns", "--month", "not-a-month"])
+    assert result.exit_code == 1
+    assert "invalid month" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_txns_footer_sums_only_counted_rows(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        return [
+            {
+                "id": 1,
+                "posted_on": "2026-07-05",
+                "account": "Checking",
+                "account_type": "checking",
+                "merchant": "Coffee Shop",
+                "description": "COFFEE SHOP",
+                "amount_cents": -2500,
+                "series": None,
+                "series_status": None,
+                "series_discretionary": None,
+                "link": None,
+                "counted_in_spend": True,
+                "excluded_because": None,
+            },
+            {
+                "id": 2,
+                "posted_on": "2026-07-05",
+                "account": "Checking",
+                "account_type": "checking",
+                "merchant": "Netflix",
+                "description": "NETFLIX",
+                "amount_cents": -1599,
+                "series": "Netflix",
+                "series_status": "active",
+                "series_discretionary": False,
+                "link": None,
+                "counted_in_spend": False,
+                "excluded_because": "fixed cost (series Netflix)",
+            },
+        ]
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["txns"])
+    assert result.exit_code == 0
+    assert "fixed cost (series Netflix)" in result.output
+    assert "Counted as spend: -$25.00" in result.output  # only the counted row
+
+
 def test_power_itemizes_income_sources(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     _isolate(monkeypatch, tmp_path)
 

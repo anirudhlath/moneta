@@ -139,7 +139,6 @@ Sourced from `docs/backlog/` (one file per ticket — see each for context and a
 **High**
 - Brokerage accounts without holdings are invisible to net worth.
 - Fidelity NetBenefits CSV mapping (direct export → vesting import).
-- Transaction drill-down command (inspect what's behind a number).
 
 **Medium**
 - Sync progress feedback; sync-staleness warning in `status`; per-item sync warnings surfaced to the user.
