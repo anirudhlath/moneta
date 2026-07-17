@@ -92,6 +92,7 @@ class SimpleFINAdapter:
                     snap.transactions = fresh
                 else:
                     snap.transactions.extend(fresh)
+                    snap.warnings.extend(window.warnings)
                 empty_streak = 0 if fresh else empty_streak + 1
                 end = start
             return snap or Snapshot(accounts=[], transactions=[], holdings=[])
@@ -146,4 +147,7 @@ def _parse_snapshot(data: dict[str, Any]) -> Snapshot:
                     market_value=Decimal(h.get("market_value", "0")),
                 )
             )
-    return Snapshot(accounts=accounts, transactions=transactions, holdings=holdings)
+    warnings = [f"simplefin: {err}" for err in data.get("errors", [])]
+    return Snapshot(
+        accounts=accounts, transactions=transactions, holdings=holdings, warnings=warnings
+    )

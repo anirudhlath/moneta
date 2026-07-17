@@ -109,6 +109,8 @@ def sync(
         console.print(
             f"{report['ingest']['updated_transactions']} transaction(s) corrected upstream."
         )
+    for warning in report.get("warnings", []):
+        console.print(f"[yellow]⚠ {warning}[/yellow]")
     open_reviews = request("GET", "/review")
     if open_reviews:
         console.print(f"[yellow]{len(open_reviews)} items need review:[/yellow] moneta review")

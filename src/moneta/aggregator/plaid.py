@@ -225,13 +225,9 @@ class PlaidAdapter:
                 if exc.error_code == "ITEM_LOGIN_REQUIRED"
                 else ""
             )
-            logger.warning(
-                "Plaid item {} skipped ({}){}",
-                item.institution_name or item.item_id,
-                exc,
-                hint,
-            )
-            return Snapshot(accounts=[], transactions=[], holdings=[])
+            message = f"Plaid item {item.institution_name or item.item_id} skipped ({exc}){hint}"
+            logger.warning(message)
+            return Snapshot(accounts=[], transactions=[], holdings=[], warnings=[message])
 
     async def _fetch_item(self, item: PlaidItem) -> Snapshot:
         # Built locally and merged only on success: a skipped item must not leave

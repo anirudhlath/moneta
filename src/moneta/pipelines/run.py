@@ -5,9 +5,9 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.aggregator.base import AggregatorAdapter
+from moneta.aggregator.base import AggregatorAdapter, Snapshot
 from moneta.llm import Classifier
-from moneta.models import SyncRun, Transaction
+from moneta.models import Account, SyncRun, Transaction
 from moneta.pipelines.events import emit_series_events
 from moneta.pipelines.financing import detect_financing
 from moneta.pipelines.ingest import IngestStats, ingest_snapshot
@@ -23,10 +23,31 @@ _EPOCH = date(1970, 1, 1)
 RESYNC_OVERLAP_DAYS = 7
 
 
-async def _sync_since(session: AsyncSession, full: bool) -> date:
+async def _sync_since(session: AsyncSession, full: bool, source: str) -> date:
     if full:
         return _EPOCH
-    newest = (await session.execute(select(func.max(Transaction.posted_on)))).scalar_one_or_none()
+    has_source = (
+        await session.execute(
+            select(func.count()).select_from(Account).where(Account.source == source)
+        )
+    ).scalar_one()
+    if has_source:
+        # this source's own newest txn — the per-source window that lets a
+        # SimpleFIN outage self-heal without Plaid's daily replay masking it
+        newest = (
+            await session.execute(
+                select(func.max(Transaction.posted_on))
+                .join(Account, Transaction.account_id == Account.id)
+                .where(Account.source == source)
+            )
+        ).scalar_one_or_none()
+    else:
+        # no accounts carry this source yet (first run after upgrading onto
+        # source-attributed accounts) — fall back to the global max so a
+        # known-but-not-yet-backfilled source doesn't re-pull full history
+        newest = (
+            await session.execute(select(func.max(Transaction.posted_on)))
+        ).scalar_one_or_none()
     if newest is None:
         return _EPOCH
     return newest - timedelta(days=RESYNC_OVERLAP_DAYS)
@@ -41,11 +62,43 @@ class SyncReport(BaseModel):
     recurring: RecurringStats
     verify: VerifyStats
     events: int
+    warnings: list[str]
+
+
+async def _fetch_all(
+    session: AsyncSession, adapters: list[AggregatorAdapter], full: bool
+) -> tuple[Snapshot, list[str]]:
+    """Fetch every adapter with its own per-source `since`, merging into one snapshot.
+
+    A failing adapter degrades to a warning and is skipped — UNLESS it's the only
+    adapter configured, in which case it re-raises (today's fail-loud behavior for
+    a single source is preserved; run_sync's caller rolls back and marks the run
+    failed).
+    """
+    snap = Snapshot(accounts=[], transactions=[], holdings=[])
+    warnings: list[str] = []
+    sole = len(adapters) == 1
+    for adapter in adapters:
+        since = await _sync_since(session, full, adapter.source)
+        try:
+            fetched = await adapter.fetch(since=since)
+        except Exception as exc:
+            if sole:
+                raise
+            warning = f"{adapter.source}: {type(exc).__name__}: {exc}"
+            logger.warning("sync: adapter {} failed: {}", adapter.source, exc)
+            warnings.append(warning)
+            continue
+        snap.accounts.extend(fetched.accounts)
+        snap.transactions.extend(fetched.transactions)
+        snap.holdings.extend(fetched.holdings)
+        warnings.extend(fetched.warnings)
+    return snap, warnings
 
 
 async def run_sync(
     session: AsyncSession,
-    adapter: AggregatorAdapter,
+    adapters: list[AggregatorAdapter],
     llm: Classifier | None,
     today: date,
     full: bool = False,
@@ -54,7 +107,7 @@ async def run_sync(
     session.add(run)
     await session.commit()
     try:
-        snap = await adapter.fetch(since=await _sync_since(session, full))
+        snap, fetch_warnings = await _fetch_all(session, adapters, full)
         ingest = await ingest_snapshot(session, snap)
         normalized = await normalize_merchants(session, llm)
         transfers = await link_transfers(session, llm)
@@ -82,6 +135,7 @@ async def run_sync(
         recurring=recurring,
         verify=verify,
         events=events,
+        warnings=fetch_warnings,
     )
     run.finished_at = datetime.now()
     run.success = True

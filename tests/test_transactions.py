@@ -292,7 +292,7 @@ async def test_endpoint_defaults_to_current_month_and_pins_signed_int(
     await make_txn(session, checking, amount_cents=-1234, posted_on=today)
     await session.commit()
 
-    app = create_app(sessionmaker, adapter=None, llm=None)
+    app = create_app(sessionmaker, adapters=[], llm=None)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         r = await client.get("/transactions")
@@ -319,7 +319,7 @@ async def test_endpoint_filters_pass_through(
     )
     await session.commit()
 
-    app = create_app(sessionmaker, adapter=None, llm=None)
+    app = create_app(sessionmaker, adapters=[], llm=None)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         r = await client.get(
@@ -383,7 +383,7 @@ async def test_power_and_transactions_agree_on_spent_so_far(
 
     power = await power_report(session, today=today)
 
-    app = create_app(sessionmaker, adapter=None, llm=None)
+    app = create_app(sessionmaker, adapters=[], llm=None)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         r = await client.get("/transactions")

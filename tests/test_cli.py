@@ -973,6 +973,61 @@ def test_sync_prints_verification_line(monkeypatch) -> None:  # type: ignore[no-
     assert "LLM verified 2 series; flagged 1 for review." in result.output
 
 
+def test_sync_prints_warnings(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        if path == "/sync":
+            return {
+                "ingest": {"new_transactions": 0},
+                "transfers": {"linked": 0},
+                "recurring": {"new_series": 0},
+                "events": 0,
+                "auto_resolved": 0,
+                "verify": {"verified": 0, "flagged": 0},
+                "warnings": [
+                    "simplefin: bridge error: re-authenticate at the institution",
+                    "Plaid item Old Bank skipped (ITEM_LOGIN_REQUIRED: re-link)"
+                    " — re-link with: moneta setup plaid-link",
+                ],
+            }
+        return []
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 0
+    assert "⚠ simplefin: bridge error: re-authenticate at the institution" in result.output
+    assert "⚠ Plaid item Old Bank skipped" in result.output
+
+
+def test_sync_omits_warnings_section_when_healthy(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        if path == "/sync":
+            return {
+                "ingest": {"new_transactions": 0},
+                "transfers": {"linked": 0},
+                "recurring": {"new_series": 0},
+                "events": 0,
+                "auto_resolved": 0,
+                "verify": {"verified": 0, "flagged": 0},
+                "warnings": [],
+            }
+        return []
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 0
+    assert "⚠" not in result.output
+
+
 def _seed_price_change_review(tmp_path: Path) -> None:
     async def _seed() -> None:
         engine, sessionmaker = make_sessionmaker(f"sqlite+aiosqlite:///{tmp_path / 'moneta.db'}")

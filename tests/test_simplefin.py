@@ -81,7 +81,23 @@ async def test_fetch_parses_snapshot() -> None:
     assert snap.transactions[0].amount == Decimal("-42.50")
     assert snap.transactions[0].account_id == "ACT-1"
     assert snap.holdings[0].symbol == "AAPL"
+    assert snap.warnings == []
     assert snap.holdings[0].quantity == 10.5
+
+
+async def test_bridge_errors_surface_as_warnings() -> None:
+    payload = json.loads(json.dumps(SIMPLEFIN_PAYLOAD))
+    payload["errors"] = ["ACT-1: re-authenticate at the institution"]
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    adapter = SimpleFINAdapter(
+        "https://u:p@bridge.example/simplefin",
+        client=_mock_client(httpx.MockTransport(handle)),
+    )
+    snap = await adapter.fetch()
+    assert snap.warnings == ["simplefin: ACT-1: re-authenticate at the institution"]
 
 
 async def test_fetch_since_sends_start_date() -> None:
@@ -209,6 +225,38 @@ async def test_bridge_ignoring_end_date_does_not_duplicate() -> None:
     snap = await adapter.fetch(since=today - timedelta(days=120))
     assert [t.id for t in snap.transactions] == ["TRN-5"]
     assert len(requests) == 3  # dupe-only windows count as empty; walk still reaches since
+
+
+async def test_deep_since_warnings_merge_across_windows() -> None:
+    """A bridge error on a non-freshest window must still surface, not get dropped
+    when only the freshest window's Snapshot object is kept."""
+    today = _utc_today()
+    calls = {"n": 0}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        payload: dict[str, Any] = {
+            "errors": ["window error"] if calls["n"] == 2 else [],
+            "accounts": [
+                {
+                    "org": {"name": "Chase"},
+                    "id": "ACT-1",
+                    "name": "Checking",
+                    "currency": "USD",
+                    "balance": "1.00",
+                    "balance-date": _ts(today),
+                    "transactions": [],
+                }
+            ],
+        }
+        return httpx.Response(200, json=payload)
+
+    adapter = SimpleFINAdapter(
+        "https://u:p@bridge.example/simplefin", client=_mock_client(httpx.MockTransport(handle))
+    )
+    snap = await adapter.fetch(since=today - timedelta(days=120))
+    assert calls["n"] == 3  # 3 windows to walk from today back to `since`
+    assert snap.warnings == ["simplefin: window error"]
 
 
 async def test_claim_setup_token() -> None:

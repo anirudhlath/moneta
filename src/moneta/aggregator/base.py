@@ -1,10 +1,10 @@
 import asyncio
-from collections.abc import Awaitable, Iterable, Sequence
+from collections.abc import Awaitable, Iterable
 from datetime import date
 from decimal import Decimal
 from typing import Any, Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from moneta.models import AccountType
 
@@ -40,6 +40,7 @@ class Snapshot(BaseModel):
     accounts: list[AccountDTO]
     transactions: list[TransactionDTO]
     holdings: list[HoldingDTO]
+    warnings: list[str] = Field(default_factory=list)
 
 
 class AggregatorAdapter(Protocol):
@@ -64,20 +65,5 @@ async def gather_snapshots(fetches: Iterable[Awaitable[Snapshot]]) -> Snapshot:
         accounts=[a for s in snaps for a in s.accounts],
         transactions=[t for s in snaps for t in s.transactions],
         holdings=[h for s in snaps for h in s.holdings],
+        warnings=[w for s in snaps for w in s.warnings],
     )
-
-
-class MergedAdapter:
-    """Fans fetch() out to several adapters and concatenates their snapshots."""
-
-    def __init__(self, adapters: Sequence[AggregatorAdapter]) -> None:
-        self._adapters = list(adapters)
-
-    @property
-    def source(self) -> str:
-        # transitional shim: MergedAdapter dies in the next task once run_sync
-        # iterates adapters itself and computes a real per-source `since`.
-        return "merged"
-
-    async def fetch(self, since: date | None = None) -> Snapshot:
-        return await gather_snapshots(a.fetch(since) for a in self._adapters)

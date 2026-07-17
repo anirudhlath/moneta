@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from moneta.aggregator.base import AggregatorAdapter, MergedAdapter
+from moneta.aggregator.base import AggregatorAdapter
 from moneta.aggregator.plaid import PlaidAdapter, PlaidClient, items_path, load_items
 from moneta.aggregator.simplefin import SimpleFINAdapter
 from moneta.cadence import month_bounds
@@ -145,7 +145,7 @@ class BackupIn(BaseModel):
 
 def create_app(
     sessionmaker: async_sessionmaker[AsyncSession],
-    adapter: AggregatorAdapter | None,
+    adapters: list[AggregatorAdapter],
     llm: Classifier | None,
     engine: AsyncEngine | None = None,
     api_token: str | None = None,
@@ -188,7 +188,7 @@ def create_app(
 
     @app.post("/sync")
     async def sync(session: Session, full: bool = False) -> SyncReport:
-        if adapter is None:
+        if not adapters:
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -196,7 +196,7 @@ def create_app(
                     "moneta setup simplefin <token> or moneta setup plaid <client_id> <secret>"
                 ),
             )
-        return await run_sync(session, adapter, llm, today=date.today(), full=full)
+        return await run_sync(session, adapters, llm, today=date.today(), full=full)
 
     @app.get("/sync/last")
     async def sync_last(session: Session) -> SyncRunOut | None:
@@ -514,7 +514,7 @@ def create_app(
     return app
 
 
-def _build_adapter(settings: Settings) -> AggregatorAdapter | None:
+def _build_adapters(settings: Settings) -> list[AggregatorAdapter]:
     adapters: list[AggregatorAdapter] = []
     if settings.simplefin_access_url:
         adapters.append(SimpleFINAdapter(settings.simplefin_access_url))
@@ -535,9 +535,7 @@ def _build_adapter(settings: Settings) -> AggregatorAdapter | None:
                     items,
                 )
             )
-    if not adapters:
-        return None
-    return adapters[0] if len(adapters) == 1 else MergedAdapter(adapters)
+    return adapters
 
 
 def build_app() -> FastAPI:
@@ -547,7 +545,7 @@ def build_app() -> FastAPI:
     engine, sessionmaker = make_sessionmaker(f"sqlite+aiosqlite:///{settings.db_path}")
     return create_app(
         sessionmaker,
-        _build_adapter(settings),
+        _build_adapters(settings),
         build_classifier(settings.llm_model),
         engine=engine,
         api_token=settings.api_token,
