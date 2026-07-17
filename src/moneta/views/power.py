@@ -1,3 +1,4 @@
+from calendar import monthrange
 from collections.abc import Iterable
 from datetime import date
 
@@ -35,6 +36,8 @@ class PowerReport(BaseModel):
     spending_power_cents: int
     spent_so_far_cents: int
     remaining_cents: int
+    days_left: int
+    per_day_remaining_cents: int
 
 
 def _series_lines(series: Iterable[RecurringSeries]) -> tuple[list[SeriesLine], int]:
@@ -142,6 +145,9 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
     spent_cents = sum(-t.amount_cents for t in month_txns if t.id not in linked_ids)
 
     power = monthly_income - total_fixed
+    remaining = power - spent_cents
+    last_day = monthrange(today.year, today.month)[1]
+    days_left = (date(today.year, today.month, last_day) - today).days + 1
     return PowerReport(
         month=f"{today.year:04d}-{today.month:02d}",
         monthly_income_cents=monthly_income,
@@ -150,5 +156,7 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
         total_fixed_cents=total_fixed,
         spending_power_cents=power,
         spent_so_far_cents=spent_cents,
-        remaining_cents=power - spent_cents,
+        remaining_cents=remaining,
+        days_left=days_left,
+        per_day_remaining_cents=round(remaining / days_left),
     )

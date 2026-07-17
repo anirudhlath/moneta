@@ -1,3 +1,4 @@
+from calendar import monthrange
 from datetime import date
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -270,3 +271,30 @@ async def test_discretionary_inflow_not_income(session: AsyncSession) -> None:
     report = await power_report(session, today=date(2026, 7, 7))
     assert report.income_sources == []
     assert report.monthly_income_cents == 0
+
+
+async def test_per_day_remaining_mid_month(session: AsyncSession) -> None:
+    today = date(2026, 7, 15)
+    last_day = monthrange(today.year, today.month)[1]
+    expected_days_left = (date(today.year, today.month, last_day) - today).days + 1
+    report = await power_report(session, today=today)
+    assert report.days_left == expected_days_left
+    assert report.per_day_remaining_cents == round(report.remaining_cents / expected_days_left)
+
+
+async def test_per_day_remaining_month_end_no_division_by_zero(session: AsyncSession) -> None:
+    today = date(2026, 7, 31)
+    report = await power_report(session, today=today)
+    assert report.days_left == 1
+    assert report.per_day_remaining_cents == report.remaining_cents
+
+
+async def test_per_day_remaining_negative_when_remaining_negative(session: AsyncSession) -> None:
+    await make_series(session, merchant="Landlord", expected_cents=-99999999)
+    today = date(2026, 7, 15)
+    report = await power_report(session, today=today)
+    assert report.remaining_cents < 0
+    assert report.per_day_remaining_cents < 0
+    last_day = monthrange(today.year, today.month)[1]
+    expected_days_left = (date(today.year, today.month, last_day) - today).days + 1
+    assert report.per_day_remaining_cents == round(report.remaining_cents / expected_days_left)

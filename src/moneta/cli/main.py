@@ -124,6 +124,7 @@ def power() -> None:
     )
     table.add_row("Spent so far", fmt_outflow(r["spent_so_far_cents"]))
     table.add_row("[bold]Remaining[/bold]", f"[bold]{fmt_money(r['remaining_cents'])}[/bold]")
+    table.add_row(f"Per day ({r['days_left']} days left)", fmt_money(r["per_day_remaining_cents"]))
     console.print(table)
 
 

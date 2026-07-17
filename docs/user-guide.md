@@ -118,6 +118,9 @@ The flagship view for the current month:
 - **Spending power** = income − fixed costs.
 - **Spent so far / remaining** — discretionary spend this month (accrual: credit purchases
   count when made, not when the card is paid).
+- **Per day (N days left)** — `remaining ÷ days left in month` (today through month-end,
+  inclusive; the last day of the month shows 1 day left). Negative remaining shows a negative
+  per-day figure — no clamping to zero.
 
 ### `moneta networth`
 

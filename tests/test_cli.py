@@ -1,4 +1,5 @@
 import asyncio
+from calendar import monthrange
 from collections.abc import Awaitable, Callable
 from datetime import date, timedelta
 from pathlib import Path
@@ -427,6 +428,19 @@ def test_power_biweekly_renders_per_cycle_and_monthly(tmp_path: Path, monkeypatc
     assert "$15.99" in result.output  # monthly row stays bare
     assert "(monthly)" not in result.output
     assert "(biweekly)" not in result.output
+
+
+def test_power_per_day_row_after_remaining(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["power"])
+    assert result.exit_code == 0
+    today = date.today()
+    last_day = monthrange(today.year, today.month)[1]
+    days_left = (date(today.year, today.month, last_day) - today).days + 1
+    assert f"Per day ({days_left} days left)" in result.output
+    remaining_idx = result.output.index("Remaining")
+    per_day_idx = result.output.index("Per day")
+    assert per_day_idx > remaining_idx
 
 
 def test_review_non_integer_answer_skips_cleanly(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
