@@ -190,6 +190,8 @@ def status(json_output: JsonOption = False) -> None:
                 f"  {rep['ingest']['new_transactions']} new txns, "
                 f"{rep['recurring']['new_series']} new series, {rep['events']} events"
             )
+            for warning in rep.get("warnings", []):
+                console.print(f"  [yellow]⚠ {warning}[/yellow]")
     aggregators = (
         ", ".join(st["aggregators"]) if st["aggregators"] else "[dim]none configured[/dim]"
     )

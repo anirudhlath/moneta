@@ -1392,6 +1392,29 @@ def test_status_shows_accounts_and_configured_sources(tmp_path: Path, monkeypatc
     assert "bridge.example" not in result.output
 
 
+def test_status_renders_last_sync_warnings(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def seed(session: AsyncSession) -> None:
+        session.add(
+            SyncRun(
+                finished_at=datetime.now(),
+                success=True,
+                report={
+                    "ingest": {"new_transactions": 0},
+                    "recurring": {"new_series": 0},
+                    "events": 0,
+                    "warnings": ["simplefin: Auth required for Apple Card"],
+                },
+            )
+        )
+
+    _seed_db(tmp_path, seed)
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert "Auth required for Apple Card" in result.output
+
+
 def test_status_shows_in_flight_sync_as_incomplete(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     _isolate(monkeypatch, tmp_path)
 

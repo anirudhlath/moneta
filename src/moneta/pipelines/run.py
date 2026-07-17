@@ -102,6 +102,10 @@ async def run_sync(
     today: date,
     full: bool = False,
 ) -> SyncReport:
+    # an empty adapter list must be rejected by callers (/sync 400s); a silent
+    # empty-snapshot "success" here would stamp data_as_of and lie about freshness
+    if not adapters:
+        raise ValueError("run_sync requires at least one adapter")
     run = SyncRun()
     session.add(run)
     await session.commit()
