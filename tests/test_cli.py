@@ -2,7 +2,7 @@ import asyncio
 import json
 from calendar import monthrange
 from collections.abc import Awaitable, Callable
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +66,63 @@ def test_networth_runs(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-
     result = runner.invoke(app, ["networth"])
     assert result.exit_code == 0
     assert "Net worth" in result.output
+
+
+def test_power_footer_absent_when_no_sync_has_run(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["power"])
+    assert result.exit_code == 0
+    assert "no successful sync yet" in result.output
+
+
+def test_power_footer_present_when_stale(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def seed(session: AsyncSession) -> None:
+        session.add(SyncRun(success=True, finished_at=datetime.now() - timedelta(hours=48)))
+
+    _seed_db(tmp_path, seed)
+    result = runner.invoke(app, ["power"])
+    assert result.exit_code == 0
+    assert "data as of" in result.output
+    assert "run moneta sync" in result.output
+
+
+def test_power_footer_absent_when_fresh(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def seed(session: AsyncSession) -> None:
+        session.add(SyncRun(success=True, finished_at=datetime.now()))
+
+    _seed_db(tmp_path, seed)
+    result = runner.invoke(app, ["power"])
+    assert result.exit_code == 0
+    assert "data as of" not in result.output
+    assert "no successful sync yet" not in result.output
+
+
+def test_networth_footer_present_when_stale(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def seed(session: AsyncSession) -> None:
+        session.add(SyncRun(success=True, finished_at=datetime.now() - timedelta(hours=48)))
+
+    _seed_db(tmp_path, seed)
+    result = runner.invoke(app, ["networth"])
+    assert result.exit_code == 0
+    assert "data as of" in result.output
+
+
+def test_networth_footer_absent_when_fresh(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def seed(session: AsyncSession) -> None:
+        session.add(SyncRun(success=True, finished_at=datetime.now()))
+
+    _seed_db(tmp_path, seed)
+    result = runner.invoke(app, ["networth"])
+    assert result.exit_code == 0
+    assert "data as of" not in result.output
 
 
 def test_sync_without_setup_fails_cleanly(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -1179,6 +1236,24 @@ def test_status_before_any_sync(tmp_path: Path, monkeypatch) -> None:  # type: i
     assert "No sync has run yet" in result.output
 
 
+def test_status_shows_accounts_and_configured_sources(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("MONETA_SIMPLEFIN_ACCESS_URL", "https://user:pass@bridge.example/simplefin")
+
+    async def seed(session: AsyncSession) -> None:
+        await make_account(session)
+
+    _seed_db(tmp_path, seed)
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert "Accounts: 1" in result.output
+    assert "simplefin" in result.output
+    assert "LLM: not configured" in result.output
+    # never echo secrets
+    assert "user:pass" not in result.output
+    assert "bridge.example" not in result.output
+
+
 def test_status_shows_in_flight_sync_as_incomplete(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     _isolate(monkeypatch, tmp_path)
 
@@ -1441,7 +1516,12 @@ def test_status_json_output_null_before_any_sync(  # type: ignore[no-untyped-def
     _isolate(monkeypatch, tmp_path)
     result = runner.invoke(app, ["status", "--json"])
     assert result.exit_code == 0
-    assert result.stdout.strip() == "null"
+    body = json.loads(result.stdout)
+    assert body["last_sync_at"] is None
+    assert body["last_sync_ok"] is None
+    assert body["accounts"] == 0
+    assert body["open_reviews"] == 0
+    assert body["last_sync"] is None
 
 
 def test_status_json_output_with_sync(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -1454,7 +1534,8 @@ def test_status_json_output_with_sync(tmp_path: Path, monkeypatch) -> None:  # t
     result = runner.invoke(app, ["status", "--json"])
     assert result.exit_code == 0
     body = json.loads(result.stdout)
-    assert body["status"] == "incomplete"
+    assert body["last_sync"]["status"] == "incomplete"
+    assert body["last_sync_ok"] is None  # unfinished: unknown, not a failure
 
 
 def test_recurring_json_with_write_flag_errors_before_request(monkeypatch) -> None:  # type: ignore[no-untyped-def]

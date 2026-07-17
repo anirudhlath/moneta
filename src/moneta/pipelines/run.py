@@ -44,7 +44,11 @@ async def _sync_since(session: AsyncSession, full: bool, source: str) -> date:
     else:
         # no accounts carry this source yet (first run after upgrading onto
         # source-attributed accounts) — fall back to the global max so a
-        # known-but-not-yet-backfilled source doesn't re-pull full history
+        # known-but-not-yet-backfilled source doesn't re-pull full history.
+        # NOTE: this also fires for a genuinely new source added to an already-
+        # populated DB (its first-ever sync) — it inherits the global newest date
+        # instead of the epoch, truncating its first pull; deliberate/accepted,
+        # use `sync --full` when adding a new source.
         newest = (
             await session.execute(select(func.max(Transaction.posted_on)))
         ).scalar_one_or_none()
@@ -70,29 +74,29 @@ async def _fetch_all(
 ) -> tuple[Snapshot, list[str]]:
     """Fetch every adapter with its own per-source `since`, merging into one snapshot.
 
-    A failing adapter degrades to a warning and is skipped — UNLESS it's the only
-    adapter configured, in which case it re-raises (today's fail-loud behavior for
-    a single source is preserved; run_sync's caller rolls back and marks the run
-    failed).
+    A failing adapter degrades to a warning and is skipped — UNLESS every configured
+    adapter fails (the sole-adapter case is just the n=1 instance of this), in which
+    case the first failure re-raises: an empty snapshot must never be ingested as a
+    quiet success, or `data_as_of`/staleness would lie about having fresh data.
     """
     snap = Snapshot(accounts=[], transactions=[], holdings=[])
     warnings: list[str] = []
-    sole = len(adapters) == 1
+    failures: list[tuple[str, Exception]] = []
     for adapter in adapters:
         since = await _sync_since(session, full, adapter.source)
         try:
             fetched = await adapter.fetch(since=since)
         except Exception as exc:
-            if sole:
-                raise
-            warning = f"{adapter.source}: {type(exc).__name__}: {exc}"
             logger.warning("sync: adapter {} failed: {}", adapter.source, exc)
-            warnings.append(warning)
+            failures.append((adapter.source, exc))
             continue
         snap.accounts.extend(fetched.accounts)
         snap.transactions.extend(fetched.transactions)
         snap.holdings.extend(fetched.holdings)
         warnings.extend(fetched.warnings)
+    if failures and len(failures) == len(adapters):
+        raise failures[0][1]
+    warnings.extend(f"{source}: {type(exc).__name__}: {exc}" for source, exc in failures)
     return snap, warnings
 
 

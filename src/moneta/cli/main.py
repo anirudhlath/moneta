@@ -1,5 +1,5 @@
 import json
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -44,6 +44,20 @@ def fmt_outflow(magnitude_cents: int) -> str:
 
 
 _CADENCE_PHRASE = {"weekly": "every week", "biweekly": "every 2 weeks", "annual": "every year"}
+
+_STALE_AFTER = timedelta(hours=24)
+
+
+def _staleness_footer(data_as_of: str | None) -> str | None:
+    """Dim footer text for power/networth when the underlying data is stale (design
+    2026-07-16 §3): None when no successful sync has ever run, or when the newest
+    successful sync is older than 24h. Returns None (no footer) when fresh."""
+    if data_as_of is None:
+        return "no successful sync yet — run moneta sync"
+    as_of = datetime.fromisoformat(data_as_of)
+    if datetime.now() - as_of > _STALE_AFTER:
+        return f"data as of {as_of.date().isoformat()} — run moneta sync"
+    return None
 
 
 def _series_line_amount(line: dict[str, Any]) -> str:
@@ -118,25 +132,38 @@ def sync(
 
 @app.command()
 def status(json_output: JsonOption = False) -> None:
-    """Show the most recent sync run and its outcome."""
-    r = request("GET", "/sync/last")
-    if emit_json(r, json_output):
+    """Show overall health (accounts, review queue, configured sources) plus the
+    most recent sync run's outcome."""
+    st = request("GET", "/status")
+    last = request("GET", "/sync/last")
+    if json_output:
+        print(json.dumps({**st, "last_sync": last}))
         return
-    if not r:
+    if not last:
         console.print("No sync has run yet. Run: [bold]moneta sync[/bold]")
-        return
-    outcome = {
-        "ok": "[green]ok[/green]",
-        "failed": f"[red]failed[/red] — {r['error']}",
-        "incomplete": "[yellow]incomplete[/yellow] — still running, or the process died mid-sync",
-    }[r["status"]]
-    console.print(f"Last sync: {r['started_at']} → {outcome}")
-    if r["report"]:
-        rep = r["report"]
-        console.print(
-            f"  {rep['ingest']['new_transactions']} new txns, "
-            f"{rep['recurring']['new_series']} new series, {rep['events']} events"
-        )
+    else:
+        outcome = {
+            "ok": "[green]ok[/green]",
+            "failed": f"[red]failed[/red] — {last['error']}",
+            "incomplete": (
+                "[yellow]incomplete[/yellow] — still running, or the process died mid-sync"
+            ),
+        }[last["status"]]
+        console.print(f"Last sync: {last['started_at']} → {outcome}")
+        if last["report"]:
+            rep = last["report"]
+            console.print(
+                f"  {rep['ingest']['new_transactions']} new txns, "
+                f"{rep['recurring']['new_series']} new series, {rep['events']} events"
+            )
+    aggregators = (
+        ", ".join(st["aggregators"]) if st["aggregators"] else "[dim]none configured[/dim]"
+    )
+    console.print(
+        f"Accounts: {st['accounts']}  ·  Open review items: {st['open_reviews']}\n"
+        f"Aggregators: {aggregators}  ·  "
+        f"LLM: {'configured' if st['llm_configured'] else 'not configured'}"
+    )
 
 
 @app.command()
@@ -188,6 +215,8 @@ def power(
             for u in r["upcoming"]
         ]
         console.print(f"[dim]Upcoming this month: {' · '.join(parts)}[/dim]")
+    if footer := _staleness_footer(r.get("data_as_of")):
+        console.print(f"[dim]{footer}[/dim]")
 
 
 @app.command()
@@ -213,6 +242,8 @@ def networth(json_output: JsonOption = False) -> None:
             f"[yellow]{r['foreign_accounts']} account(s) in a non-primary currency are "
             f"excluded from these totals[/yellow]"
         )
+    if footer := _staleness_footer(r.get("data_as_of")):
+        console.print(f"[dim]{footer}[/dim]")
 
 
 @app.command()

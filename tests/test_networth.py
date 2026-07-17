@@ -1,6 +1,8 @@
+from datetime import datetime
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.models import AccountType, Holding
+from moneta.models import AccountType, Holding, SyncRun
 from moneta.views.networth import net_worth_report
 from tests.factories import make_account
 
@@ -67,3 +69,17 @@ async def test_foreign_currency_accounts_excluded(session: AsyncSession) -> None
     r = await net_worth_report(session)
     assert r.liquid_cents == 100000
     assert r.foreign_accounts == 1
+
+
+async def test_data_as_of_is_none_with_no_sync_run(session: AsyncSession) -> None:
+    r = await net_worth_report(session)
+    assert r.data_as_of is None
+
+
+async def test_data_as_of_reports_newest_successful_run(session: AsyncSession) -> None:
+    session.add(SyncRun(success=True, finished_at=datetime(2026, 7, 5, 9, 0)))
+    session.add(SyncRun(success=True, finished_at=datetime(2026, 7, 6, 10, 0)))
+    session.add(SyncRun(success=False, finished_at=datetime(2026, 7, 7, 11, 0)))
+    await session.flush()
+    r = await net_worth_report(session)
+    assert r.data_as_of == datetime(2026, 7, 6, 10, 0)

@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -584,6 +585,50 @@ async def test_sync_last_endpoint(client: httpx.AsyncClient) -> None:
     assert body["status"] == "ok"
     assert body["success"] is True
     assert body["report"]["ingest"]["new_transactions"] == 3
+
+
+async def test_status_endpoint_fresh_db(client: httpx.AsyncClient) -> None:
+    body = (await client.get("/status")).json()
+    assert body == {
+        "last_sync_at": None,
+        "last_sync_ok": None,
+        "accounts": 0,
+        "open_reviews": 0,
+        "aggregators": ["fake"],  # the client fixture's FakeAdapter source
+        "llm_configured": False,
+    }
+
+
+async def test_status_endpoint_after_successful_sync(client: httpx.AsyncClient) -> None:
+    await client.post("/sync")
+    body = (await client.get("/status")).json()
+    assert body["last_sync_at"] is not None
+    assert body["last_sync_ok"] is True
+    assert body["accounts"] == 1
+    assert isinstance(body["open_reviews"], int)
+
+
+async def test_status_endpoint_reflects_open_review_count(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    client: httpx.AsyncClient,
+) -> None:
+    async with sessionmaker() as session:
+        session.add(ReviewItem(kind=ReviewKind.merchant, question="?", payload={}))
+        await session.commit()
+    body = (await client.get("/status")).json()
+    assert body["open_reviews"] == 1
+
+
+async def test_status_endpoint_llm_configured_flag(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    class StubLLM:
+        async def classify_json(self, prompt: str) -> dict[str, Any] | None:
+            return None
+
+    async with _client(create_app(sessionmaker, adapters=[], llm=StubLLM())) as c:
+        body = (await c.get("/status")).json()
+        assert body["llm_configured"] is True
 
 
 async def test_bearer_token_enforced_when_configured(

@@ -206,6 +206,32 @@ async def test_one_of_two_adapter_failure_warns_and_ingests_the_other(
     assert run.success is True  # a partial failure is not a failed sync
 
 
+async def test_all_adapters_failing_fails_the_sync(session: AsyncSession) -> None:
+    """Every adapter failing must behave like the sole-adapter case (re-raise, SyncRun
+    marked failed) — not a quiet 'success' over an empty snapshot with two warnings,
+    which would leave data_as_of/staleness lying about having fresh data."""
+
+    class FailingAdapter:
+        def __init__(self, source: str) -> None:
+            self.source = source
+
+        async def fetch(self, since: date | None = None) -> Snapshot:
+            raise RuntimeError(f"{self.source} bridge down")
+
+    with pytest.raises(RuntimeError, match="bridge down"):
+        await run_sync(
+            session,
+            [FailingAdapter("simplefin"), FailingAdapter("plaid")],
+            llm=None,
+            today=date(2026, 7, 9),
+        )
+    run = (await session.execute(select(SyncRun))).scalar_one()
+    assert run.success is False
+    assert run.error is not None and "bridge down" in run.error
+    txn_count = (await session.execute(select(func.count()).select_from(Transaction))).scalar_one()
+    assert txn_count == 0  # failed fetch leaves domain tables untouched
+
+
 async def test_second_identical_sync_is_a_full_noop(session: AsyncSession) -> None:
     snap = Snapshot(
         accounts=[

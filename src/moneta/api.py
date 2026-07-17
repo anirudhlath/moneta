@@ -9,7 +9,7 @@ from typing import Annotated, Any, Literal
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from loguru import logger
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from moneta.aggregator.base import AggregatorAdapter
@@ -130,6 +130,15 @@ class TransactionsReport(BaseModel):
     transactions: list[TxnRow]
 
 
+class StatusOut(BaseModel):
+    last_sync_at: datetime | None
+    last_sync_ok: bool | None
+    accounts: int
+    open_reviews: int
+    aggregators: list[str]
+    llm_configured: bool
+
+
 class SyncRunOut(BaseModel):
     status: Literal["ok", "failed", "incomplete"]
     started_at: datetime
@@ -218,6 +227,37 @@ def create_app(
             success=row.success,
             error=row.error,
             report=row.report,
+        )
+
+    @app.get("/status")
+    async def status(session: Session) -> StatusOut:
+        """Overall health: booleans/counters only, never secrets (design 2026-07-16 §3)."""
+        last_run = (
+            await session.execute(select(SyncRun).order_by(SyncRun.id.desc()).limit(1))
+        ).scalar_one_or_none()
+        last_sync_at = last_run.finished_at if last_run is not None else None
+        # last_sync_ok is unknown (None), not False, while the newest run is still in
+        # flight — a bare boolean would misreport an unfinished sync as a failure
+        last_sync_ok = (
+            last_run.success if last_run is not None and last_run.finished_at is not None else None
+        )
+        accounts_count = (
+            await session.execute(select(func.count()).select_from(Account))
+        ).scalar_one()
+        open_reviews_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(ReviewItem)
+                .where(ReviewItem.status == ReviewStatus.open)
+            )
+        ).scalar_one()
+        return StatusOut(
+            last_sync_at=last_sync_at,
+            last_sync_ok=last_sync_ok,
+            accounts=accounts_count,
+            open_reviews=open_reviews_count,
+            aggregators=[a.source for a in adapters],
+            llm_configured=llm is not None,
         )
 
     @app.get("/power")

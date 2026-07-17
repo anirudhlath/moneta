@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,7 +11,7 @@ from moneta.models import (
     AccountType,
     Holding,
 )
-from moneta.queries import primary_currency
+from moneta.queries import latest_successful_sync_at, primary_currency
 
 
 class NetWorthReport(BaseModel):
@@ -20,6 +22,7 @@ class NetWorthReport(BaseModel):
     unvested_potential_cents: int
     unknown_accounts: int
     foreign_accounts: int
+    data_as_of: datetime | None  # newest successful SyncRun.finished_at (design 2026-07-16 §3)
 
 
 async def net_worth_report(session: AsyncSession) -> NetWorthReport:
@@ -60,4 +63,5 @@ async def net_worth_report(session: AsyncSession) -> NetWorthReport:
         unvested_potential_cents=unvested_cents,
         unknown_accounts=unknown,
         foreign_accounts=len(accounts) - len(domestic),
+        data_as_of=await latest_successful_sync_at(session),
     )
