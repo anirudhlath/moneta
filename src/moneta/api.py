@@ -38,7 +38,7 @@ from moneta.pipelines.review import apply_resolution, review_context
 from moneta.pipelines.run import SyncReport, run_sync
 from moneta.queries import classified_links, primary_currency
 from moneta.vesting import apply_vesting, parse_vesting_csv
-from moneta.views.cashflow import accrual_income, accrual_spend, cash_out
+from moneta.views.cashflow import accrual_by_month, accrual_spend, cash_out
 from moneta.views.financing import Obligation, compute_obligations
 from moneta.views.networth import NetWorthReport, net_worth_report
 from moneta.views.power import PowerReport, power_report
@@ -120,15 +120,6 @@ class PowerMonth(BaseModel):
     income_cents: int  # magnitude
     spend_cents: int  # magnitude
     net_cents: int  # signed: income - spend
-
-
-def _month_bounds(today: date, months_back: int) -> tuple[date, date]:
-    """First/last day of the calendar month `months_back` months before `today`'s
-    month (0 = today's own month)."""
-    year, month = today.year, today.month - months_back
-    while month <= 0:
-        year, month = year - 1, month + 12
-    return month_bounds(date(year, month, 1))
 
 
 class TransactionsReport(BaseModel):
@@ -240,26 +231,19 @@ def create_app(
         """Month-over-month income/spend, newest first (the newest row is the current,
         still-in-progress month). Unlike GET /power, which reports today's recurring-
         series state, past months here report actual *observed* flows for that
-        calendar month — accrual_income/accrual_spend over the month's full date
-        range — so a since-cancelled bill or a past raise still shows correctly even
-        though no series reflects it anymore today."""
+        calendar month — accrual income/spend over the month's full date range — so
+        a since-cancelled bill or a past raise still shows correctly even though no
+        series reflects it anymore today."""
         today = date.today()
         links = await classified_links(session)
         primary = await primary_currency(session)
-        rows: list[PowerMonth] = []
-        for months_back in range(months):
-            start, end = _month_bounds(today, months_back)
-            income = await accrual_income(session, start, end, links=links, primary=primary)
-            spend = await accrual_spend(session, start, end, links=links, primary=primary)
-            rows.append(
-                PowerMonth(
-                    month=f"{start.year:04d}-{start.month:02d}",
-                    income_cents=income,
-                    spend_cents=spend,
-                    net_cents=income - spend,
-                )
+        rows = await accrual_by_month(session, months, today, links=links, primary=primary)
+        return [
+            PowerMonth(
+                month=month, income_cents=income, spend_cents=spend, net_cents=income - spend
             )
-        return rows
+            for month, income, spend in rows
+        ]
 
     @app.get("/networth")
     async def networth(session: Session) -> NetWorthReport:

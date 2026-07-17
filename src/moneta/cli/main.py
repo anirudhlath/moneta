@@ -61,6 +61,26 @@ def _fmt_upcoming_date(d: date) -> str:
     return f"{d.strftime('%b')} {d.day}"
 
 
+JsonOption = Annotated[bool, typer.Option("--json")]
+
+
+def emit_json(payload: object, enabled: bool) -> bool:
+    """Print `payload` as JSON and report whether the caller should return early —
+    `if emit_json(r, json_output): return` replaces the 8x copy-pasted
+    `if json_output: print(json.dumps(r)); return`."""
+    if enabled:
+        print(json.dumps(payload))
+    return enabled
+
+
+def reject_json_with_writes(json_output: bool, *flags: object) -> None:
+    """Reject --json combined with any write flag (each command passes its own
+    optional write-flag values; None means "not provided")."""
+    if json_output and any(f is not None for f in flags):
+        console.print("[red]Error:[/red] --json cannot be combined with a write option.")
+        raise typer.Exit(1)
+
+
 @app.command()
 def sync(
     full: Annotated[
@@ -95,11 +115,10 @@ def sync(
 
 
 @app.command()
-def status(json_output: Annotated[bool, typer.Option("--json")] = False) -> None:
+def status(json_output: JsonOption = False) -> None:
     """Show the most recent sync run and its outcome."""
     r = request("GET", "/sync/last")
-    if json_output:
-        print(json.dumps(r))
+    if emit_json(r, json_output):
         return
     if not r:
         console.print("No sync has run yet. Run: [bold]moneta sync[/bold]")
@@ -126,13 +145,12 @@ def power(
             "--history", help="Show the last N months' income/spend/net instead of this month."
         ),
     ] = None,
-    json_output: Annotated[bool, typer.Option("--json")] = False,
+    json_output: JsonOption = False,
 ) -> None:
     """Monthly spending power: income - fixed costs."""
     if history is not None:
         rows = request("GET", "/power/history", params={"months": history})
-        if json_output:
-            print(json.dumps(rows))
+        if emit_json(rows, json_output):
             return
         table = Table("Month", "Income", "Spend", "Net")
         for m in rows:
@@ -145,8 +163,7 @@ def power(
         console.print(table)
         return
     r = request("GET", "/power")
-    if json_output:
-        print(json.dumps(r))
+    if emit_json(r, json_output):
         return
     table = Table(title=f"Spending power — {r['month']}", show_header=False)
     table.add_row("Income (detected)", f"{fmt_money(r['monthly_income_cents'])}/mo")
@@ -172,11 +189,10 @@ def power(
 
 
 @app.command()
-def networth(json_output: Annotated[bool, typer.Option("--json")] = False) -> None:
+def networth(json_output: JsonOption = False) -> None:
     """Net worth (vested only) with unvested shown separately."""
     r = request("GET", "/networth")
-    if json_output:
-        print(json.dumps(r))
+    if emit_json(r, json_output):
         return
     table = Table(title="Net worth", show_header=False)
     table.add_row("Liquid", fmt_money(r["liquid_cents"]))
@@ -217,7 +233,7 @@ def recurring(
         int | None,
         typer.Option("--re-review", help="Reopen the series' bill/habit review question."),
     ] = None,
-    json_output: Annotated[bool, typer.Option("--json")] = False,
+    json_output: JsonOption = False,
 ) -> None:
     """List detected recurring series (or recent events with --events).
 
@@ -231,12 +247,7 @@ def recurring(
             "are mutually exclusive."
         )
         raise typer.Exit(1)
-    if json_output and overrules:
-        console.print(
-            "[red]Error:[/red] --json cannot be combined with "
-            "--end/--not-a-bill/--habit/--re-review."
-        )
-        raise typer.Exit(1)
+    reject_json_with_writes(json_output, end, not_a_bill, habit, re_review)
     if end is not None:
         request("PATCH", f"/recurring/{end}", {"status": "ended"})
         console.print(f"[green]Series {end} ended.[/green]")
@@ -256,8 +267,7 @@ def recurring(
         console.print(f"[green]Series {re_review} reopened for review.[/green]")
     if events:
         rows = request("GET", "/recurring/events")
-        if json_output:
-            print(json.dumps(rows))
+        if emit_json(rows, json_output):
             return
         table = Table("When", "ID", "Merchant", "Event", "Details")
         for e in rows:
@@ -270,8 +280,7 @@ def recurring(
             )
     else:
         rows = request("GET", "/recurring")
-        if json_output:
-            print(json.dumps(rows))
+        if emit_json(rows, json_output):
             return
         table = Table("ID", "Merchant", "Direction", "Cadence", "Expected", "Next", "Status")
         for s in rows:
@@ -293,7 +302,7 @@ def cashflow(
         str | None, typer.Option("--start", help="YYYY-MM-DD (default: month start).")
     ] = None,
     end: Annotated[str | None, typer.Option("--end", help="YYYY-MM-DD (default: today).")] = None,
-    json_output: Annotated[bool, typer.Option("--json")] = False,
+    json_output: JsonOption = False,
 ) -> None:
     """Accrual spend vs cash out for a date range (defaults to this month)."""
     params = {
@@ -302,8 +311,7 @@ def cashflow(
         if value is not None
     }
     r = request("GET", "/cashflow", params=params or None)
-    if json_output:
-        print(json.dumps(r))
+    if emit_json(r, json_output):
         return
     table = Table(title=f"Cashflow — {r['start']} to {r['end']}", show_header=False)
     table.add_row("Accrual spend", fmt_money(r["accrual_cents"]))
@@ -326,7 +334,7 @@ def txns(
     merchant: Annotated[
         str | None, typer.Option("--merchant", help="Case-insensitive substring match.")
     ] = None,
-    json_output: Annotated[bool, typer.Option("--json")] = False,
+    json_output: JsonOption = False,
 ) -> None:
     """List transactions with why each is or isn't counted as spend (the trust view).
 
@@ -359,8 +367,7 @@ def txns(
         params["merchant"] = merchant
 
     r = request("GET", "/transactions", params=params or None)
-    if json_output:
-        print(json.dumps(r))
+    if emit_json(r, json_output):
         return
     table = Table("Date", "Account", "Merchant", "Amount", "Counted")
     for row in r["transactions"]:
@@ -384,11 +391,10 @@ def txns(
 
 
 @app.command()
-def obligations(json_output: Annotated[bool, typer.Option("--json")] = False) -> None:
+def obligations(json_output: JsonOption = False) -> None:
     """Loans/financing: monthly payment, balance, months left, promo warnings."""
     rows = request("GET", "/obligations")
-    if json_output:
-        print(json.dumps(rows))
+    if emit_json(rows, json_output):
         return
     table = Table("Account", "Balance", "Payment/mo", "Months left", "Payoff", "Promo ends")
     for ob in rows:
@@ -421,16 +427,11 @@ def accounts(
     set_type: Annotated[tuple[int, str] | None, typer.Option("--set-type")] = None,
     set_promo: Annotated[tuple[int, str] | None, typer.Option("--set-promo")] = None,
     set_financing: Annotated[tuple[int, str] | None, typer.Option("--set-financing")] = None,
-    json_output: Annotated[bool, typer.Option("--json")] = False,
+    json_output: JsonOption = False,
 ) -> None:
     """List accounts. Flags: --set-type ID TYPE, --set-promo ID YYYY-MM-DD,
     --set-financing ID true|false."""
-    if json_output and (set_type or set_promo or set_financing):
-        console.print(
-            "[red]Error:[/red] --json cannot be combined with "
-            "--set-type/--set-promo/--set-financing."
-        )
-        raise typer.Exit(1)
+    reject_json_with_writes(json_output, set_type, set_promo, set_financing)
     if set_type:
         request("PATCH", f"/accounts/{set_type[0]}", {"type": set_type[1]})
     if set_promo:
@@ -440,8 +441,7 @@ def accounts(
         financing_mode = _parse_bool_flag(set_financing[1])
         request("PATCH", f"/accounts/{set_financing[0]}", {"financing_mode": financing_mode})
     rows = request("GET", "/accounts")
-    if json_output:
-        print(json.dumps(rows))
+    if emit_json(rows, json_output):
         return
     table = Table("ID", "Name", "Org", "Type", "Balance", "Promo ends")
     for a in rows:

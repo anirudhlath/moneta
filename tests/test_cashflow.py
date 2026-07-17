@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from moneta.api import create_app
 from moneta.models import Account, AccountType, TransferLink
-from moneta.views.cashflow import accrual_income, accrual_spend, cash_out
+from moneta.views.cashflow import accrual_by_month, accrual_income, accrual_spend, cash_out
 from tests.factories import make_account, make_txn
 
 
@@ -108,3 +108,33 @@ async def test_accrual_income_excludes_linked_inflow(session: AsyncSession) -> N
     # the only positive-amount txn in this fixture is the CC payment's inflow leg
     # (credit account, +8000, transfer-linked) — it must not count as income.
     assert await accrual_income(session, date(2026, 7, 1), date(2026, 7, 31)) == 0
+
+
+async def test_accrual_by_month_buckets_multiple_months(session: AsyncSession) -> None:
+    checking = await make_account(session, type=AccountType.checking)
+    await make_txn(
+        session, checking, amount_cents=250000, posted_on=date(2026, 7, 5), description="PAYROLL"
+    )
+    await make_txn(
+        session, checking, amount_cents=-5000, posted_on=date(2026, 7, 10), description="GROCERY"
+    )
+    await make_txn(
+        session, checking, amount_cents=200000, posted_on=date(2026, 6, 5), description="PAYROLL"
+    )
+    await make_txn(
+        session, checking, amount_cents=-4000, posted_on=date(2026, 6, 20), description="GROCERY"
+    )
+    rows = await accrual_by_month(session, months=2, today=date(2026, 7, 20))
+    assert rows == [
+        ("2026-07", 250000, 5000),
+        ("2026-06", 200000, 4000),
+    ]
+
+
+async def test_accrual_by_month_excludes_linked_txns(session: AsyncSession) -> None:
+    await _cc_purchase_and_payment(session)
+    # same fixture as test_accrual_counts_cc_purchases_not_payments/
+    # test_accrual_income_excludes_linked_inflow: RESTAURANT counts as spend,
+    # the CC PAYMENT's linked legs count nowhere.
+    rows = await accrual_by_month(session, months=1, today=date(2026, 7, 20))
+    assert rows == [("2026-07", 0, 8000)]
