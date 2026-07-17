@@ -93,7 +93,7 @@ async def transactions_report(
     if account_id is not None:
         conditions.append(Transaction.account_id == account_id)
     if merchant is not None:
-        conditions.append(Transaction.merchant.ilike(f"%{merchant}%"))
+        conditions.append(Transaction.merchant.contains(merchant, autoescape=True))
 
     rows = (
         await session.execute(

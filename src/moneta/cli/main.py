@@ -309,7 +309,17 @@ def txns(
 
     rows = request("GET", "/transactions", params=params or None)
     table = Table("Date", "Account", "Merchant", "Amount", "Counted")
+    today = date.today()
+    last_day = monthrange(today.year, today.month)[1]
+    range_start = date.fromisoformat(params["start"]) if "start" in params else today.replace(day=1)
+    range_end = (
+        date.fromisoformat(params["end"])
+        if "end" in params
+        else date(today.year, today.month, last_day)
+    )
+    covers_today = range_start <= today <= range_end
     counted_magnitude = 0
+    through_today_magnitude = 0
     for r in rows:
         counted = r["counted_in_spend"]
         cell = "✓" if counted else (r["excluded_because"] or "")
@@ -323,10 +333,15 @@ def txns(
         )
         if counted:
             counted_magnitude += -r["amount_cents"]
+            if covers_today and date.fromisoformat(r["posted_on"]) <= today:
+                through_today_magnitude += -r["amount_cents"]
     console.print(table)
-    console.print(
-        f"Counted as spend: {fmt_outflow(counted_magnitude)} (power's spent-so-far for this range)"
-    )
+    console.print(f"Counted as spend: {fmt_outflow(counted_magnitude)}")
+    if covers_today:
+        console.print(
+            f"[dim]Through today (power's spent-so-far): "
+            f"{fmt_outflow(through_today_magnitude)}[/dim]"
+        )
 
 
 @app.command()

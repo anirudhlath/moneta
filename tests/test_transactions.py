@@ -238,6 +238,21 @@ async def test_merchant_filter_is_case_insensitive_substring(session: AsyncSessi
     assert rows[0].merchant == "Netflix"
 
 
+async def test_merchant_filter_escapes_like_metacharacters(session: AsyncSession) -> None:
+    """'AT_T' must be treated literally — '_' is a LIKE single-char wildcard and would
+    otherwise also match 'ATXT'."""
+    checking = await make_account(session, type=AccountType.checking)
+    await make_txn(
+        session, checking, amount_cents=-1500, merchant="AT_T Wireless", posted_on=date(2026, 7, 5)
+    )
+    await make_txn(
+        session, checking, amount_cents=-900, merchant="ATXT", posted_on=date(2026, 7, 5)
+    )
+    rows = await transactions_report(session, date(2026, 7, 1), date(2026, 7, 31), merchant="AT_T")
+    assert len(rows) == 1
+    assert rows[0].merchant == "AT_T Wireless"
+
+
 async def test_date_range_filter(session: AsyncSession) -> None:
     checking = await make_account(session, type=AccountType.checking)
     await make_txn(session, checking, amount_cents=-1000, posted_on=date(2026, 6, 30))

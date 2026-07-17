@@ -403,6 +403,8 @@ def test_txns_table_renders_counted_and_excluded_rows(tmp_path: Path, monkeypatc
     assert "✓" in result.output
     assert "inflow" in result.output
     assert "Counted as spend: -$25.00" in result.output
+    assert "(power's spent-so-far for this range)" not in result.output
+    assert "Through today (power's spent-so-far): -$25.00" in result.output
 
 
 def test_txns_month_and_start_are_mutually_exclusive(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -526,6 +528,55 @@ def test_txns_footer_sums_only_counted_rows(monkeypatch) -> None:  # type: ignor
     assert result.exit_code == 0
     assert "fixed cost (series Netflix)" in result.output
     assert "Counted as spend: -$25.00" in result.output  # only the counted row
+    assert "Through today (power's spent-so-far): -$25.00" in result.output
+
+
+def test_txns_footer_line2_includes_only_todays_counted_rows(  # type: ignore[no-untyped-def]
+    tmp_path: Path, monkeypatch
+) -> None:
+    _isolate(monkeypatch, tmp_path)
+    today = date.today()
+    last_day = monthrange(today.year, today.month)[1]
+    future_day = today + timedelta(days=1)
+    if future_day > date(today.year, today.month, last_day):
+        pytest.skip("today is the last day of the month; no room for a future txn this month")
+
+    async def _seed(session: AsyncSession) -> None:
+        checking = await make_account(session, type=AccountType.checking)
+        await make_txn(
+            session, checking, amount_cents=-2500, merchant="Coffee Shop", posted_on=today
+        )
+        await make_txn(
+            session, checking, amount_cents=-900, merchant="Future Charge", posted_on=future_day
+        )
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["txns"])
+    assert result.exit_code == 0
+    assert "Counted as spend: -$34.00" in result.output  # both counted rows
+    assert "Through today (power's spent-so-far): -$25.00" in result.output  # today's only
+
+
+def test_txns_footer_line2_absent_for_past_month_range(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    today = date.today()
+    if today.month == 1:
+        last_month_year, last_month = today.year - 1, 12
+    else:
+        last_month_year, last_month = today.year, today.month - 1
+    last_month_day = date(last_month_year, last_month, 15)
+
+    async def _seed(session: AsyncSession) -> None:
+        checking = await make_account(session, type=AccountType.checking)
+        await make_txn(
+            session, checking, amount_cents=-1000, merchant="Old Coffee", posted_on=last_month_day
+        )
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["txns", "--month", f"{last_month_year:04d}-{last_month:02d}"])
+    assert result.exit_code == 0
+    assert "Counted as spend: -$10.00" in result.output
+    assert "Through today" not in result.output
 
 
 def test_power_itemizes_income_sources(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
