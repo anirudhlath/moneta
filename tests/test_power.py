@@ -1,10 +1,11 @@
+from calendar import monthrange
 from datetime import date
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.models import AccountType, Cadence, Direction, SeriesStatus, TransferLink
 from moneta.pipelines.recurring import detect_recurring
-from moneta.views.power import power_report
+from moneta.views.power import UpcomingCharge, power_report
 from tests.factories import make_account, make_series, make_txn
 
 
@@ -52,6 +53,20 @@ async def test_power_report_full_picture(session: AsyncSession) -> None:
     assert merchants == ["Landlord", "Netflix"]  # sorted by amount desc
     income = [(line.merchant, line.cadence, line.monthly_cents) for line in report.income_sources]
     assert income == [("Acme Payroll", Cadence.biweekly, 541667)]
+
+
+async def test_series_line_carries_expected_cents(session: AsyncSession) -> None:
+    await make_series(
+        session,
+        merchant="Acme Payroll",
+        direction=Direction.inflow,
+        cadence=Cadence.biweekly,
+        expected_cents=250000,
+    )
+    report = await power_report(session, today=date(2026, 7, 7))
+    line = report.income_sources[0]
+    assert line.expected_cents == 250000
+    assert line.monthly_cents == 541667
 
 
 async def test_credit_payment_series_excluded_from_fixed(session: AsyncSession) -> None:
@@ -256,3 +271,122 @@ async def test_discretionary_inflow_not_income(session: AsyncSession) -> None:
     report = await power_report(session, today=date(2026, 7, 7))
     assert report.income_sources == []
     assert report.monthly_income_cents == 0
+
+
+async def test_per_day_remaining_mid_month(session: AsyncSession) -> None:
+    today = date(2026, 7, 15)
+    last_day = monthrange(today.year, today.month)[1]
+    expected_days_left = (date(today.year, today.month, last_day) - today).days + 1
+    report = await power_report(session, today=today)
+    assert report.days_left == expected_days_left
+    assert report.per_day_remaining_cents == round(report.remaining_cents / expected_days_left)
+
+
+async def test_per_day_remaining_month_end_no_division_by_zero(session: AsyncSession) -> None:
+    today = date(2026, 7, 31)
+    report = await power_report(session, today=today)
+    assert report.days_left == 1
+    assert report.per_day_remaining_cents == report.remaining_cents
+
+
+async def test_per_day_remaining_negative_when_remaining_negative(session: AsyncSession) -> None:
+    await make_series(session, merchant="Landlord", expected_cents=-99999999)
+    today = date(2026, 7, 15)
+    report = await power_report(session, today=today)
+    assert report.remaining_cents < 0
+    assert report.per_day_remaining_cents < 0
+    last_day = monthrange(today.year, today.month)[1]
+    expected_days_left = (date(today.year, today.month, last_day) - today).days + 1
+    assert report.per_day_remaining_cents == round(report.remaining_cents / expected_days_left)
+
+
+async def test_upcoming_includes_series_inside_window_excludes_outside(
+    session: AsyncSession,
+) -> None:
+    await make_series(
+        session, merchant="Rent", expected_cents=-140000, next_expected_on=date(2026, 7, 15)
+    )
+    await make_series(
+        session, merchant="Insurance", expected_cents=-30000, next_expected_on=date(2026, 8, 1)
+    )
+    # boundary: next_expected_on == today itself is not "upcoming" (window is exclusive of today)
+    await make_series(
+        session, merchant="Today Charge", expected_cents=-500, next_expected_on=date(2026, 7, 7)
+    )
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert [u.merchant for u in report.upcoming] == ["Rent"]
+    assert report.upcoming[0].expected_on == date(2026, 7, 15)
+    assert report.upcoming[0].expected_cents == 140000
+
+
+async def test_upcoming_excludes_discretionary_and_cc_payment_series(
+    session: AsyncSession,
+) -> None:
+    checking = await make_account(session, type=AccountType.checking)
+    credit = await make_account(session, type=AccountType.credit)
+    await make_series(
+        session,
+        merchant="Dining Out",
+        expected_cents=-3886,
+        discretionary=True,
+        next_expected_on=date(2026, 7, 20),
+    )
+    cc_pay = await make_series(
+        session,
+        merchant="Chase Card Payment",
+        expected_cents=-50000,
+        next_expected_on=date(2026, 7, 20),
+    )
+    out = await make_txn(
+        session,
+        checking,
+        amount_cents=-50000,
+        merchant="Chase Card Payment",
+        posted_on=date(2026, 7, 5),
+        series_id=cc_pay.id,
+    )
+    inn = await make_txn(
+        session,
+        credit,
+        amount_cents=50000,
+        merchant="Chase Card Payment",
+        posted_on=date(2026, 7, 5),
+    )
+    session.add(TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule"))
+    await session.flush()
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert report.upcoming == []
+
+
+async def test_upcoming_includes_loan_payment_projected_date(session: AsyncSession) -> None:
+    checking = await make_account(session, type=AccountType.checking)
+    loan = await make_account(session, type=AccountType.loan, name="Car Loan")
+    out = await make_txn(
+        session,
+        checking,
+        amount_cents=-13500,
+        merchant="Synchrony Bank",
+        posted_on=date(2026, 6, 15),
+    )
+    inn = await make_txn(
+        session, loan, amount_cents=13500, merchant="Synchrony Bank", posted_on=date(2026, 6, 15)
+    )
+    session.add(TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule"))
+    await session.flush()
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert report.upcoming == [
+        UpcomingCharge(
+            merchant="Car Loan — payment", expected_on=date(2026, 7, 15), expected_cents=13500
+        )
+    ]
+
+
+async def test_upcoming_sorted_by_expected_on(session: AsyncSession) -> None:
+    await make_series(
+        session, merchant="Rent", expected_cents=-140000, next_expected_on=date(2026, 7, 28)
+    )
+    await make_series(
+        session, merchant="Netflix", expected_cents=-1599, next_expected_on=date(2026, 7, 10)
+    )
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert [u.merchant for u in report.upcoming] == ["Netflix", "Rent"]

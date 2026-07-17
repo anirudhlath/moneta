@@ -1,12 +1,14 @@
+import json
 from datetime import date
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
+from moneta.cadence import month_bounds
 from moneta.cli.client import request
 
 if TYPE_CHECKING:
@@ -34,6 +36,49 @@ def fmt_money(cents: int) -> str:
     sign = "-" if cents < 0 else ""
     whole, frac = divmod(abs(cents), 100)
     return f"{sign}${whole}.{frac:02d}"
+
+
+def fmt_outflow(magnitude_cents: int) -> str:
+    """Renders an unsigned outflow/liability magnitude with its display minus."""
+    return fmt_money(-magnitude_cents)
+
+
+_CADENCE_PHRASE = {"weekly": "every week", "biweekly": "every 2 weeks", "annual": "every year"}
+
+
+def _series_line_amount(line: dict[str, Any]) -> str:
+    """Amount cell for a power-table series row (design 2026-07-16 §3): non-monthly
+    cadences show the per-cycle amount alongside the monthly equivalent; monthly
+    rows stay a bare amount."""
+    phrase = _CADENCE_PHRASE.get(line["cadence"])
+    if phrase is None:
+        return fmt_money(line["monthly_cents"])
+    return f"{fmt_money(line['expected_cents'])} {phrase} ≈ {fmt_money(line['monthly_cents'])}/mo"
+
+
+def _fmt_upcoming_date(d: date) -> str:
+    """ "Jul 18" — avoids the platform-specific %-d strftime directive."""
+    return f"{d.strftime('%b')} {d.day}"
+
+
+JsonOption = Annotated[bool, typer.Option("--json")]
+
+
+def emit_json(payload: object, enabled: bool) -> bool:
+    """Print `payload` as JSON and report whether the caller should return early —
+    `if emit_json(r, json_output): return` replaces the 8x copy-pasted
+    `if json_output: print(json.dumps(r)); return`."""
+    if enabled:
+        print(json.dumps(payload))
+    return enabled
+
+
+def reject_json_with_writes(json_output: bool, *flags: object) -> None:
+    """Reject --json combined with any write flag (each command passes its own
+    optional write-flag values; None means "not provided")."""
+    if json_output and any(f is not None for f in flags):
+        console.print("[red]Error:[/red] --json cannot be combined with a write option.")
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -70,9 +115,11 @@ def sync(
 
 
 @app.command()
-def status() -> None:
+def status(json_output: JsonOption = False) -> None:
     """Show the most recent sync run and its outcome."""
     r = request("GET", "/sync/last")
+    if emit_json(r, json_output):
+        return
     if not r:
         console.print("No sync has run yet. Run: [bold]moneta sync[/bold]")
         return
@@ -91,36 +138,66 @@ def status() -> None:
 
 
 @app.command()
-def power() -> None:
+def power(
+    history: Annotated[
+        int | None,
+        typer.Option(
+            "--history", help="Show the last N months' income/spend/net instead of this month."
+        ),
+    ] = None,
+    json_output: JsonOption = False,
+) -> None:
     """Monthly spending power: income - fixed costs."""
+    if history is not None:
+        rows = request("GET", "/power/history", params={"months": history})
+        if emit_json(rows, json_output):
+            return
+        table = Table("Month", "Income", "Spend", "Net")
+        for m in rows:
+            table.add_row(
+                m["month"],
+                fmt_money(m["income_cents"]),
+                fmt_outflow(m["spend_cents"]),
+                fmt_money(m["net_cents"]),
+            )
+        console.print(table)
+        return
     r = request("GET", "/power")
+    if emit_json(r, json_output):
+        return
     table = Table(title=f"Spending power — {r['month']}", show_header=False)
     table.add_row("Income (detected)", f"{fmt_money(r['monthly_income_cents'])}/mo")
     for line in r["income_sources"]:
-        table.add_row(
-            f"  {escape(line['merchant'])} ({line['cadence']})", fmt_money(line["monthly_cents"])
-        )
-    table.add_row("Fixed costs", f"{fmt_money(-r['total_fixed_cents'])}/mo")
+        table.add_row(f"  {escape(line['merchant'])}", _series_line_amount(line))
+    table.add_row("Fixed costs", f"{fmt_outflow(r['total_fixed_cents'])}/mo")
     for line in r["fixed_costs"]:
-        table.add_row(
-            f"  {escape(line['merchant'])} ({line['cadence']})", fmt_money(line["monthly_cents"])
-        )
+        table.add_row(f"  {escape(line['merchant'])}", _series_line_amount(line))
     table.add_row(
         "[bold]Spending power[/bold]", f"[bold]{fmt_money(r['spending_power_cents'])}/mo[/bold]"
     )
-    table.add_row("Spent so far", fmt_money(-r["spent_so_far_cents"]))
+    table.add_row("Spent so far", fmt_outflow(r["spent_so_far_cents"]))
     table.add_row("[bold]Remaining[/bold]", f"[bold]{fmt_money(r['remaining_cents'])}[/bold]")
+    table.add_row(f"Per day ({r['days_left']} days left)", fmt_money(r["per_day_remaining_cents"]))
     console.print(table)
+    if r["upcoming"]:
+        parts = [
+            f"{escape(u['merchant'])} {fmt_money(u['expected_cents'])} "
+            f"({_fmt_upcoming_date(date.fromisoformat(u['expected_on']))})"
+            for u in r["upcoming"]
+        ]
+        console.print(f"[dim]Upcoming this month: {' · '.join(parts)}[/dim]")
 
 
 @app.command()
-def networth() -> None:
+def networth(json_output: JsonOption = False) -> None:
     """Net worth (vested only) with unvested shown separately."""
     r = request("GET", "/networth")
+    if emit_json(r, json_output):
+        return
     table = Table(title="Net worth", show_header=False)
     table.add_row("Liquid", fmt_money(r["liquid_cents"]))
     table.add_row("Vested holdings", fmt_money(r["vested_holdings_cents"]))
-    table.add_row("Liabilities", fmt_money(-r["liabilities_cents"]))
+    table.add_row("Liabilities", fmt_outflow(r["liabilities_cents"]))
     table.add_row("[bold]Net worth[/bold]", f"[bold]{fmt_money(r['net_worth_cents'])}[/bold]")
     table.add_row("Unvested (potential)", fmt_money(r["unvested_potential_cents"]))
     console.print(table)
@@ -156,6 +233,7 @@ def recurring(
         int | None,
         typer.Option("--re-review", help="Reopen the series' bill/habit review question."),
     ] = None,
+    json_output: JsonOption = False,
 ) -> None:
     """List detected recurring series (or recent events with --events).
 
@@ -169,6 +247,7 @@ def recurring(
             "are mutually exclusive."
         )
         raise typer.Exit(1)
+    reject_json_with_writes(json_output, end, not_a_bill, habit, re_review)
     if end is not None:
         request("PATCH", f"/recurring/{end}", {"status": "ended"})
         console.print(f"[green]Series {end} ended.[/green]")
@@ -188,6 +267,8 @@ def recurring(
         console.print(f"[green]Series {re_review} reopened for review.[/green]")
     if events:
         rows = request("GET", "/recurring/events")
+        if emit_json(rows, json_output):
+            return
         table = Table("When", "ID", "Merchant", "Event", "Details")
         for e in rows:
             table.add_row(
@@ -199,6 +280,8 @@ def recurring(
             )
     else:
         rows = request("GET", "/recurring")
+        if emit_json(rows, json_output):
+            return
         table = Table("ID", "Merchant", "Direction", "Cadence", "Expected", "Next", "Status")
         for s in rows:
             table.add_row(
@@ -219,6 +302,7 @@ def cashflow(
         str | None, typer.Option("--start", help="YYYY-MM-DD (default: month start).")
     ] = None,
     end: Annotated[str | None, typer.Option("--end", help="YYYY-MM-DD (default: today).")] = None,
+    json_output: JsonOption = False,
 ) -> None:
     """Accrual spend vs cash out for a date range (defaults to this month)."""
     params = {
@@ -227,6 +311,8 @@ def cashflow(
         if value is not None
     }
     r = request("GET", "/cashflow", params=params or None)
+    if emit_json(r, json_output):
+        return
     table = Table(title=f"Cashflow — {r['start']} to {r['end']}", show_header=False)
     table.add_row("Accrual spend", fmt_money(r["accrual_cents"]))
     table.add_row("Cash out", fmt_money(r["cash_out_cents"]))
@@ -234,9 +320,83 @@ def cashflow(
 
 
 @app.command()
-def obligations() -> None:
+def txns(
+    month: Annotated[
+        str | None, typer.Option("--month", help="YYYY-MM (expands to the full month).")
+    ] = None,
+    start: Annotated[
+        str | None, typer.Option("--start", help="YYYY-MM-DD (default: current month).")
+    ] = None,
+    end: Annotated[
+        str | None, typer.Option("--end", help="YYYY-MM-DD (default: current month).")
+    ] = None,
+    account: Annotated[int | None, typer.Option("--account", help="Filter by account ID.")] = None,
+    merchant: Annotated[
+        str | None, typer.Option("--merchant", help="Case-insensitive substring match.")
+    ] = None,
+    json_output: JsonOption = False,
+) -> None:
+    """List transactions with why each is or isn't counted as spend (the trust view).
+
+    --month YYYY-MM and --start/--end are mutually exclusive.
+    """
+    if month is not None and (start is not None or end is not None):
+        console.print("[red]Error:[/red] --month and --start/--end are mutually exclusive.")
+        raise typer.Exit(1)
+    params: dict[str, Any] = {}
+    if month is not None:
+        try:
+            year_s, month_s = month.split("-")
+            year, mon = int(year_s), int(month_s)
+            if not 1 <= mon <= 12:
+                raise ValueError
+        except ValueError:
+            console.print(f"[red]Error:[/red] invalid month {month!r} (expected YYYY-MM)")
+            raise typer.Exit(1) from None
+        first, last = month_bounds(date(year, mon, 1))
+        params["start"] = first.isoformat()
+        params["end"] = last.isoformat()
+    else:
+        if start is not None:
+            params["start"] = _parse_iso_date(start)
+        if end is not None:
+            params["end"] = _parse_iso_date(end)
+    if account is not None:
+        params["account_id"] = account
+    if merchant is not None:
+        params["merchant"] = merchant
+
+    r = request("GET", "/transactions", params=params or None)
+    if emit_json(r, json_output):
+        return
+    table = Table("Date", "Account", "Merchant", "Amount", "Counted")
+    for row in r["transactions"]:
+        counted = row["counted_in_spend"]
+        cell = "✓" if counted else (row["excluded_because"] or "")
+        table.add_row(
+            row["posted_on"],
+            escape(row["account"]),
+            escape(row["merchant"] or row["description"]),
+            fmt_money(row["amount_cents"]),
+            cell,
+            style=None if counted else "dim",
+        )
+    console.print(table)
+    console.print(f"Counted as spend: {fmt_outflow(r['counted_total_cents'])}")
+    if r["through_today_cents"] is not None:
+        if account is not None or merchant is not None:
+            label = "Through today"
+        else:
+            label = "Through today (power's spent-so-far)"
+        console.print(f"[dim]{label}: {fmt_outflow(r['through_today_cents'])}[/dim]")
+
+
+@app.command()
+def obligations(json_output: JsonOption = False) -> None:
     """Loans/financing: monthly payment, balance, months left, promo warnings."""
     rows = request("GET", "/obligations")
+    if emit_json(rows, json_output):
+        return
     table = Table("Account", "Balance", "Payment/mo", "Months left", "Payoff", "Promo ends")
     for ob in rows:
         payoff = ob["payoff_estimate"] or "?"
@@ -268,9 +428,11 @@ def accounts(
     set_type: Annotated[tuple[int, str] | None, typer.Option("--set-type")] = None,
     set_promo: Annotated[tuple[int, str] | None, typer.Option("--set-promo")] = None,
     set_financing: Annotated[tuple[int, str] | None, typer.Option("--set-financing")] = None,
+    json_output: JsonOption = False,
 ) -> None:
     """List accounts. Flags: --set-type ID TYPE, --set-promo ID YYYY-MM-DD,
     --set-financing ID true|false."""
+    reject_json_with_writes(json_output, set_type, set_promo, set_financing)
     if set_type:
         request("PATCH", f"/accounts/{set_type[0]}", {"type": set_type[1]})
     if set_promo:
@@ -280,6 +442,8 @@ def accounts(
         financing_mode = _parse_bool_flag(set_financing[1])
         request("PATCH", f"/accounts/{set_financing[0]}", {"financing_mode": financing_mode})
     rows = request("GET", "/accounts")
+    if emit_json(rows, json_output):
+        return
     table = Table("ID", "Name", "Org", "Type", "Balance", "Promo ends")
     for a in rows:
         type_cell = f"{a['type']} (financing)" if a.get("financing_mode") else a["type"]

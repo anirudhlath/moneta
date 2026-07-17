@@ -2,12 +2,11 @@ from collections.abc import Iterable
 from datetime import date
 
 from pydantic import BaseModel
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.cadence import monthly_cents, monthlyize
+from moneta.cadence import advance_expected_on, month_bounds, monthly_cents, monthlyize
 from moneta.models import (
-    SPEND_ACCOUNT_TYPES,
     Account,
     AccountType,
     Cadence,
@@ -16,13 +15,21 @@ from moneta.models import (
     SeriesStatus,
     Transaction,
 )
-from moneta.queries import classified_links, linked_txn_ids, loan_payment_stats, primary_currency
+from moneta.queries import classified_links, loan_payment_stats, primary_currency
+from moneta.views.transactions import link_field, spend_reason
 
 
 class SeriesLine(BaseModel):
     merchant: str
     cadence: Cadence
     monthly_cents: int
+    expected_cents: int  # per-cycle magnitude (design 2026-07-16 §3)
+
+
+class UpcomingCharge(BaseModel):
+    merchant: str
+    expected_on: date
+    expected_cents: int  # magnitude
 
 
 class PowerReport(BaseModel):
@@ -34,11 +41,19 @@ class PowerReport(BaseModel):
     spending_power_cents: int
     spent_so_far_cents: int
     remaining_cents: int
+    days_left: int
+    per_day_remaining_cents: int
+    upcoming: list[UpcomingCharge]
 
 
 def _series_lines(series: Iterable[RecurringSeries]) -> tuple[list[SeriesLine], int]:
     lines = [
-        SeriesLine(merchant=s.merchant, cadence=s.cadence, monthly_cents=abs(monthly_cents(s)))
+        SeriesLine(
+            merchant=s.merchant,
+            cadence=s.cadence,
+            monthly_cents=abs(monthly_cents(s)),
+            expected_cents=abs(s.expected_cents),
+        )
         for s in series
     ]
     lines.sort(key=lambda line: line.monthly_cents, reverse=True)
@@ -46,7 +61,7 @@ def _series_lines(series: Iterable[RecurringSeries]) -> tuple[list[SeriesLine], 
 
 
 async def power_report(session: AsyncSession, today: date) -> PowerReport:
-    month_start = today.replace(day=1)
+    month_start, month_end = month_bounds(today)
     series = (
         (
             await session.execute(
@@ -75,6 +90,16 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
     ]
     fixed, total_fixed = _series_lines(fixed_series)
 
+    upcoming = [
+        UpcomingCharge(
+            merchant=s.merchant,
+            expected_on=s.next_expected_on,
+            expected_cents=abs(s.expected_cents),
+        )
+        for s in fixed_series
+        if today < s.next_expected_on <= month_end
+    ]
+
     # A loan-like account already represented by an active series in `fixed` must not
     # also get a derived payment line — that would double-count the same obligation.
     fixed_series_ids = {s.id for s in fixed_series}
@@ -98,43 +123,62 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
             ).all()
         }
         for lp in payments.values():
+            merchant = f"{names.get(lp.account_id, f'account {lp.account_id}')} — payment"
             line = SeriesLine(
-                merchant=f"{names.get(lp.account_id, f'account {lp.account_id}')} — payment",
+                merchant=merchant,
                 cadence=lp.cadence,
                 monthly_cents=abs(monthlyize(lp.expected_cents, lp.cadence)),
+                expected_cents=abs(lp.expected_cents),
             )
             fixed.append(line)
             total_fixed += line.monthly_cents
-        fixed.sort(key=lambda line: line.monthly_cents, reverse=True)
-
-    linked_ids = linked_txn_ids(links)
-    primary = await primary_currency(session)
-    month_txns = (
-        (
-            await session.execute(
-                select(Transaction)
-                .join(Account, Transaction.account_id == Account.id)
-                .outerjoin(RecurringSeries, Transaction.series_id == RecurringSeries.id)
-                .where(
-                    Transaction.amount_cents < 0,
-                    Transaction.posted_on >= month_start,
-                    Transaction.posted_on <= today,
-                    or_(
-                        Transaction.series_id.is_(None),
-                        RecurringSeries.status != SeriesStatus.active,
-                        RecurringSeries.discretionary.is_(True),
-                    ),
-                    Account.type.in_(SPEND_ACCOUNT_TYPES),
-                    Account.currency == primary,
+            projected = advance_expected_on(lp.last_paid_on, lp.cadence)
+            if today < projected <= month_end:
+                upcoming.append(
+                    UpcomingCharge(
+                        merchant=merchant,
+                        expected_on=projected,
+                        expected_cents=abs(lp.expected_cents),
+                    )
                 )
+        fixed.sort(key=lambda line: line.monthly_cents, reverse=True)
+    upcoming.sort(key=lambda u: u.expected_on)
+
+    primary = await primary_currency(session)
+    by_outflow = {link.outflow_id: link for link in links}
+    inflow_ids = {link.inflow_id for link in links}
+    # date-range-only fetch: spend_reason (same predicate transactions.py's trust view
+    # uses) decides inclusion — including the inflow/link exclusions — so this can
+    # never quietly diverge from what `moneta txns` counts (design 2026-07-16 §2/§3).
+    month_txns = (
+        await session.execute(
+            select(Transaction, Account, RecurringSeries)
+            .join(Account, Transaction.account_id == Account.id)
+            .outerjoin(RecurringSeries, Transaction.series_id == RecurringSeries.id)
+            .where(
+                Transaction.posted_on >= month_start,
+                Transaction.posted_on <= today,
             )
         )
-        .scalars()
-        .all()
+    ).all()
+    spent_cents = sum(
+        -txn.amount_cents
+        for txn, account, series in month_txns
+        if spend_reason(
+            txn.amount_cents,
+            account.type,
+            account.currency,
+            primary,
+            link_field(txn.id, by_outflow, inflow_ids),
+            series.status if series is not None else None,
+            series.discretionary if series is not None else None,
+        )
+        is None
     )
-    spent_cents = sum(-t.amount_cents for t in month_txns if t.id not in linked_ids)
 
     power = monthly_income - total_fixed
+    remaining = power - spent_cents
+    days_left = (month_end - today).days + 1
     return PowerReport(
         month=f"{today.year:04d}-{today.month:02d}",
         monthly_income_cents=monthly_income,
@@ -143,5 +187,8 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
         total_fixed_cents=total_fixed,
         spending_power_cents=power,
         spent_so_far_cents=spent_cents,
-        remaining_cents=power - spent_cents,
+        remaining_cents=remaining,
+        days_left=days_left,
+        per_day_remaining_cents=round(remaining / days_left),
+        upcoming=upcoming,
     )

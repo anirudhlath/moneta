@@ -33,6 +33,11 @@ PER_MONTH: dict[Cadence, float] = {
 _MIN_OCCURRENCES = 3
 
 
+def month_bounds(d: date) -> tuple[date, date]:
+    """First and last day of d's calendar month."""
+    return date(d.year, d.month, 1), date(d.year, d.month, monthrange(d.year, d.month)[1])
+
+
 def _add_months(d: date, months: int) -> date:
     total = d.month - 1 + months
     year, month = d.year + total // 12, total % 12 + 1

@@ -1,9 +1,12 @@
 import asyncio
+import json
+from calendar import monthrange
 from collections.abc import Awaitable, Callable
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 from typer.testing import CliRunner
 
@@ -11,6 +14,7 @@ from moneta.cli.main import app
 from moneta.db import init_db, make_sessionmaker
 from moneta.models import (
     AccountType,
+    Cadence,
     Direction,
     EventKind,
     ReviewItem,
@@ -379,6 +383,241 @@ def test_cashflow_invalid_date_fails_cleanly(tmp_path: Path, monkeypatch) -> Non
     assert "Traceback" not in result.output
 
 
+def test_txns_table_renders_counted_and_excluded_rows(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    today = date.today()
+
+    async def _seed(session: AsyncSession) -> None:
+        checking = await make_account(session, type=AccountType.checking)
+        await make_txn(
+            session, checking, amount_cents=-2500, merchant="Coffee Shop", posted_on=today
+        )
+        await make_txn(
+            session, checking, amount_cents=300000, merchant="Acme Payroll", posted_on=today
+        )
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["txns"])
+    assert result.exit_code == 0
+    assert "Coffee Shop" in result.output
+    assert "Acme Payroll" in result.output
+    assert "✓" in result.output
+    assert "inflow" in result.output
+    assert "Counted as spend: -$25.00" in result.output
+    assert "(power's spent-so-far for this range)" not in result.output
+    assert "Through today (power's spent-so-far): -$25.00" in result.output
+
+
+def test_txns_footer_drops_power_parity_claim_when_filtered(  # type: ignore[no-untyped-def]
+    tmp_path: Path, monkeypatch
+) -> None:
+    _isolate(monkeypatch, tmp_path)
+    today = date.today()
+
+    async def _seed(session: AsyncSession) -> None:
+        checking = await make_account(session, type=AccountType.checking)
+        await make_txn(
+            session, checking, amount_cents=-2500, merchant="Coffee Shop", posted_on=today
+        )
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["txns", "--merchant", "Coffee"])
+    assert result.exit_code == 0
+    assert "Counted as spend: -$25.00" in result.output
+    assert "Through today: -$25.00" in result.output
+    assert "power's spent-so-far" not in result.output
+
+
+def test_txns_month_and_start_are_mutually_exclusive(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["txns", "--month", "2026-07", "--start", "2026-07-01"])
+    assert result.exit_code == 1
+    assert "mutually exclusive" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_txns_filters_pass_through_as_query_params(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[tuple[str, str, Any]] = []
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        calls.append((method, path, params))
+        return {
+            "start": "2026-01-01",
+            "end": "2026-01-31",
+            "counted_total_cents": 0,
+            "through_today_cents": None,
+            "transactions": [],
+        }
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(
+        app,
+        [
+            "txns",
+            "--start",
+            "2026-01-01",
+            "--end",
+            "2026-01-31",
+            "--account",
+            "3",
+            "--merchant",
+            "netflix",
+        ],
+    )
+    assert result.exit_code == 0
+    assert calls == [
+        (
+            "GET",
+            "/transactions",
+            {
+                "start": "2026-01-01",
+                "end": "2026-01-31",
+                "account_id": 3,
+                "merchant": "netflix",
+            },
+        )
+    ]
+
+
+def test_txns_month_flag_expands_to_full_month(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[tuple[str, str, Any]] = []
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        calls.append((method, path, params))
+        return {
+            "start": "2026-02-01",
+            "end": "2026-02-28",
+            "counted_total_cents": 0,
+            "through_today_cents": None,
+            "transactions": [],
+        }
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["txns", "--month", "2026-02"])
+    assert result.exit_code == 0
+    assert calls == [("GET", "/transactions", {"start": "2026-02-01", "end": "2026-02-28"})]
+
+
+def test_txns_invalid_month_fails_cleanly(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["txns", "--month", "not-a-month"])
+    assert result.exit_code == 1
+    assert "invalid month" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_txns_footer_sums_only_counted_rows(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        return {
+            "start": "2026-07-01",
+            "end": "2026-07-31",
+            "counted_total_cents": 2500,
+            "through_today_cents": 2500,
+            "transactions": [
+                {
+                    "id": 1,
+                    "posted_on": "2026-07-05",
+                    "account": "Checking",
+                    "account_type": "checking",
+                    "merchant": "Coffee Shop",
+                    "description": "COFFEE SHOP",
+                    "amount_cents": -2500,
+                    "series": None,
+                    "series_status": None,
+                    "series_discretionary": None,
+                    "link": None,
+                    "counted_in_spend": True,
+                    "excluded_because": None,
+                },
+                {
+                    "id": 2,
+                    "posted_on": "2026-07-05",
+                    "account": "Checking",
+                    "account_type": "checking",
+                    "merchant": "Netflix",
+                    "description": "NETFLIX",
+                    "amount_cents": -1599,
+                    "series": "Netflix",
+                    "series_status": "active",
+                    "series_discretionary": False,
+                    "link": None,
+                    "counted_in_spend": False,
+                    "excluded_because": "fixed cost (series Netflix)",
+                },
+            ],
+        }
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["txns"])
+    assert result.exit_code == 0
+    assert "fixed cost (series Netflix)" in result.output
+    assert "Counted as spend: -$25.00" in result.output  # only the counted row
+    assert "Through today (power's spent-so-far): -$25.00" in result.output
+
+
+def test_txns_footer_line2_includes_only_todays_counted_rows(  # type: ignore[no-untyped-def]
+    tmp_path: Path, monkeypatch
+) -> None:
+    _isolate(monkeypatch, tmp_path)
+    today = date.today()
+    last_day = monthrange(today.year, today.month)[1]
+    future_day = today + timedelta(days=1)
+    if future_day > date(today.year, today.month, last_day):
+        pytest.skip("today is the last day of the month; no room for a future txn this month")
+
+    async def _seed(session: AsyncSession) -> None:
+        checking = await make_account(session, type=AccountType.checking)
+        await make_txn(
+            session, checking, amount_cents=-2500, merchant="Coffee Shop", posted_on=today
+        )
+        await make_txn(
+            session, checking, amount_cents=-900, merchant="Future Charge", posted_on=future_day
+        )
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["txns"])
+    assert result.exit_code == 0
+    assert "Counted as spend: -$34.00" in result.output  # both counted rows
+    assert "Through today (power's spent-so-far): -$25.00" in result.output  # today's only
+
+
+def test_txns_footer_line2_absent_for_past_month_range(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    today = date.today()
+    if today.month == 1:
+        last_month_year, last_month = today.year - 1, 12
+    else:
+        last_month_year, last_month = today.year, today.month - 1
+    last_month_day = date(last_month_year, last_month, 15)
+
+    async def _seed(session: AsyncSession) -> None:
+        checking = await make_account(session, type=AccountType.checking)
+        await make_txn(
+            session, checking, amount_cents=-1000, merchant="Old Coffee", posted_on=last_month_day
+        )
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["txns", "--month", f"{last_month_year:04d}-{last_month:02d}"])
+    assert result.exit_code == 0
+    assert "Counted as spend: -$10.00" in result.output
+    assert "Through today" not in result.output
+
+
 def test_power_itemizes_income_sources(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     _isolate(monkeypatch, tmp_path)
 
@@ -404,6 +643,136 @@ def test_power_negative_money_renders_minus_before_dollar(tmp_path: Path, monkey
     assert result.exit_code == 0
     assert "-$5000.00" in result.output  # fixed costs / spending power / remaining
     assert "$-" not in result.output  # one sign format everywhere
+
+
+def test_power_biweekly_renders_per_cycle_and_monthly(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def _seed(session: AsyncSession) -> None:
+        await make_series(
+            session,
+            merchant="Acme Payroll",
+            direction=Direction.inflow,
+            cadence=Cadence.biweekly,
+            expected_cents=250000,
+        )
+        await make_series(session, merchant="Netflix", expected_cents=-1599)
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["power"])
+    assert result.exit_code == 0
+    assert "$2500.00 every 2 weeks ≈ $5416.67/mo" in result.output
+    assert "$15.99" in result.output  # monthly row stays bare
+    assert "(monthly)" not in result.output
+    assert "(biweekly)" not in result.output
+
+
+def test_power_per_day_row_after_remaining(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["power"])
+    assert result.exit_code == 0
+    today = date.today()
+    last_day = monthrange(today.year, today.month)[1]
+    days_left = (date(today.year, today.month, last_day) - today).days + 1
+    assert f"Per day ({days_left} days left)" in result.output
+    remaining_idx = result.output.index("Remaining")
+    per_day_idx = result.output.index("Per day")
+    assert per_day_idx > remaining_idx
+
+
+def test_power_upcoming_charges_absent_when_empty(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["power"])
+    assert result.exit_code == 0
+    assert "Upcoming this month" not in result.output
+
+
+def test_power_upcoming_charges_render_dim_line(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    today = date.today()
+    last_day = monthrange(today.year, today.month)[1]
+    month_end = date(today.year, today.month, last_day)
+    expected_on = today + timedelta(days=1)
+    if expected_on > month_end:
+        pytest.skip("today is the last day of the month; no room for an upcoming charge")
+
+    async def _seed(session: AsyncSession) -> None:
+        await make_series(
+            session, merchant="Rent", expected_cents=-140000, next_expected_on=expected_on
+        )
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["power"])
+    assert result.exit_code == 0
+    label = f"{expected_on.strftime('%b')} {expected_on.day}"
+    assert f"Upcoming this month: Rent $1400.00 ({label})" in result.output
+
+
+def test_power_history_runs_in_process(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["power", "--history", "3"])
+    assert result.exit_code == 0
+    assert "Month" in result.output
+    assert "Spending power" not in result.output  # --history replaces the normal view
+
+
+def test_power_history_table_renders_month_income_spend_net(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        assert (method, path, params) == ("GET", "/power/history", {"months": 3})
+        return [
+            {
+                "month": "2026-07",
+                "income_cents": 300000,
+                "spend_cents": 5000,
+                "net_cents": 295000,
+            },
+            {
+                "month": "2026-06",
+                "income_cents": 250000,
+                "spend_cents": 260000,
+                "net_cents": -10000,
+            },
+            {"month": "2026-05", "income_cents": 250000, "spend_cents": 4000, "net_cents": 246000},
+        ]
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["power", "--history", "3"])
+    assert result.exit_code == 0
+    for header in ("Month", "Income", "Spend", "Net"):
+        assert header in result.output
+    assert "2026-07" in result.output
+    assert "$3000.00" in result.output  # income: fmt_money
+    assert "-$50.00" in result.output  # spend: fmt_outflow(5000)
+    assert "$2950.00" in result.output  # net: fmt_money, positive
+    assert "-$100.00" in result.output  # net: fmt_money, negative month
+    assert "Spending power" not in result.output
+
+
+def test_power_history_and_json_prints_history(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        assert (method, path, params) == ("GET", "/power/history", {"months": 1})
+        return [
+            {"month": "2026-07", "income_cents": 300000, "spend_cents": 5000, "net_cents": 295000}
+        ]
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["power", "--history", "1", "--json"])
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)
+    assert body == [
+        {"month": "2026-07", "income_cents": 300000, "spend_cents": 5000, "net_cents": 295000}
+    ]
+    assert "│" not in result.stdout
 
 
 def test_review_non_integer_answer_skips_cleanly(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -901,3 +1270,189 @@ def test_fmt_money_formats_cents() -> None:
     assert fmt_money(-3609) == "-$36.09"
     assert fmt_money(-5) == "-$0.05"
     assert fmt_money(123456789) == "$1234567.89"
+
+
+def test_fmt_outflow_renders_magnitude_with_display_minus() -> None:
+    from moneta.cli.main import fmt_outflow
+
+    assert fmt_outflow(512242) == "-$5122.42"
+    assert fmt_outflow(0) == "$0.00"
+
+
+def test_power_json_output(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["power", "--json"])
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)
+    assert "remaining_cents" in body
+
+
+def test_networth_json_output(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["networth", "--json"])
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)
+    assert "net_worth_cents" in body
+
+
+def test_cashflow_json_output(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["cashflow", "--json"])
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)
+    assert "accrual_cents" in body
+
+
+def test_recurring_json_output(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def _seed(session: AsyncSession) -> None:
+        await make_series(session, merchant="Netflix")
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["recurring", "--json"])
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)
+    assert isinstance(body, list)
+    assert body[0]["merchant"] == "Netflix"
+
+
+def test_recurring_events_json_output(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def _seed(session: AsyncSession) -> None:
+        series = await make_series(session)
+        await make_series_event(session, series)
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["recurring", "--events", "--json"])
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)
+    assert isinstance(body, list)
+    assert body[0]["kind"] == "missed"
+
+
+def test_obligations_json_output(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def _seed(session: AsyncSession) -> None:
+        await make_account(session, type=AccountType.loan, balance_cents=-121500)
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["obligations", "--json"])
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)
+    assert isinstance(body, list)
+    assert "balance_owed_cents" in body[0]
+
+
+def test_accounts_json_output(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def _seed(session: AsyncSession) -> None:
+        await make_account(session, name="Checking")
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["accounts", "--json"])
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)
+    assert isinstance(body, list)
+    assert body[0]["name"] == "Checking"
+
+
+def test_txns_json_output(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    today = date.today()
+
+    async def _seed(session: AsyncSession) -> None:
+        checking = await make_account(session, type=AccountType.checking)
+        await make_txn(
+            session, checking, amount_cents=-2500, merchant="Coffee Shop", posted_on=today
+        )
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["txns", "--json"])
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)
+    assert isinstance(body["transactions"], list)
+    assert "counted_in_spend" in body["transactions"][0]
+    assert body["counted_total_cents"] == 2500
+    assert body["through_today_cents"] == 2500
+
+
+def test_status_json_output_null_before_any_sync(  # type: ignore[no-untyped-def]
+    tmp_path: Path, monkeypatch
+) -> None:
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["status", "--json"])
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "null"
+
+
+def test_status_json_output_with_sync(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def seed(session: AsyncSession) -> None:
+        session.add(SyncRun())
+
+    _seed_db(tmp_path, seed)
+    result = runner.invoke(app, ["status", "--json"])
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)
+    assert body["status"] == "incomplete"
+
+
+def test_recurring_json_with_write_flag_errors_before_request(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        raise AssertionError("request must not be called when --json combines with a write flag")
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["recurring", "--end", "1", "--json"])
+    assert result.exit_code == 1
+    assert "Error" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_accounts_json_with_write_flag_errors_before_request(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        raise AssertionError("request must not be called when --json combines with a write flag")
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["accounts", "--set-type", "1", "checking", "--json"])
+    assert result.exit_code == 1
+    assert "Error" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_json_output_has_no_rich_table_chars(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def _seed(session: AsyncSession) -> None:
+        await make_series(session, merchant="Netflix")
+        checking = await make_account(session, type=AccountType.checking)
+        await make_txn(session, checking, amount_cents=-2500, posted_on=date.today())
+
+    _seed_db(tmp_path, _seed)
+    for args in (
+        ["power", "--json"],
+        ["networth", "--json"],
+        ["cashflow", "--json"],
+        ["recurring", "--json"],
+        ["obligations", "--json"],
+        ["accounts", "--json"],
+        ["txns", "--json"],
+        ["status", "--json"],
+    ):
+        result = runner.invoke(app, args)
+        assert result.exit_code == 0, f"{args}: {result.output}"
+        assert "│" not in result.stdout, f"{args}: rich table leaked into --json output"

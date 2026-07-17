@@ -6,7 +6,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from moneta.aggregator.base import AggregatorAdapter, MergedAdapter
 from moneta.aggregator.plaid import PlaidAdapter, PlaidClient, items_path, load_items
 from moneta.aggregator.simplefin import SimpleFINAdapter
+from moneta.cadence import month_bounds
 from moneta.config import Settings, load_settings, make_private
 from moneta.db import init_db, make_sessionmaker
 from moneta.llm import Classifier, build_classifier
@@ -37,10 +38,11 @@ from moneta.pipelines.review import apply_resolution, review_context
 from moneta.pipelines.run import SyncReport, run_sync
 from moneta.queries import classified_links, primary_currency
 from moneta.vesting import apply_vesting, parse_vesting_csv
-from moneta.views.cashflow import accrual_spend, cash_out
+from moneta.views.cashflow import accrual_by_month, accrual_spend, cash_out
 from moneta.views.financing import Obligation, compute_obligations
 from moneta.views.networth import NetWorthReport, net_worth_report
 from moneta.views.power import PowerReport, power_report
+from moneta.views.transactions import TxnRow, spend_totals, transactions_report
 
 
 class AccountOut(BaseModel):
@@ -111,6 +113,21 @@ class CashflowReport(BaseModel):
     end: date
     accrual_cents: int
     cash_out_cents: int
+
+
+class PowerMonth(BaseModel):
+    month: str  # "2026-07"
+    income_cents: int  # magnitude
+    spend_cents: int  # magnitude
+    net_cents: int  # signed: income - spend
+
+
+class TransactionsReport(BaseModel):
+    start: date
+    end: date
+    counted_total_cents: int  # magnitude, sum of every counted row regardless of date
+    through_today_cents: int | None  # magnitude through today; None if range excludes today
+    transactions: list[TxnRow]
 
 
 class SyncRunOut(BaseModel):
@@ -207,6 +224,27 @@ def create_app(
     async def power(session: Session) -> PowerReport:
         return await power_report(session, today=date.today())
 
+    @app.get("/power/history")
+    async def power_history(
+        session: Session, months: Annotated[int, Query(ge=1, le=60)] = 6
+    ) -> list[PowerMonth]:
+        """Month-over-month income/spend, newest first (the newest row is the current,
+        still-in-progress month). Unlike GET /power, which reports today's recurring-
+        series state, past months here report actual *observed* flows for that
+        calendar month — accrual income/spend over the month's full date range — so
+        a since-cancelled bill or a past raise still shows correctly even though no
+        series reflects it anymore today."""
+        today = date.today()
+        links = await classified_links(session)
+        primary = await primary_currency(session)
+        rows = await accrual_by_month(session, months, today, links=links, primary=primary)
+        return [
+            PowerMonth(
+                month=month, income_cents=income, spend_cents=spend, net_cents=income - spend
+            )
+            for month, income, spend in rows
+        ]
+
     @app.get("/networth")
     async def networth(session: Session) -> NetWorthReport:
         return await net_worth_report(session)
@@ -233,6 +271,33 @@ def create_app(
             cash_out_cents=await cash_out(
                 session, range_start, range_end, links=links, primary=primary
             ),
+        )
+
+    @app.get("/transactions")
+    async def transactions(
+        session: Session,
+        start: date | None = None,
+        end: date | None = None,
+        account_id: int | None = None,
+        merchant: str | None = None,
+    ) -> TransactionsReport:
+        """Trust/audit view: every transaction in range, with why it is or isn't
+        counted as spend, plus server-computed totals. Defaults to the current
+        calendar month."""
+        today = date.today()
+        default_start, default_end = month_bounds(today)
+        range_start = start or default_start
+        range_end = end or default_end
+        rows = await transactions_report(
+            session, range_start, range_end, account_id=account_id, merchant=merchant
+        )
+        counted_total, through_today = spend_totals(rows, range_start, range_end, today)
+        return TransactionsReport(
+            start=range_start,
+            end=range_end,
+            counted_total_cents=counted_total,
+            through_today_cents=through_today,
+            transactions=rows,
         )
 
     @app.get("/recurring")

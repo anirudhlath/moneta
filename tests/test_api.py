@@ -14,6 +14,7 @@ from moneta.aggregator.base import AccountDTO, MergedAdapter, Snapshot, Transact
 from moneta.aggregator.plaid import PlaidAdapter, PlaidItem, items_path, save_items
 from moneta.aggregator.simplefin import SimpleFINAdapter
 from moneta.api import _build_adapter, create_app
+from moneta.cadence import month_bounds
 from moneta.config import Settings
 from moneta.db import init_db, make_sessionmaker
 from moneta.models import (
@@ -708,3 +709,110 @@ async def test_accounts_and_recurring_money_fields_are_ints(
     series = (await client.get("/recurring")).json()
     assert series[0]["expected_cents"] == -1599
     assert "expected_amount" not in series[0]
+
+
+async def test_money_field_signs(
+    client: httpx.AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """Pins the documented per-field sign convention (design §1): flow fields keep
+    the storage sign (negative = outflow); aggregate/labeled-magnitude fields are
+    unsigned."""
+    from moneta.models import AccountType
+
+    async with sessionmaker() as session:
+        await make_account(session, type=AccountType.credit, balance_cents=-121500)
+        checking = await make_account(session, type=AccountType.checking)
+        await make_txn(session, checking, amount_cents=-2500, posted_on=date.today())
+        await make_series(session, expected_cents=-1599)
+        await session.commit()
+
+    power = (await client.get("/power")).json()
+    assert power["total_fixed_cents"] >= 0
+    assert power["spent_so_far_cents"] >= 0
+    assert isinstance(power["remaining_cents"], int)  # signed: either sign is valid
+
+    accounts = (await client.get("/accounts")).json()
+    assert any(a["balance_cents"] < 0 for a in accounts)
+
+    networth = (await client.get("/networth")).json()
+    assert networth["liabilities_cents"] >= 0
+
+    recurring = (await client.get("/recurring")).json()
+    outflow_series = next(s for s in recurring if s["direction"] == "outflow")
+    assert outflow_series["expected_cents"] < 0
+
+    cashflow = (await client.get("/cashflow")).json()
+    assert cashflow["accrual_cents"] >= 0
+    assert cashflow["cash_out_cents"] >= 0
+
+
+def _months_back(today: date, n: int) -> date:
+    """First day of the calendar month `n` months before `today`'s month."""
+    year, month = today.year, today.month - n
+    while month <= 0:
+        year, month = year - 1, month + 12
+    return month_bounds(date(year, month, 1))[0]
+
+
+async def test_power_history_months_out_of_range_is_422(client: httpx.AsyncClient) -> None:
+    assert (await client.get("/power/history", params={"months": 0})).status_code == 422
+    assert (await client.get("/power/history", params={"months": 61})).status_code == 422
+
+
+async def test_power_history_multi_month_rows_newest_first(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from moneta.models import AccountType
+
+    today = date.today()
+    this_month_start = _months_back(today, 0)
+    last_month_start = _months_back(today, 1)
+    last_month_end = month_bounds(last_month_start)[1]
+
+    async with sessionmaker() as session:
+        checking = await make_account(session, type=AccountType.checking)
+        # this (current, partial) month: one paycheck, one purchase
+        await make_txn(
+            session, checking, amount_cents=300000, posted_on=today, description="PAYROLL"
+        )
+        await make_txn(
+            session, checking, amount_cents=-5000, posted_on=today, description="GROCERY"
+        )
+        # last month: different amounts, entirely inside the prior calendar month
+        await make_txn(
+            session,
+            checking,
+            amount_cents=250000,
+            posted_on=last_month_start,
+            description="PAYROLL",
+        )
+        await make_txn(
+            session,
+            checking,
+            amount_cents=-4000,
+            posted_on=last_month_end,
+            description="GROCERY",
+        )
+        await session.commit()
+
+    async with _client(create_app(sessionmaker, adapter=None, llm=None)) as c:
+        r = await c.get("/power/history", params={"months": 2})
+    assert r.status_code == 200
+    rows = r.json()
+    assert len(rows) == 2
+
+    assert rows[0]["month"] == f"{this_month_start.year:04d}-{this_month_start.month:02d}"
+    assert rows[0]["income_cents"] == 300000
+    assert rows[0]["spend_cents"] == 5000
+    assert rows[0]["net_cents"] == 295000
+
+    assert rows[1]["month"] == f"{last_month_start.year:04d}-{last_month_start.month:02d}"
+    assert rows[1]["income_cents"] == 250000
+    assert rows[1]["spend_cents"] == 4000
+    assert rows[1]["net_cents"] == 246000
+
+
+async def test_power_history_default_is_six_months(client: httpx.AsyncClient) -> None:
+    r = await client.get("/power/history")
+    assert r.status_code == 200
+    assert len(r.json()) == 6

@@ -2,7 +2,7 @@
 
 **Status:** living document — reflects what is shipped on `main` plus the prioritized roadmap
 **Owner:** Anirudh Lath
-**Last updated:** 2026-07-15
+**Last updated:** 2026-07-16
 **Deep-dive specs:** [design doc](superpowers/specs/2026-07-07-moneta-design.md) ·
 [LLM recurring verification](superpowers/specs/2026-07-09-llm-recurring-verification-design.md) ·
 [Plaid integration](superpowers/specs/2026-07-09-plaid-integration-design.md)
@@ -81,6 +81,7 @@ A FastAPI server owns **all** logic; the typer CLI is a thin HTTP client that ru
 | **Spending power** (`moneta power`) | The flagship: detected monthly income (itemized by source) − detected fixed costs (itemized), plus spent-so-far and remaining this month. Credit-card payment series are excluded from fixed costs (their purchases are counted instead — no double count). |
 | **Net worth** (`moneta networth`) | Liquid + *vested* holdings − liabilities. Unvested reported separately as potential, never summed in. Foreign-currency accounts are excluded and reported as such. |
 | **Cashflow** (`moneta cashflow`) | Accrual spend vs. cash out for a date range (default: this month) — keeps "spent so far" honest when purchases go on credit. |
+| **Transaction drill-down** (`moneta txns`) | The trust companion to spending power: every transaction in a date range (default: this month; filterable by account/merchant), with `excluded_because` giving the first matching reason a row isn't counted as spend — inflow, transfer, loan payment, credit-card payment, an active non-discretionary fixed-cost series, non-spend account, or foreign currency — mirroring `power`'s spent-so-far rule exactly instead of leaving it a black box. |
 | **Financing obligations** (`moneta obligations`) | Derived, never stored: any `loan`-type or financing-mode account with a payment derived from its transfer-linked outflows (per-account, not merchant-string grouped) gets payment, balance, months-left = balance ÷ payment, and a deferred-interest warning when payoff lands after `promo_expires_on` (the one optional manual field in the system). |
 | **Single-currency correctness** | A majority-vote primary currency filters all aggregate views and recurring grouping, so mixed-currency accounts can't corrupt the numbers. |
 | **Local-calendar-day dates** | Timestamps convert in the process's local timezone — an evening purchase lands on the day the user experienced. |
@@ -128,6 +129,12 @@ Rich tables with stable IDs everywhere a follow-up action exists (`recurring --e
 | 2026-07-16 | **Ended/discretionary spend bucketing** | Transactions tagged to an ended or discretionary series now count toward `spent_so_far` in `power` instead of disappearing from every bucket — a cancelled-but-still-charging subscription, or a habit's spending, was previously invisible money. |
 | 2026-07-16 | **Recurring overrule CLI** | `moneta recurring --not-a-bill/--habit/--re-review ID` (mutually exclusive with each other and `--end`) — `POST /recurring/{id}/{not-a-bill,habit,re-review}` find-or-create the series' `recurring_cluster` ledger item and apply a manual resolution through the existing `apply_resolution` path, so a wrongly-confirmed bill or habit is always human-correctable. |
 | 2026-07-16 | **Manual financing-mode override** | `moneta accounts --set-financing ID true\|false` (`PATCH /accounts` gains `financing_mode`); accounts table shows `credit (financing)`. A manual escape hatch alongside the `financing_account` review prompt, for correcting or pre-empting the fingerprint detector's verdict. |
+| 2026-07-16 | **Per-cycle cadence labels** | `SeriesLine` gains `expected_cents` (per-cycle magnitude); `moneta power` renders non-monthly income/fixed-cost rows as `$265.72 every 2 weeks ≈ $575.73/mo`, monthly rows stay bare, and the merchant cell drops its `(cadence)` suffix entirely — the ambiguity between a per-cycle charge and its monthly-equivalent is resolved in the amount text itself. |
+| 2026-07-16 | **Safe-to-spend per day** | `PowerReport` gains `days_left` and signed `per_day_remaining_cents` (`round(remaining / days_left)`, month-end floors `days_left` to 1, no division by zero, negative remaining stays negative — no clamp). `moneta power` renders `Per day (N days left)  $X.YY` right after Remaining. |
+| 2026-07-16 | **Upcoming charges** | `PowerReport.upcoming` lists active, non-discretionary, non-cc-payment outflow series with `next_expected_on` in `(today, month_end]`, plus derived loan payments whose projected next date falls in the window — sorted by date. `moneta power` renders a dim `Upcoming this month: X $A.BB (Jul 18) · Y $C.DD (Jul 28)` line under the table; nothing when empty. |
+| 2026-07-16 | **Transaction drill-down** | New `views/transactions.py` + `GET /transactions` + `moneta txns [--month M \| --start D --end D] [--account ID] [--merchant NAME]`: every transaction in range, joined to its account/series/transfer-link classification, with `counted_in_spend`/`excluded_because` replicating `power`'s spent-so-far rule row-by-row. CLI dims excluded rows (never hides them) and prints a two-line footer — `Counted as spend` (all counted rows, always) and a dim `Through today (power's spent-so-far)` (only when the range covers today, since that's the only case the two numbers actually agree). |
+| 2026-07-16 | **`--json` on every read command** | `power`, `networth`, `cashflow`, `recurring`, `obligations`, `accounts`, `txns`, and `status` accept `--json`, printing the raw API response to stdout with no rich markup — scriptable, pipeable to `jq`. Combining `--json` with a write flag (`recurring --end/--not-a-bill/--habit/--re-review`, `accounts --set-type/--set-promo/--set-financing`) is a clean, request-free error. |
+| 2026-07-16 | **Power history** | `GET /power/history?months=N` (1-60, default 6) returns newest-first per-month rows (`income_cents`/`spend_cents` magnitudes, signed `net_cents`); past months report *actual observed* accrual income/spend for that calendar month, not today's recurring-series state, via a new `accrual_income` beside `accrual_spend`. `moneta power --history N` renders a Month/Income/Spend/Net table instead of the current-month view. |
 
 ## 8. Roadmap
 
@@ -136,18 +143,14 @@ Sourced from `docs/backlog/` (one file per ticket — see each for context and a
 **High**
 - Brokerage accounts without holdings are invisible to net worth.
 - Fidelity NetBenefits CSV mapping (direct export → vesting import).
-- Transaction drill-down command (inspect what's behind a number).
 
 **Medium**
-- Power rows should show per-cycle and monthly-equivalent amounts explicitly (cadence label next to a monthlyized number is ambiguous).
-- Safe-to-spend *today* (prorated within the month).
-- Upcoming charges surfaced in `power`.
 - Sync progress feedback; sync-staleness warning in `status`; per-item sync warnings surfaced to the user.
 - Per-source sync window (Plaid's daily replay currently pins the global window near today).
 - Recurring reactivate via CLI; friendlier remote-CLI connection errors.
 
 **Low**
-- JSON output flag (scripting); notifications digest; power history over time; transaction categorization; transfer-dedup edge cases; Plaid cursor-based incremental sync; Plaid Link update mode; vesting source adapter seam; SimpleFIN adapter injectable clock; test-coverage gaps.
+- Notifications digest; transaction categorization; transfer-dedup edge cases; Plaid cursor-based incremental sync; Plaid Link update mode; vesting source adapter seam; SimpleFIN adapter injectable clock; test-coverage gaps.
 
 ## 9. Risks & open questions
 
