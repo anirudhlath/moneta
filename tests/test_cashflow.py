@@ -61,6 +61,30 @@ async def test_internal_moves_count_nowhere(session: AsyncSession) -> None:
     assert await cash_out(session, date(2026, 7, 1), date(2026, 7, 31)) == 0
 
 
+async def test_cash_out_counts_outflow_to_loan_payment(session: AsyncSession) -> None:
+    """Only liquid->liquid moves are excluded from cash_out; an outflow paying a
+    loan account (inflow_account_type == loan) is a real cash cost and counts."""
+    checking = await make_account(session, type=AccountType.checking)
+    loan = await make_account(session, type=AccountType.loan)
+    out = await make_txn(
+        session,
+        checking,
+        amount_cents=-13500,
+        posted_on=date(2026, 7, 5),
+        description="SYNCHRONY BANK PAYMENT",
+    )
+    inn = await make_txn(
+        session,
+        loan,
+        amount_cents=13500,
+        posted_on=date(2026, 7, 5),
+        description="SYNCHRONY BANK PAYMENT",
+    )
+    session.add(TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule"))
+    await session.flush()
+    assert await cash_out(session, date(2026, 7, 1), date(2026, 7, 31)) == 13500
+
+
 async def test_cashflow_endpoint_returns_accrual_and_cash_out(
     session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:

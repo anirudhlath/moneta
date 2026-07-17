@@ -203,6 +203,24 @@ async def test_price_change_unconfident_queues_item_once(session: AsyncSession) 
     assert (await session.execute(select(ReviewItem))).scalar_one() is item
 
 
+async def test_zero_expected_cents_skips_drift_check_without_crash(session: AsyncSession) -> None:
+    """`s.expected_cents != 0` guards the price-drift division — a series that's never
+    had a real amount pinned (expected_cents=0) must be skipped, not ZeroDivisionError."""
+    acct = await make_account(session)
+    s = await make_series(session, next_expected_on=date(2026, 8, 15), expected_cents=0)
+    await make_txn(
+        session,
+        acct,
+        amount_cents=-1899,
+        merchant="Netflix",
+        posted_on=date(2026, 7, 15),
+        series_id=s.id,
+    )
+    assert await emit_series_events(session, llm=None, today=date(2026, 7, 16)) == 0
+    assert s.expected_cents == 0
+    assert (await session.execute(select(SeriesEvent))).scalars().all() == []
+
+
 async def test_price_change_denied_resolution_suppresses(session: AsyncSession) -> None:
     s, _ = await _drifted_series(session)
     session.add(

@@ -209,6 +209,48 @@ async def test_description_correction_clears_merchant_keeps_series(session: Asyn
     assert txn.merchant == "Spotify Usa"
 
 
+async def test_ingest_skips_txn_and_holding_with_unknown_account_id(session: AsyncSession) -> None:
+    """A txn/holding whose account_id isn't in this snapshot's accounts (e.g. an
+    institution mid-migration handing back a stale id) must be skipped, not crash
+    the acct_ids[...] lookup."""
+    snap = _snap()
+    snap.transactions.append(
+        TransactionDTO(
+            id="TRN-ORPHAN",
+            account_id="ACT-GHOST",
+            posted_on=date(2026, 7, 2),
+            amount=Decimal("-5.00"),
+            description="ORPHAN TXN",
+            raw={},
+        )
+    )
+    snap.holdings.append(
+        HoldingDTO(
+            account_id="ACT-GHOST", symbol="GHOST", quantity=1.0, market_value=Decimal("10.00")
+        )
+    )
+    stats = await ingest_snapshot(session, snap)
+    assert stats.new_accounts == 1
+    assert stats.new_transactions == 1  # only the real ACT-1 txn
+    assert stats.holdings == 1  # only the real ACT-1 holding
+    txn_ids = {t.aggregator_id for t in (await session.execute(select(Transaction))).scalars()}
+    assert txn_ids == {"TRN-1"}
+    holding_symbols = {h.symbol for h in (await session.execute(select(Holding))).scalars()}
+    assert holding_symbols == {"AAPL"}
+
+
+async def test_ingest_fully_empty_snapshot_is_noop(session: AsyncSession) -> None:
+    empty = Snapshot(accounts=[], transactions=[], holdings=[])
+    stats = await ingest_snapshot(session, empty)
+    assert stats.new_accounts == 0
+    assert stats.new_transactions == 0
+    assert stats.updated_transactions == 0
+    assert stats.holdings == 0
+    for model in (Account, Transaction, Holding):
+        n = (await session.execute(select(func.count()).select_from(model))).scalar_one()
+        assert n == 0
+
+
 async def test_amount_correction_drops_transfer_link(session: AsyncSession) -> None:
     from moneta.models import TransferLink
 
