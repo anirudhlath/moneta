@@ -721,6 +721,73 @@ async def test_transfer_pair_resolve_twice_is_409_not_500(
     assert len(links) == 1
 
 
+async def test_transfer_pair_resolve_with_two_distinct_preexisting_links_is_409(
+    client: httpx.AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """The 409 guard's either-leg query can match TWO distinct rows — the item's
+    outflow already linked to some other inflow in one row, and the picked inflow
+    already linked to some other outflow in another (a greedy-loser item resolved
+    after both legs were separately linked by later runs). That must still 409,
+    not blow up in scalar_one_or_none() as MultipleResultsFound → 500."""
+    from moneta.models import AccountType, LinkMethod, TransferLink
+
+    async with sessionmaker() as session:
+        checking = await make_account(session, type=AccountType.checking)
+        savings = await make_account(session, type=AccountType.savings)
+        out_x = await make_txn(
+            session,
+            checking,
+            amount_cents=-5000,
+            posted_on=date(2026, 7, 1),
+            description="ACH TRANSFER",
+        )
+        inn_y = await make_txn(
+            session, savings, amount_cents=5000, posted_on=date(2026, 7, 2), description="DEPOSIT"
+        )
+        inn_z = await make_txn(
+            session,
+            savings,
+            amount_cents=5000,
+            posted_on=date(2026, 7, 1),
+            description="DEPOSIT Z",
+        )
+        out_w = await make_txn(
+            session,
+            checking,
+            amount_cents=-5000,
+            posted_on=date(2026, 7, 2),
+            description="ACH TRANSFER W",
+        )
+        # two DISTINCT pre-existing links, one per leg: X↔Z and W↔Y
+        session.add(
+            TransferLink(
+                outflow_id=out_x.id, inflow_id=inn_z.id, confidence=1.0, method=LinkMethod.manual
+            )
+        )
+        session.add(
+            TransferLink(
+                outflow_id=out_w.id, inflow_id=inn_y.id, confidence=1.0, method=LinkMethod.manual
+            )
+        )
+        item = ReviewItem(
+            kind="transfer_pair",
+            question="which?",
+            payload={"outflow_id": out_x.id, "candidates": [inn_y.id]},
+        )
+        session.add(item)
+        await session.commit()
+        item_id, inflow_id = item.id, inn_y.id
+
+    resolution = {"resolution": {"inflow_id": inflow_id}}
+    r = await client.post(f"/review/{item_id}/resolve", json=resolution)
+    assert r.status_code == 409
+    assert r.json()["detail"] == "transaction already linked"
+
+    async with sessionmaker() as session:
+        links = (await session.execute(select(TransferLink))).scalars().all()
+    assert len(links) == 2  # the two pre-existing links; no third was inserted
+
+
 async def test_import_vesting_malformed_csv_is_422(client: httpx.AsyncClient) -> None:
     r = await client.post("/import/vesting", json={"csv": "ticker,vested\nACME,40\n"})
     assert r.status_code == 422

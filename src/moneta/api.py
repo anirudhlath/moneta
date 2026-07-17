@@ -522,8 +522,11 @@ def create_app(
                 legs.append(TransferLink.outflow_id == outflow_id)
             if isinstance(inflow_id, int):
                 legs.append(TransferLink.inflow_id == inflow_id)
+            # .first(), not scalar_one_or_none(): each leg can already be linked in a
+            # SEPARATE row (e.g. a greedy-loser item resolved after both legs were
+            # linked elsewhere) — two matches must still 409, not MultipleResultsFound.
             existing_link = (
-                (await session.execute(select(TransferLink).where(or_(*legs)))).scalar_one_or_none()
+                (await session.execute(select(TransferLink).where(or_(*legs)))).scalars().first()
                 if legs
                 else None
             )
