@@ -1,5 +1,6 @@
 import os
 import secrets
+from calendar import monthrange
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime
@@ -41,6 +42,7 @@ from moneta.views.cashflow import accrual_spend, cash_out
 from moneta.views.financing import Obligation, compute_obligations
 from moneta.views.networth import NetWorthReport, net_worth_report
 from moneta.views.power import PowerReport, power_report
+from moneta.views.transactions import TxnRow, transactions_report
 
 
 class AccountOut(BaseModel):
@@ -233,6 +235,23 @@ def create_app(
             cash_out_cents=await cash_out(
                 session, range_start, range_end, links=links, primary=primary
             ),
+        )
+
+    @app.get("/transactions")
+    async def transactions(
+        session: Session,
+        start: date | None = None,
+        end: date | None = None,
+        account_id: int | None = None,
+        merchant: str | None = None,
+    ) -> list[TxnRow]:
+        """Trust/audit view: every transaction in range, with why it is or isn't
+        counted as spend. Defaults to the current calendar month."""
+        today = date.today()
+        range_start = start or today.replace(day=1)
+        range_end = end or date(today.year, today.month, monthrange(today.year, today.month)[1])
+        return await transactions_report(
+            session, range_start, range_end, account_id=account_id, merchant=merchant
         )
 
     @app.get("/recurring")
