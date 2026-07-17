@@ -471,18 +471,20 @@ def test_recurring_overrule_flags_mutually_exclusive(monkeypatch) -> None:  # ty
     monkeypatch.setattr("moneta.cli.main.request", fake_request)
     result = runner.invoke(app, ["recurring", "--not-a-bill", "4", "--habit", "5"])
     assert result.exit_code == 1
-    assert "mutually exclusive" in result.output
+    # normalize whitespace: rich soft-wraps the long flag list, so a newline can
+    # land inside "mutually exclusive" depending on terminal width
+    assert "mutually exclusive" in " ".join(result.output.split())
     assert "Traceback" not in result.output
     assert calls == []
 
     result = runner.invoke(app, ["recurring", "--end", "4", "--re-review", "5"])
     assert result.exit_code == 1
-    assert "mutually exclusive" in result.output
+    assert "mutually exclusive" in " ".join(result.output.split())
     assert calls == []
 
     result = runner.invoke(app, ["recurring", "--end", "4", "--reactivate", "5"])
     assert result.exit_code == 1
-    assert "mutually exclusive" in result.output
+    assert "mutually exclusive" in " ".join(result.output.split())
     assert calls == []
 
 

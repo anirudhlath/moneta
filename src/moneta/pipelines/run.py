@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.aggregator.base import AggregatorAdapter, Snapshot
+from moneta.aggregator.base import AggregatorAdapter, Snapshot, concat_snapshots
 from moneta.llm import Classifier
 from moneta.models import Account, SyncRun, Transaction
 from moneta.pipelines.events import emit_series_events
@@ -71,7 +71,7 @@ class SyncReport(BaseModel):
 
 async def _fetch_all(
     session: AsyncSession, adapters: list[AggregatorAdapter], full: bool
-) -> tuple[Snapshot, list[str]]:
+) -> Snapshot:
     """Fetch every adapter with its own per-source `since`, merging into one snapshot.
 
     A failing adapter degrades to a warning and is skipped — UNLESS every configured
@@ -79,25 +79,20 @@ async def _fetch_all(
     case the first failure re-raises: an empty snapshot must never be ingested as a
     quiet success, or `data_as_of`/staleness would lie about having fresh data.
     """
-    snap = Snapshot(accounts=[], transactions=[], holdings=[])
-    warnings: list[str] = []
+    fetched: list[Snapshot] = []
     failures: list[tuple[str, Exception]] = []
     for adapter in adapters:
         since = await _sync_since(session, full, adapter.source)
         try:
-            fetched = await adapter.fetch(since=since)
+            fetched.append(await adapter.fetch(since=since))
         except Exception as exc:
             logger.warning("sync: adapter {} failed: {}", adapter.source, exc)
             failures.append((adapter.source, exc))
-            continue
-        snap.accounts.extend(fetched.accounts)
-        snap.transactions.extend(fetched.transactions)
-        snap.holdings.extend(fetched.holdings)
-        warnings.extend(fetched.warnings)
     if failures and len(failures) == len(adapters):
         raise failures[0][1]
-    warnings.extend(f"{source}: {type(exc).__name__}: {exc}" for source, exc in failures)
-    return snap, warnings
+    snap = concat_snapshots(fetched)
+    snap.warnings.extend(f"{source}: {type(exc).__name__}: {exc}" for source, exc in failures)
+    return snap
 
 
 async def run_sync(
@@ -111,7 +106,7 @@ async def run_sync(
     session.add(run)
     await session.commit()
     try:
-        snap, fetch_warnings = await _fetch_all(session, adapters, full)
+        snap = await _fetch_all(session, adapters, full)
         ingest = await ingest_snapshot(session, snap)
         normalized = await normalize_merchants(session, llm)
         transfers = await link_transfers(session, llm)
@@ -139,7 +134,7 @@ async def run_sync(
         recurring=recurring,
         verify=verify,
         events=events,
-        warnings=fetch_warnings,
+        warnings=snap.warnings,
     )
     run.finished_at = datetime.now()
     run.success = True

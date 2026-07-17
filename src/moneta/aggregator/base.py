@@ -50,6 +50,16 @@ class AggregatorAdapter(Protocol):
     async def fetch(self, since: date | None = None) -> Snapshot: ...
 
 
+def concat_snapshots(snaps: list[Snapshot]) -> Snapshot:
+    """Merge snapshots into one, concatenating all four fields in order."""
+    return Snapshot(
+        accounts=[a for s in snaps for a in s.accounts],
+        transactions=[t for s in snaps for t in s.transactions],
+        holdings=[h for s in snaps for h in s.holdings],
+        warnings=[w for s in snaps for w in s.warnings],
+    )
+
+
 async def gather_snapshots(fetches: Iterable[Awaitable[Snapshot]]) -> Snapshot:
     """Run fetches concurrently and concatenate the results.
 
@@ -61,9 +71,4 @@ async def gather_snapshots(fetches: Iterable[Awaitable[Snapshot]]) -> Snapshot:
         if isinstance(r, BaseException):
             raise r
     snaps = [r for r in results if isinstance(r, Snapshot)]
-    return Snapshot(
-        accounts=[a for s in snaps for a in s.accounts],
-        transactions=[t for s in snaps for t in s.transactions],
-        holdings=[h for s in snaps for h in s.holdings],
-        warnings=[w for s in snaps for w in s.warnings],
-    )
+    return concat_snapshots(snaps)

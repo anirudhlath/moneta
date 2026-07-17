@@ -153,6 +153,14 @@ class BackupIn(BaseModel):
     dest: str | None = None
 
 
+async def _latest_sync_run(session: AsyncSession) -> SyncRun | None:
+    """The newest `SyncRun` row, or None before any sync has run. Shared by
+    /sync/last and /status so the "most recent run" query lives in one place."""
+    return (
+        await session.execute(select(SyncRun).order_by(SyncRun.id.desc()).limit(1))
+    ).scalar_one_or_none()
+
+
 def create_app(
     sessionmaker: async_sessionmaker[AsyncSession],
     adapters: list[AggregatorAdapter],
@@ -210,9 +218,7 @@ def create_app(
 
     @app.get("/sync/last")
     async def sync_last(session: Session) -> SyncRunOut | None:
-        row = (
-            await session.execute(select(SyncRun).order_by(SyncRun.id.desc()).limit(1))
-        ).scalar_one_or_none()
+        row = await _latest_sync_run(session)
         if row is None:
             return None
         # the outcome rule lives here, not in each consumer: an unfinished row means
@@ -233,9 +239,7 @@ def create_app(
     @app.get("/status")
     async def status(session: Session) -> StatusOut:
         """Overall health: booleans/counters only, never secrets (design 2026-07-16 §3)."""
-        last_run = (
-            await session.execute(select(SyncRun).order_by(SyncRun.id.desc()).limit(1))
-        ).scalar_one_or_none()
+        last_run = await _latest_sync_run(session)
         last_sync_at = last_run.finished_at if last_run is not None else None
         # last_sync_ok is unknown (None), not False, while the newest run is still in
         # flight — a bare boolean would misreport an unfinished sync as a failure

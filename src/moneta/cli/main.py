@@ -314,8 +314,8 @@ def recurring(
     overrules = [v for v in (end, not_a_bill, habit, re_review, reactivate) if v is not None]
     if len(overrules) > 1:
         console.print(
-            "[red]Error:[/red] --end, --not-a-bill, --habit, --re-review, --reactivate\n"
-            "are mutually exclusive."
+            "[red]Error:[/red] --end, --not-a-bill, --habit, --re-review, and "
+            "--reactivate are mutually exclusive."
         )
         raise typer.Exit(1)
     reject_json_with_writes(json_output, end, not_a_bill, habit, re_review, reactivate)
