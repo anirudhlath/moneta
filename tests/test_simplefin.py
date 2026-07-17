@@ -119,9 +119,9 @@ def _ts(d: date) -> int:
     return int(datetime(d.year, d.month, d.day, tzinfo=UTC).timestamp())
 
 
-def _utc_today() -> date:
-    """The adapter anchors windows on the UTC date — tests must use the same anchor."""
-    return datetime.now(UTC).date()
+# A fixed window anchor injected via SimpleFINAdapter(today=...) (design 2026-07-16 §8) —
+# deterministic under test instead of racing the real clock at midnight.
+_FIXED_TODAY = date(2026, 7, 15)
 
 
 def _windowed_bridge(
@@ -173,9 +173,11 @@ def _windowed_bridge(
 
 async def test_deep_since_windows_requests_and_merges() -> None:
     """The bridge caps ranges at 90d (recommends 45d); a deep pull must walk windows."""
-    today = _utc_today()
+    today = _FIXED_TODAY
     client, requests = _windowed_bridge(today, [10, 60, 100], balances=["100.00", "999.99"])
-    adapter = SimpleFINAdapter("https://u:p@bridge.example/simplefin", client=client)
+    adapter = SimpleFINAdapter(
+        "https://u:p@bridge.example/simplefin", client=client, today=lambda: today
+    )
     snap = await adapter.fetch(since=today - timedelta(days=120))
     # all three txns retrieved even though they span >90 days
     assert sorted(t.id for t in snap.transactions) == ["TRN-10", "TRN-100", "TRN-60"]
@@ -194,9 +196,11 @@ async def test_fetch_logs_each_window_at_info() -> None:
     feedback (design 2026-07-16 §5) reads these INFO lines."""
     from loguru import logger
 
-    today = _utc_today()
+    today = _FIXED_TODAY
     client, _requests = _windowed_bridge(today, [10, 60, 100], balances=["100.00"])
-    adapter = SimpleFINAdapter("https://u:p@bridge.example/simplefin", client=client)
+    adapter = SimpleFINAdapter(
+        "https://u:p@bridge.example/simplefin", client=client, today=lambda: today
+    )
 
     messages: list[str] = []
     sink_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="INFO")
@@ -211,27 +215,43 @@ async def test_fetch_logs_each_window_at_info() -> None:
 
 async def test_epoch_since_stops_after_empty_window_streak() -> None:
     """An epoch pull must not walk to 1970 — stop once >1 year of windows comes back empty."""
-    client, requests = _windowed_bridge(_utc_today(), [10], balances=["100.00"])
-    adapter = SimpleFINAdapter("https://u:p@bridge.example/simplefin", client=client)
+    client, requests = _windowed_bridge(_FIXED_TODAY, [10], balances=["100.00"])
+    adapter = SimpleFINAdapter(
+        "https://u:p@bridge.example/simplefin", client=client, today=lambda: _FIXED_TODAY
+    )
     snap = await adapter.fetch(since=date(1970, 1, 1))
     assert [t.id for t in snap.transactions] == ["TRN-10"]
     assert len(requests) == 10  # 1 window with data + 9 empty (>1 year) → stop
 
 
 async def test_recent_since_is_a_single_request() -> None:
-    today = _utc_today()
+    today = _FIXED_TODAY
     client, requests = _windowed_bridge(today, [3], balances=["100.00"])
-    adapter = SimpleFINAdapter("https://u:p@bridge.example/simplefin", client=client)
+    adapter = SimpleFINAdapter(
+        "https://u:p@bridge.example/simplefin", client=client, today=lambda: today
+    )
     snap = await adapter.fetch(since=today - timedelta(days=7))
     assert [t.id for t in snap.transactions] == ["TRN-3"]
     assert requests == [(_ts(today - timedelta(days=7)), _ts(today + timedelta(days=1)))]
 
 
+async def test_default_clock_used_when_today_not_injected() -> None:
+    """No `today` callable → production default is the real UTC date (design 2026-07-16 §8)."""
+    real_today = datetime.now(UTC).date()
+    client, requests = _windowed_bridge(real_today, [3], balances=["100.00"])
+    adapter = SimpleFINAdapter("https://u:p@bridge.example/simplefin", client=client)
+    snap = await adapter.fetch(since=real_today - timedelta(days=7))
+    assert [t.id for t in snap.transactions] == ["TRN-3"]
+    assert requests == [(_ts(real_today - timedelta(days=7)), _ts(real_today + timedelta(days=1)))]
+
+
 async def test_future_since_still_refreshes_accounts() -> None:
     """Clock skew / post-dated txns can push `since` past today — balances must still land."""
-    today = _utc_today()
+    today = _FIXED_TODAY
     client, requests = _windowed_bridge(today, [], balances=["100.00"])
-    adapter = SimpleFINAdapter("https://u:p@bridge.example/simplefin", client=client)
+    adapter = SimpleFINAdapter(
+        "https://u:p@bridge.example/simplefin", client=client, today=lambda: today
+    )
     snap = await adapter.fetch(since=today + timedelta(days=10))
     assert len(requests) == 1
     assert snap.accounts and snap.accounts[0].balance == Decimal("100.00")
@@ -239,9 +259,11 @@ async def test_future_since_still_refreshes_accounts() -> None:
 
 async def test_bridge_ignoring_end_date_does_not_duplicate() -> None:
     """A sloppy bridge returning the same txns for every window must not produce dupes."""
-    today = _utc_today()
+    today = _FIXED_TODAY
     client, requests = _windowed_bridge(today, [5], balances=["100.00"], honor_window=False)
-    adapter = SimpleFINAdapter("https://u:p@bridge.example/simplefin", client=client)
+    adapter = SimpleFINAdapter(
+        "https://u:p@bridge.example/simplefin", client=client, today=lambda: today
+    )
     snap = await adapter.fetch(since=today - timedelta(days=120))
     assert [t.id for t in snap.transactions] == ["TRN-5"]
     assert len(requests) == 3  # dupe-only windows count as empty; walk still reaches since
@@ -250,7 +272,7 @@ async def test_bridge_ignoring_end_date_does_not_duplicate() -> None:
 async def test_deep_since_warnings_merge_across_windows() -> None:
     """A bridge error on a non-freshest window must still surface, not get dropped
     when only the freshest window's Snapshot object is kept."""
-    today = _utc_today()
+    today = _FIXED_TODAY
     calls = {"n": 0}
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -272,7 +294,9 @@ async def test_deep_since_warnings_merge_across_windows() -> None:
         return httpx.Response(200, json=payload)
 
     adapter = SimpleFINAdapter(
-        "https://u:p@bridge.example/simplefin", client=_mock_client(httpx.MockTransport(handle))
+        "https://u:p@bridge.example/simplefin",
+        client=_mock_client(httpx.MockTransport(handle)),
+        today=lambda: today,
     )
     snap = await adapter.fetch(since=today - timedelta(days=120))
     assert calls["n"] == 3  # 3 windows to walk from today back to `since`

@@ -1,6 +1,7 @@
 """SimpleFIN Bridge adapter. Protocol docs: https://www.simplefin.org/protocol.html"""
 
 import base64
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -39,6 +40,10 @@ def _date_to_ts(d: date) -> int:
     return int(datetime(d.year, d.month, d.day, tzinfo=UTC).timestamp())
 
 
+def _default_today() -> date:
+    return datetime.now(UTC).date()
+
+
 async def claim_setup_token(token: str, client: httpx.AsyncClient | None = None) -> str:
     claim_url = base64.b64decode(token).decode()
     own = client or httpx.AsyncClient()
@@ -52,9 +57,15 @@ async def claim_setup_token(token: str, client: httpx.AsyncClient | None = None)
 
 
 class SimpleFINAdapter:
-    def __init__(self, access_url: str, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        access_url: str,
+        client: httpx.AsyncClient | None = None,
+        today: Callable[[], date] | None = None,
+    ) -> None:
         self._url, self._auth = _split_auth(access_url)
         self._client = client
+        self._today = today
 
     @property
     def source(self) -> str:
@@ -72,7 +83,8 @@ class SimpleFINAdapter:
             # would put the exclusive end-date in the past, clipping today's txns.
             # max(…, since) guarantees at least one window even for a future `since`,
             # so account balances always refresh.
-            end = max(datetime.now(UTC).date(), since) + timedelta(days=1)
+            today = (self._today or _default_today)()
+            end = max(today, since) + timedelta(days=1)
             while end > since and empty_streak < _MAX_EMPTY_WINDOWS:
                 start = max(since, end - timedelta(days=_WINDOW_DAYS))
                 logger.info("SimpleFIN: fetching {} – {}", start, end)
