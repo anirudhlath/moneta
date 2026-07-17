@@ -1,3 +1,4 @@
+import json
 from calendar import monthrange
 from datetime import date
 from pathlib import Path
@@ -94,9 +95,12 @@ def sync(
 
 
 @app.command()
-def status() -> None:
+def status(json_output: Annotated[bool, typer.Option("--json")] = False) -> None:
     """Show the most recent sync run and its outcome."""
     r = request("GET", "/sync/last")
+    if json_output:
+        print(json.dumps(r))
+        return
     if not r:
         console.print("No sync has run yet. Run: [bold]moneta sync[/bold]")
         return
@@ -115,9 +119,12 @@ def status() -> None:
 
 
 @app.command()
-def power() -> None:
+def power(json_output: Annotated[bool, typer.Option("--json")] = False) -> None:
     """Monthly spending power: income - fixed costs."""
     r = request("GET", "/power")
+    if json_output:
+        print(json.dumps(r))
+        return
     table = Table(title=f"Spending power — {r['month']}", show_header=False)
     table.add_row("Income (detected)", f"{fmt_money(r['monthly_income_cents'])}/mo")
     for line in r["income_sources"]:
@@ -142,9 +149,12 @@ def power() -> None:
 
 
 @app.command()
-def networth() -> None:
+def networth(json_output: Annotated[bool, typer.Option("--json")] = False) -> None:
     """Net worth (vested only) with unvested shown separately."""
     r = request("GET", "/networth")
+    if json_output:
+        print(json.dumps(r))
+        return
     table = Table(title="Net worth", show_header=False)
     table.add_row("Liquid", fmt_money(r["liquid_cents"]))
     table.add_row("Vested holdings", fmt_money(r["vested_holdings_cents"]))
@@ -184,6 +194,7 @@ def recurring(
         int | None,
         typer.Option("--re-review", help="Reopen the series' bill/habit review question."),
     ] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """List detected recurring series (or recent events with --events).
 
@@ -195,6 +206,12 @@ def recurring(
         console.print(
             "[red]Error:[/red] --end, --not-a-bill, --habit, and --re-review "
             "are mutually exclusive."
+        )
+        raise typer.Exit(1)
+    if json_output and overrules:
+        console.print(
+            "[red]Error:[/red] --json cannot be combined with "
+            "--end/--not-a-bill/--habit/--re-review."
         )
         raise typer.Exit(1)
     if end is not None:
@@ -216,6 +233,9 @@ def recurring(
         console.print(f"[green]Series {re_review} reopened for review.[/green]")
     if events:
         rows = request("GET", "/recurring/events")
+        if json_output:
+            print(json.dumps(rows))
+            return
         table = Table("When", "ID", "Merchant", "Event", "Details")
         for e in rows:
             table.add_row(
@@ -227,6 +247,9 @@ def recurring(
             )
     else:
         rows = request("GET", "/recurring")
+        if json_output:
+            print(json.dumps(rows))
+            return
         table = Table("ID", "Merchant", "Direction", "Cadence", "Expected", "Next", "Status")
         for s in rows:
             table.add_row(
@@ -247,6 +270,7 @@ def cashflow(
         str | None, typer.Option("--start", help="YYYY-MM-DD (default: month start).")
     ] = None,
     end: Annotated[str | None, typer.Option("--end", help="YYYY-MM-DD (default: today).")] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Accrual spend vs cash out for a date range (defaults to this month)."""
     params = {
@@ -255,6 +279,9 @@ def cashflow(
         if value is not None
     }
     r = request("GET", "/cashflow", params=params or None)
+    if json_output:
+        print(json.dumps(r))
+        return
     table = Table(title=f"Cashflow — {r['start']} to {r['end']}", show_header=False)
     table.add_row("Accrual spend", fmt_money(r["accrual_cents"]))
     table.add_row("Cash out", fmt_money(r["cash_out_cents"]))
@@ -276,6 +303,7 @@ def txns(
     merchant: Annotated[
         str | None, typer.Option("--merchant", help="Case-insensitive substring match.")
     ] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """List transactions with why each is or isn't counted as spend (the trust view).
 
@@ -308,6 +336,9 @@ def txns(
         params["merchant"] = merchant
 
     rows = request("GET", "/transactions", params=params or None)
+    if json_output:
+        print(json.dumps(rows))
+        return
     table = Table("Date", "Account", "Merchant", "Amount", "Counted")
     today = date.today()
     last_day = monthrange(today.year, today.month)[1]
@@ -345,9 +376,12 @@ def txns(
 
 
 @app.command()
-def obligations() -> None:
+def obligations(json_output: Annotated[bool, typer.Option("--json")] = False) -> None:
     """Loans/financing: monthly payment, balance, months left, promo warnings."""
     rows = request("GET", "/obligations")
+    if json_output:
+        print(json.dumps(rows))
+        return
     table = Table("Account", "Balance", "Payment/mo", "Months left", "Payoff", "Promo ends")
     for ob in rows:
         payoff = ob["payoff_estimate"] or "?"
@@ -379,9 +413,16 @@ def accounts(
     set_type: Annotated[tuple[int, str] | None, typer.Option("--set-type")] = None,
     set_promo: Annotated[tuple[int, str] | None, typer.Option("--set-promo")] = None,
     set_financing: Annotated[tuple[int, str] | None, typer.Option("--set-financing")] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """List accounts. Flags: --set-type ID TYPE, --set-promo ID YYYY-MM-DD,
     --set-financing ID true|false."""
+    if json_output and (set_type or set_promo or set_financing):
+        console.print(
+            "[red]Error:[/red] --json cannot be combined with "
+            "--set-type/--set-promo/--set-financing."
+        )
+        raise typer.Exit(1)
     if set_type:
         request("PATCH", f"/accounts/{set_type[0]}", {"type": set_type[1]})
     if set_promo:
@@ -391,6 +432,9 @@ def accounts(
         financing_mode = _parse_bool_flag(set_financing[1])
         request("PATCH", f"/accounts/{set_financing[0]}", {"financing_mode": financing_mode})
     rows = request("GET", "/accounts")
+    if json_output:
+        print(json.dumps(rows))
+        return
     table = Table("ID", "Name", "Org", "Type", "Balance", "Promo ends")
     for a in rows:
         type_cell = f"{a['type']} (financing)" if a.get("financing_mode") else a["type"]

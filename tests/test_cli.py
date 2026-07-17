@@ -1,4 +1,5 @@
 import asyncio
+import json
 from calendar import monthrange
 from collections.abc import Awaitable, Callable
 from datetime import date, timedelta
@@ -1171,3 +1172,180 @@ def test_fmt_outflow_renders_magnitude_with_display_minus() -> None:
 
     assert fmt_outflow(512242) == "-$5122.42"
     assert fmt_outflow(0) == "$0.00"
+
+
+def test_power_json_output(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["power", "--json"])
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)
+    assert "remaining_cents" in body
+
+
+def test_networth_json_output(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["networth", "--json"])
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)
+    assert "net_worth_cents" in body
+
+
+def test_cashflow_json_output(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["cashflow", "--json"])
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)
+    assert "accrual_cents" in body
+
+
+def test_recurring_json_output(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def _seed(session: AsyncSession) -> None:
+        await make_series(session, merchant="Netflix")
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["recurring", "--json"])
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)
+    assert isinstance(body, list)
+    assert body[0]["merchant"] == "Netflix"
+
+
+def test_recurring_events_json_output(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def _seed(session: AsyncSession) -> None:
+        series = await make_series(session)
+        await make_series_event(session, series)
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["recurring", "--events", "--json"])
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)
+    assert isinstance(body, list)
+    assert body[0]["kind"] == "missed"
+
+
+def test_obligations_json_output(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def _seed(session: AsyncSession) -> None:
+        await make_account(session, type=AccountType.loan, balance_cents=-121500)
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["obligations", "--json"])
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)
+    assert isinstance(body, list)
+    assert "balance_owed_cents" in body[0]
+
+
+def test_accounts_json_output(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def _seed(session: AsyncSession) -> None:
+        await make_account(session, name="Checking")
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["accounts", "--json"])
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)
+    assert isinstance(body, list)
+    assert body[0]["name"] == "Checking"
+
+
+def test_txns_json_output(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    today = date.today()
+
+    async def _seed(session: AsyncSession) -> None:
+        checking = await make_account(session, type=AccountType.checking)
+        await make_txn(
+            session, checking, amount_cents=-2500, merchant="Coffee Shop", posted_on=today
+        )
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["txns", "--json"])
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)
+    assert isinstance(body, list)
+    assert "counted_in_spend" in body[0]
+
+
+def test_status_json_output_null_before_any_sync(  # type: ignore[no-untyped-def]
+    tmp_path: Path, monkeypatch
+) -> None:
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["status", "--json"])
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "null"
+
+
+def test_status_json_output_with_sync(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def seed(session: AsyncSession) -> None:
+        session.add(SyncRun())
+
+    _seed_db(tmp_path, seed)
+    result = runner.invoke(app, ["status", "--json"])
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)
+    assert body["status"] == "incomplete"
+
+
+def test_recurring_json_with_write_flag_errors_before_request(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        raise AssertionError("request must not be called when --json combines with a write flag")
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["recurring", "--end", "1", "--json"])
+    assert result.exit_code == 1
+    assert "Error" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_accounts_json_with_write_flag_errors_before_request(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        raise AssertionError("request must not be called when --json combines with a write flag")
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["accounts", "--set-type", "1", "checking", "--json"])
+    assert result.exit_code == 1
+    assert "Error" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_json_output_has_no_rich_table_chars(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def _seed(session: AsyncSession) -> None:
+        await make_series(session, merchant="Netflix")
+        checking = await make_account(session, type=AccountType.checking)
+        await make_txn(session, checking, amount_cents=-2500, posted_on=date.today())
+
+    _seed_db(tmp_path, _seed)
+    for args in (
+        ["power", "--json"],
+        ["networth", "--json"],
+        ["cashflow", "--json"],
+        ["recurring", "--json"],
+        ["obligations", "--json"],
+        ["accounts", "--json"],
+        ["txns", "--json"],
+        ["status", "--json"],
+    ):
+        result = runner.invoke(app, args)
+        assert result.exit_code == 0, f"{args}: {result.output}"
+        assert "│" not in result.stdout, f"{args}: rich table leaked into --json output"

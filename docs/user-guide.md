@@ -220,6 +220,17 @@ semantics (its payments count as fixed costs instead of its purchases) without w
 the `financing_account` review prompt. A financing-mode account shows as `credit (financing)`
 in the Type column.
 
+### Scripting: `--json`
+
+Every read command above (`power`, `networth`, `cashflow`, `recurring`,
+`obligations`, `accounts`, `txns`, `status`) accepts `--json`: it prints the
+raw API response to stdout with no rich markup, ready to pipe into `jq` or a
+script, and returns before any table is built. `moneta status --json` prints
+`null` when no sync has run yet. Combining `--json` with a write flag
+(`recurring --end/--not-a-bill/--habit/--re-review`,
+`accounts --set-type/--set-promo/--set-financing`) is a clean error — no
+request fires.
+
 ## The review queue
 
 When moneta (and the LLM, if configured) can't classify something confidently, it asks you
