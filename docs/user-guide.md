@@ -121,6 +121,10 @@ The flagship view for the current month:
 - **Per day (N days left)** — `remaining ÷ days left in month` (today through month-end,
   inclusive; the last day of the month shows 1 day left). Negative remaining shows a negative
   per-day figure — no clamping to zero.
+- **Upcoming this month** — a dim line under the table listing active, non-discretionary,
+  non-credit-card-payment fixed costs (plus derived loan payments) due later this month, e.g.
+  `Upcoming this month: Rent $1400.00 (Jul 15) · Netflix $15.99 (Jul 28)`. Omitted when nothing
+  is due before month-end.
 
 ### `moneta networth`
 

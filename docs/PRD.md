@@ -130,6 +130,7 @@ Rich tables with stable IDs everywhere a follow-up action exists (`recurring --e
 | 2026-07-16 | **Manual financing-mode override** | `moneta accounts --set-financing ID true\|false` (`PATCH /accounts` gains `financing_mode`); accounts table shows `credit (financing)`. A manual escape hatch alongside the `financing_account` review prompt, for correcting or pre-empting the fingerprint detector's verdict. |
 | 2026-07-16 | **Per-cycle cadence labels** | `SeriesLine` gains `expected_cents` (per-cycle magnitude); `moneta power` renders non-monthly income/fixed-cost rows as `$265.72 every 2 weeks ≈ $575.73/mo`, monthly rows stay bare, and the merchant cell drops its `(cadence)` suffix entirely — the ambiguity between a per-cycle charge and its monthly-equivalent is resolved in the amount text itself. |
 | 2026-07-16 | **Safe-to-spend per day** | `PowerReport` gains `days_left` and signed `per_day_remaining_cents` (`round(remaining / days_left)`, month-end floors `days_left` to 1, no division by zero, negative remaining stays negative — no clamp). `moneta power` renders `Per day (N days left)  $X.YY` right after Remaining. |
+| 2026-07-16 | **Upcoming charges** | `PowerReport.upcoming` lists active, non-discretionary, non-cc-payment outflow series with `next_expected_on` in `(today, month_end]`, plus derived loan payments whose projected next date falls in the window — sorted by date. `moneta power` renders a dim `Upcoming this month: X $A.BB (Jul 18) · Y $C.DD (Jul 28)` line under the table; nothing when empty. |
 
 ## 8. Roadmap
 
@@ -141,7 +142,6 @@ Sourced from `docs/backlog/` (one file per ticket — see each for context and a
 - Transaction drill-down command (inspect what's behind a number).
 
 **Medium**
-- Upcoming charges surfaced in `power`.
 - Sync progress feedback; sync-staleness warning in `status`; per-item sync warnings surfaced to the user.
 - Per-source sync window (Plaid's daily replay currently pins the global window near today).
 - Recurring reactivate via CLI; friendlier remote-CLI connection errors.

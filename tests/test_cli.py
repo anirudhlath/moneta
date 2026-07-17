@@ -5,6 +5,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 from typer.testing import CliRunner
 
@@ -441,6 +442,34 @@ def test_power_per_day_row_after_remaining(tmp_path: Path, monkeypatch) -> None:
     remaining_idx = result.output.index("Remaining")
     per_day_idx = result.output.index("Per day")
     assert per_day_idx > remaining_idx
+
+
+def test_power_upcoming_charges_absent_when_empty(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["power"])
+    assert result.exit_code == 0
+    assert "Upcoming this month" not in result.output
+
+
+def test_power_upcoming_charges_render_dim_line(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    today = date.today()
+    last_day = monthrange(today.year, today.month)[1]
+    month_end = date(today.year, today.month, last_day)
+    expected_on = today + timedelta(days=1)
+    if expected_on > month_end:
+        pytest.skip("today is the last day of the month; no room for an upcoming charge")
+
+    async def _seed(session: AsyncSession) -> None:
+        await make_series(
+            session, merchant="Rent", expected_cents=-140000, next_expected_on=expected_on
+        )
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["power"])
+    assert result.exit_code == 0
+    label = f"{expected_on.strftime('%b')} {expected_on.day}"
+    assert f"Upcoming this month: Rent $1400.00 ({label})" in result.output
 
 
 def test_review_non_integer_answer_skips_cleanly(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]

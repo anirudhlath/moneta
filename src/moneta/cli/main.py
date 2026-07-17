@@ -54,6 +54,11 @@ def _series_line_amount(line: dict[str, Any]) -> str:
     return f"{fmt_money(line['expected_cents'])} {phrase} ≈ {fmt_money(line['monthly_cents'])}/mo"
 
 
+def _fmt_upcoming_date(d: date) -> str:
+    """ "Jul 18" — avoids the platform-specific %-d strftime directive."""
+    return f"{d.strftime('%b')} {d.day}"
+
+
 @app.command()
 def sync(
     full: Annotated[
@@ -126,6 +131,13 @@ def power() -> None:
     table.add_row("[bold]Remaining[/bold]", f"[bold]{fmt_money(r['remaining_cents'])}[/bold]")
     table.add_row(f"Per day ({r['days_left']} days left)", fmt_money(r["per_day_remaining_cents"]))
     console.print(table)
+    if r["upcoming"]:
+        parts = [
+            f"{escape(u['merchant'])} {fmt_money(u['expected_cents'])} "
+            f"({_fmt_upcoming_date(date.fromisoformat(u['expected_on']))})"
+            for u in r["upcoming"]
+        ]
+        console.print(f"[dim]Upcoming this month: {' · '.join(parts)}[/dim]")
 
 
 @app.command()
