@@ -184,7 +184,7 @@ Unset = no LLM; ambiguous items go to `moneta review` instead.
 | `moneta accounts [--set-type ID TYPE] [--set-promo ID DATE] [--set-financing ID true\|false]` | List accounts; set type / promo expiry / financing-mode flag |
 | `moneta import vesting <file.csv>` | Vesting data (`symbol,vested_quantity,unvested_quantity`) |
 | `moneta renormalize` | Re-apply improved merchant rules to already-synced data |
-| `moneta status` | Last sync run: when, success/failure, counts |
+| `moneta status` | Health check: last sync (when, success/failure, what changed), account/open-review counts, configured sources, LLM status |
 | `moneta backup [dest]` | Online DB snapshot via SQLite `VACUUM INTO` |
 | `moneta serve` | Run the FastAPI server |
 
