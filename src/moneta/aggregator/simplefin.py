@@ -75,6 +75,7 @@ class SimpleFINAdapter:
             end = max(datetime.now(UTC).date(), since) + timedelta(days=1)
             while end > since and empty_streak < _MAX_EMPTY_WINDOWS:
                 start = max(since, end - timedelta(days=_WINDOW_DAYS))
+                logger.info("SimpleFIN: fetching {} – {}", start, end)
                 window = _parse_snapshot(
                     await self._get(
                         own,

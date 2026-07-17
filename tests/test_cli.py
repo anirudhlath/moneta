@@ -3,6 +3,7 @@ import json
 from calendar import monthrange
 from collections.abc import Awaitable, Callable
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -131,9 +132,82 @@ def test_sync_without_setup_fails_cleanly(tmp_path: Path, monkeypatch) -> None: 
     assert result.exit_code == 1
     assert "simplefin" in result.output
     assert "plaid" in result.output
+    # regression: the in-process progress sink (registered before the request) must
+    # survive build_app()'s own configure_logging() call, or its later removal in
+    # sync()'s finally raises ValueError and masks the clean typer.Exit(1) above
+    assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
-def test_sync_full_flag_requests_full_sync(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_remote_dead_port_connection_error_is_clean(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Ticket acceptance: a dead-port remote server must exit 1 with a clean message,
+    never a raw httpx traceback (design 2026-07-16 §4)."""
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("MONETA_API_URL", "http://127.0.0.1:1")  # nothing listens on port 1
+    result = runner.invoke(app, ["power"])
+    assert result.exit_code == 1
+    assert "could not reach" in result.output
+    assert "http://127.0.0.1:1" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_in_process_unreachable_aggregator_connection_error_is_clean(  # type: ignore[no-untyped-def]
+    tmp_path: Path, monkeypatch
+) -> None:
+    """In-process mode has no client socket of its own — the SimpleFIN adapter's
+    httpx call raises through the ASGI app instead; same clean-message contract."""
+    _isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv(
+        "MONETA_SIMPLEFIN_ACCESS_URL", "https://u:p@127.0.0.1:1/simplefin"
+    )  # nothing listens on port 1
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 1
+    assert "could not reach a configured aggregator" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_sync_in_process_progress_sink_is_registered_and_cleanly_removed(  # type: ignore[no-untyped-def]
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A real in-process sync must leave loguru exactly as configure_logging set it
+    up (stderr + file sink) — no leaked or double-removed progress sink."""
+    _isolate(monkeypatch, tmp_path)
+    import moneta.api as api_mod
+    from moneta.aggregator.base import AccountDTO, Snapshot
+
+    class FakeAdapter:
+        source = "fake"
+
+        async def fetch(self, since: date | None = None) -> Snapshot:
+            return Snapshot(
+                accounts=[
+                    AccountDTO(
+                        id="A-1",
+                        name="Checking",
+                        org_name="Bank",
+                        currency="USD",
+                        balance=Decimal("10.00"),
+                        balance_date=date.today(),
+                        source="fake",
+                    )
+                ],
+                transactions=[],
+                holdings=[],
+            )
+
+    monkeypatch.setattr(api_mod, "_build_adapters", lambda settings: [FakeAdapter()])
+    from loguru import logger
+
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 0
+    assert "Synced:" in result.output
+    # a fresh tmp_path config dir makes configure_logging wipe+reinstall exactly its
+    # own two sinks (stderr + file) — any extra handler means the progress sink leaked
+    assert len(logger._core.handlers) == 2  # type: ignore[attr-defined]
+
+
+def test_sync_full_flag_requests_full_sync(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)  # sync() now reads settings.api_url too — must not
+    # pick up a real developer config
     calls: list[tuple[str, str, Any]] = []
 
     def fake_request(
@@ -1006,7 +1080,9 @@ def test_renormalize_command_runs(tmp_path: Path, monkeypatch) -> None:  # type:
     assert "Updated 0 merchant name(s)" in result.output
 
 
-def test_sync_prints_verification_line(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_sync_prints_verification_line(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
     def fake_request(
         method: str,
         path: str,
@@ -1030,7 +1106,9 @@ def test_sync_prints_verification_line(monkeypatch) -> None:  # type: ignore[no-
     assert "LLM verified 2 series; flagged 1 for review." in result.output
 
 
-def test_sync_prints_warnings(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_sync_prints_warnings(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
     def fake_request(
         method: str,
         path: str,
@@ -1060,7 +1138,9 @@ def test_sync_prints_warnings(monkeypatch) -> None:  # type: ignore[no-untyped-d
     assert "⚠ Plaid item Old Bank skipped" in result.output
 
 
-def test_sync_omits_warnings_section_when_healthy(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_sync_omits_warnings_section_when_healthy(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
     def fake_request(
         method: str,
         path: str,

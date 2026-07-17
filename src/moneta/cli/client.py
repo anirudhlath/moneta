@@ -43,7 +43,19 @@ async def _arequest(
         client = await stack.enter_async_context(
             httpx.AsyncClient(transport=transport, base_url=base_url, timeout=120)
         )
-        resp = await client.request(method, path, params=params, json=json_body, headers=headers)
+        try:
+            resp = await client.request(
+                method, path, params=params, json=json_body, headers=headers
+            )
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
+            # remote mode: this is the CLI's own socket failing to reach the server.
+            # in-process mode: no socket of ours is involved — the same exception
+            # types propagate up THROUGH the ASGI app from an adapter's httpx call
+            # (e.g. SimpleFIN unreachable), so name the aggregator, not a URL we
+            # never had.
+            target = settings.api_url or "a configured aggregator"
+            console.print(f"[red]Error:[/red] could not reach {target} ({exc})")
+            raise typer.Exit(1) from None
     if resp.status_code >= 400:
         try:  # proxies and unhandled 500s return plaintext/HTML, not FastAPI's JSON
             body = resp.json()

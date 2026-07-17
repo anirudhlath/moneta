@@ -189,6 +189,26 @@ async def test_deep_since_windows_requests_and_merges() -> None:
     assert len(snap.accounts) == 1
 
 
+async def test_fetch_logs_each_window_at_info() -> None:
+    """A deep pull walks dozens of windows silently otherwise — sync progress
+    feedback (design 2026-07-16 §5) reads these INFO lines."""
+    from loguru import logger
+
+    today = _utc_today()
+    client, _requests = _windowed_bridge(today, [10, 60, 100], balances=["100.00"])
+    adapter = SimpleFINAdapter("https://u:p@bridge.example/simplefin", client=client)
+
+    messages: list[str] = []
+    sink_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="INFO")
+    try:
+        await adapter.fetch(since=today - timedelta(days=120))
+    finally:
+        logger.remove(sink_id)
+
+    fetch_lines = [m for m in messages if m.startswith("SimpleFIN: fetching")]
+    assert len(fetch_lines) == 3  # one per window, matching the 3 requests made
+
+
 async def test_epoch_since_stops_after_empty_window_streak() -> None:
     """An epoch pull must not walk to 1970 — stop once >1 year of windows comes back empty."""
     client, requests = _windowed_bridge(_utc_today(), [10], balances=["100.00"])

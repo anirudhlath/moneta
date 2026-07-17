@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
+from loguru import logger
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
@@ -12,6 +13,8 @@ from moneta.cadence import month_bounds
 from moneta.cli.client import request
 
 if TYPE_CHECKING:
+    from loguru import Message
+
     from moneta.aggregator.plaid import PlaidClient
     from moneta.config import Settings
 
@@ -105,7 +108,34 @@ def sync(
     ] = False,
 ) -> None:
     """Pull latest data and run all pipelines."""
-    report = request("POST", "/sync", params={"full": True} if full else None)
+    from moneta.config import load_settings
+
+    settings = load_settings()
+    in_process = not settings.api_url  # remote mode: spinner only, no local sink to read
+    if in_process:
+        # build_app() calls this too, but only the first call per directory does
+        # anything (it's idempotent) — calling it here first means the later,
+        # no-op call won't logger.remove() out from under the sink we add next
+        from moneta.logs import configure_logging
+
+        configure_logging(settings.config_dir)
+    with console.status("Syncing…") as live:
+        sink_id: int | None = None
+        if in_process:
+
+            def _show_progress(message: "Message") -> None:
+                live.update(f"Syncing… {message.record['message']}")
+
+            sink_id = logger.add(
+                _show_progress,
+                level="INFO",
+                filter=lambda record: (record["name"] or "").startswith("moneta.aggregator"),
+            )
+        try:
+            report = request("POST", "/sync", params={"full": True} if full else None)
+        finally:
+            if sink_id is not None:
+                logger.remove(sink_id)
     console.print(
         f"Synced: [bold]{report['ingest']['new_transactions']}[/bold] new transactions, "
         f"{report['transfers']['linked']} transfers linked, "
