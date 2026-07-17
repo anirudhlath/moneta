@@ -679,6 +679,48 @@ async def test_resolve_unknown_review_item_is_404(client: httpx.AsyncClient) -> 
     assert r.status_code == 404
 
 
+async def test_transfer_pair_resolve_twice_is_409_not_500(
+    client: httpx.AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """Design 2026-07-16 §7: a transfer_pair resolved twice (or resolved after the
+    link already exists another way) must 409, not IntegrityError-500."""
+    from moneta.models import AccountType, TransferLink
+
+    async with sessionmaker() as session:
+        checking = await make_account(session, type=AccountType.checking)
+        savings = await make_account(session, type=AccountType.savings)
+        out = await make_txn(
+            session,
+            checking,
+            amount_cents=-5000,
+            posted_on=date(2026, 7, 1),
+            description="ACH TRANSFER",
+        )
+        inn = await make_txn(
+            session, savings, amount_cents=5000, posted_on=date(2026, 7, 2), description="DEPOSIT"
+        )
+        item = ReviewItem(
+            kind="transfer_pair",
+            question="which?",
+            payload={"outflow_id": out.id, "candidates": [inn.id]},
+        )
+        session.add(item)
+        await session.commit()
+        item_id, inflow_id = item.id, inn.id
+
+    resolution = {"resolution": {"inflow_id": inflow_id}}
+    r1 = await client.post(f"/review/{item_id}/resolve", json=resolution)
+    assert r1.status_code == 200
+
+    r2 = await client.post(f"/review/{item_id}/resolve", json=resolution)
+    assert r2.status_code == 409
+    assert r2.json()["detail"] == "transaction already linked"
+
+    async with sessionmaker() as session:
+        links = (await session.execute(select(TransferLink))).scalars().all()
+    assert len(links) == 1
+
+
 async def test_import_vesting_malformed_csv_is_422(client: httpx.AsyncClient) -> None:
     r = await client.post("/import/vesting", json={"csv": "ticker,vested\nACME,40\n"})
     assert r.status_code == 422

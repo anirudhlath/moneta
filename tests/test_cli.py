@@ -257,6 +257,27 @@ def test_set_promo_invalid_date_fails_cleanly(tmp_path: Path, monkeypatch) -> No
     assert "Traceback" not in result.output
 
 
+def test_set_promo_bad_date_leaves_set_type_unapplied(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """design 2026-07-16 §7: --set-promo's date is validated BEFORE any PATCH
+    fires, so a bad date must leave --set-type unapplied too (no partial mutation)."""
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        raise AssertionError("request must not be called when --set-promo's date is invalid")
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(
+        app, ["accounts", "--set-type", "1", "savings", "--set-promo", "1", "not-a-date"]
+    )
+    assert result.exit_code == 1
+    assert "invalid date" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_accounts_set_financing_flag(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     calls: list[tuple[str, str, Any]] = []
 
@@ -405,6 +426,36 @@ def test_recurring_habit_and_re_review_flags_post(monkeypatch) -> None:  # type:
     assert "reopened" in result.output
 
 
+def test_recurring_reactivate_flag_patches_active(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[tuple[str, str, Any, Any]] = []
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        calls.append((method, path, json_body, params))
+        if method == "GET":
+            return []
+        return {"ok": True}
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["recurring", "--reactivate", "11"])
+    assert result.exit_code == 0
+    assert ("PATCH", "/recurring/11", {"status": "active"}, None) in calls
+    assert "reactivated" in result.output.lower()
+    assert "Traceback" not in result.output
+
+
+def test_recurring_reactivate_unknown_id_is_clean_404(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["recurring", "--reactivate", "999999"])
+    assert result.exit_code == 1
+    assert "Error" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_recurring_overrule_flags_mutually_exclusive(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     calls: list[tuple[str, str]] = []
 
@@ -425,6 +476,11 @@ def test_recurring_overrule_flags_mutually_exclusive(monkeypatch) -> None:  # ty
     assert calls == []
 
     result = runner.invoke(app, ["recurring", "--end", "4", "--re-review", "5"])
+    assert result.exit_code == 1
+    assert "mutually exclusive" in result.output
+    assert calls == []
+
+    result = runner.invoke(app, ["recurring", "--end", "4", "--reactivate", "5"])
     assert result.exit_code == 1
     assert "mutually exclusive" in result.output
     assert calls == []

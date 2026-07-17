@@ -9,7 +9,7 @@ from typing import Annotated, Any, Literal
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from loguru import logger
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from moneta.aggregator.base import AggregatorAdapter
@@ -30,6 +30,7 @@ from moneta.models import (
     SeriesEvent,
     SeriesStatus,
     SyncRun,
+    TransferLink,
     recurring_cluster_item,
 )
 from moneta.pipelines.normalize import renormalize_merchants
@@ -513,6 +514,21 @@ def create_app(
         required = _REQUIRED_BOOL.get(item.kind)
         if required is not None and not isinstance(body.resolution.get(required), bool):
             raise HTTPException(status_code=422, detail=f"resolution.{required} must be a bool")
+        if item.kind == ReviewKind.transfer_pair:
+            outflow_id = item.payload.get("outflow_id")
+            inflow_id = body.resolution.get("inflow_id")
+            legs = []
+            if isinstance(outflow_id, int):
+                legs.append(TransferLink.outflow_id == outflow_id)
+            if isinstance(inflow_id, int):
+                legs.append(TransferLink.inflow_id == inflow_id)
+            existing_link = (
+                (await session.execute(select(TransferLink).where(or_(*legs)))).scalar_one_or_none()
+                if legs
+                else None
+            )
+            if existing_link is not None:
+                raise HTTPException(status_code=409, detail="transaction already linked")
         await apply_resolution(session, item, body.resolution, resolved_by="manual")
         await session.commit()
         return {"ok": True}

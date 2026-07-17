@@ -1,4 +1,5 @@
 import json
+from contextlib import suppress
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -135,7 +136,10 @@ def sync(
             report = request("POST", "/sync", params={"full": True} if full else None)
         finally:
             if sink_id is not None:
-                logger.remove(sink_id)
+                # already removed (e.g. configure_logging reset sinks mid-sync) — ordering-
+                # independent robustness, not a hidden failure mode
+                with suppress(ValueError):
+                    logger.remove(sink_id)
     console.print(
         f"Synced: [bold]{report['ingest']['new_transactions']}[/bold] new transactions, "
         f"{report['transfers']['linked']} transfers linked, "
@@ -296,24 +300,31 @@ def recurring(
         int | None,
         typer.Option("--re-review", help="Reopen the series' bill/habit review question."),
     ] = None,
+    reactivate: Annotated[
+        int | None,
+        typer.Option("--reactivate", help="Reactivate an ended series."),
+    ] = None,
     json_output: JsonOption = False,
 ) -> None:
     """List detected recurring series (or recent events with --events).
 
-    --end ID cancels a series. --not-a-bill / --habit / --re-review ID overrule
-    detection instead; all four are mutually exclusive with each other.
+    --end ID cancels a series. --not-a-bill / --habit / --re-review / --reactivate
+    ID overrule detection instead; all five are mutually exclusive with each other.
     """
-    overrules = [v for v in (end, not_a_bill, habit, re_review) if v is not None]
+    overrules = [v for v in (end, not_a_bill, habit, re_review, reactivate) if v is not None]
     if len(overrules) > 1:
         console.print(
-            "[red]Error:[/red] --end, --not-a-bill, --habit, and --re-review "
+            "[red]Error:[/red] --end, --not-a-bill, --habit, --re-review, --reactivate\n"
             "are mutually exclusive."
         )
         raise typer.Exit(1)
-    reject_json_with_writes(json_output, end, not_a_bill, habit, re_review)
+    reject_json_with_writes(json_output, end, not_a_bill, habit, re_review, reactivate)
     if end is not None:
         request("PATCH", f"/recurring/{end}", {"status": "ended"})
         console.print(f"[green]Series {end} ended.[/green]")
+    if reactivate is not None:
+        request("PATCH", f"/recurring/{reactivate}", {"status": "active"})
+        console.print(f"[green]Series {reactivate} reactivated.[/green]")
     if not_a_bill is not None:
         request("POST", f"/recurring/{not_a_bill}/not-a-bill")
         console.print(
@@ -496,10 +507,12 @@ def accounts(
     """List accounts. Flags: --set-type ID TYPE, --set-promo ID YYYY-MM-DD,
     --set-financing ID true|false."""
     reject_json_with_writes(json_output, set_type, set_promo, set_financing)
+    # Validate --set-promo's date BEFORE firing any PATCH: an invalid date must
+    # leave --set-type unapplied too, not partially mutate the account server-side.
+    promo = _parse_iso_date(set_promo[1]) if set_promo else None
     if set_type:
         request("PATCH", f"/accounts/{set_type[0]}", {"type": set_type[1]})
     if set_promo:
-        promo = _parse_iso_date(set_promo[1])
         request("PATCH", f"/accounts/{set_promo[0]}", {"promo_expires_on": promo})
     if set_financing:
         financing_mode = _parse_bool_flag(set_financing[1])
