@@ -1,6 +1,5 @@
 import os
 import secrets
-from calendar import monthrange
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime
@@ -16,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from moneta.aggregator.base import AggregatorAdapter, MergedAdapter
 from moneta.aggregator.plaid import PlaidAdapter, PlaidClient, items_path, load_items
 from moneta.aggregator.simplefin import SimpleFINAdapter
+from moneta.cadence import month_bounds
 from moneta.config import Settings, load_settings, make_private
 from moneta.db import init_db, make_sessionmaker
 from moneta.llm import Classifier, build_classifier
@@ -128,7 +128,7 @@ def _month_bounds(today: date, months_back: int) -> tuple[date, date]:
     year, month = today.year, today.month - months_back
     while month <= 0:
         year, month = year - 1, month + 12
-    return date(year, month, 1), date(year, month, monthrange(year, month)[1])
+    return month_bounds(date(year, month, 1))
 
 
 class SyncRunOut(BaseModel):
@@ -292,8 +292,9 @@ def create_app(
         """Trust/audit view: every transaction in range, with why it is or isn't
         counted as spend. Defaults to the current calendar month."""
         today = date.today()
-        range_start = start or today.replace(day=1)
-        range_end = end or date(today.year, today.month, monthrange(today.year, today.month)[1])
+        default_start, default_end = month_bounds(today)
+        range_start = start or default_start
+        range_end = end or default_end
         return await transactions_report(
             session, range_start, range_end, account_id=account_id, merchant=merchant
         )

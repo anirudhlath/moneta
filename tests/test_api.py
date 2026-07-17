@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from moneta.aggregator.base import AccountDTO, MergedAdapter, Snapshot, TransactionDTO
 from moneta.aggregator.plaid import PlaidAdapter, PlaidItem, items_path, save_items
 from moneta.aggregator.simplefin import SimpleFINAdapter
-from moneta.api import _build_adapter, create_app
+from moneta.api import _build_adapter, _month_bounds, create_app
 from moneta.config import Settings
 from moneta.db import init_db, make_sessionmaker
 from moneta.models import (
@@ -747,10 +747,7 @@ async def test_money_field_signs(
 
 def _months_back(today: date, n: int) -> date:
     """First day of the calendar month `n` months before `today`'s month."""
-    year, month = today.year, today.month - n
-    while month <= 0:
-        year, month = year - 1, month + 12
-    return date(year, month, 1)
+    return _month_bounds(today, n)[0]
 
 
 async def test_power_history_months_out_of_range_is_422(client: httpx.AsyncClient) -> None:
@@ -761,18 +758,11 @@ async def test_power_history_months_out_of_range_is_422(client: httpx.AsyncClien
 async def test_power_history_multi_month_rows_newest_first(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    from calendar import monthrange
-
     from moneta.models import AccountType
 
     today = date.today()
     this_month_start = _months_back(today, 0)
-    last_month_start = _months_back(today, 1)
-    last_month_end = date(
-        last_month_start.year,
-        last_month_start.month,
-        monthrange(last_month_start.year, last_month_start.month)[1],
-    )
+    last_month_start, last_month_end = _month_bounds(today, 1)
 
     async with sessionmaker() as session:
         checking = await make_account(session, type=AccountType.checking)

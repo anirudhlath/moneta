@@ -1,4 +1,3 @@
-from calendar import monthrange
 from collections.abc import Iterable
 from datetime import date
 
@@ -6,7 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.cadence import advance_expected_on, monthly_cents, monthlyize
+from moneta.cadence import advance_expected_on, month_bounds, monthly_cents, monthlyize
 from moneta.models import (
     SPEND_ACCOUNT_TYPES,
     Account,
@@ -62,8 +61,7 @@ def _series_lines(series: Iterable[RecurringSeries]) -> tuple[list[SeriesLine], 
 
 
 async def power_report(session: AsyncSession, today: date) -> PowerReport:
-    month_start = today.replace(day=1)
-    month_end = date(today.year, today.month, monthrange(today.year, today.month)[1])
+    month_start, month_end = month_bounds(today)
     series = (
         (
             await session.execute(

@@ -1,5 +1,4 @@
 import json
-from calendar import monthrange
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -9,6 +8,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
+from moneta.cadence import month_bounds
 from moneta.cli.client import request
 
 if TYPE_CHECKING:
@@ -345,9 +345,9 @@ def txns(
         except ValueError:
             console.print(f"[red]Error:[/red] invalid month {month!r} (expected YYYY-MM)")
             raise typer.Exit(1) from None
-        last_day = monthrange(year, mon)[1]
-        params["start"] = date(year, mon, 1).isoformat()
-        params["end"] = date(year, mon, last_day).isoformat()
+        first, last = month_bounds(date(year, mon, 1))
+        params["start"] = first.isoformat()
+        params["end"] = last.isoformat()
     else:
         if start is not None:
             params["start"] = _parse_iso_date(start)
@@ -364,13 +364,9 @@ def txns(
         return
     table = Table("Date", "Account", "Merchant", "Amount", "Counted")
     today = date.today()
-    last_day = monthrange(today.year, today.month)[1]
-    range_start = date.fromisoformat(params["start"]) if "start" in params else today.replace(day=1)
-    range_end = (
-        date.fromisoformat(params["end"])
-        if "end" in params
-        else date(today.year, today.month, last_day)
-    )
+    default_start, default_end = month_bounds(today)
+    range_start = date.fromisoformat(params["start"]) if "start" in params else default_start
+    range_end = date.fromisoformat(params["end"]) if "end" in params else default_end
     covers_today = range_start <= today <= range_end
     counted_magnitude = 0
     through_today_magnitude = 0
