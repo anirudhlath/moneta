@@ -29,8 +29,14 @@ Existing apps (Origin, Copilot) fail in four specific ways that moneta is built 
 ## Features
 
 - **Spending power** (`moneta power`) — detected income minus detected fixed costs,
-  plus spent-so-far and remaining for the current month. Accrual vs. cash-out
-  accounting keeps "spent so far" honest when purchases go on credit.
+  plus spent-so-far, remaining, safe-to-spend per day, and upcoming charges due later
+  this month, for the current month. Accrual vs. cash-out accounting keeps "spent so
+  far" honest when purchases go on credit. `--history N` shows a month-over-month
+  income/spend/net table instead.
+- **Transaction drill-down** (`moneta txns`) — every transaction in a date range,
+  dimmed and labeled with the exact reason it isn't counted as spend (transfer, loan
+  payment, credit-card payment, fixed-cost series, ...) when it isn't. The trust
+  companion to spending power: "why is spent-so-far $X?" always has an answer.
 - **Recurring detection** — cadence (weekly/biweekly/monthly/annual) and
   amount-stability analysis over normalized merchants, for outflows (bills) *and*
   inflows (paychecks). Series events: missed payment, price increase, new series.
@@ -168,9 +174,10 @@ Unset = no LLM; ambiguous items go to `moneta review` instead.
 | Command | What it does |
 |---|---|
 | `moneta sync [--full]` | Pull latest data and run all pipelines |
-| `moneta power` | Income, fixed costs, spending power, spent so far, remaining |
+| `moneta power [--history N]` | Income, fixed costs, spending power, spent so far, remaining, per-day, upcoming charges; `--history N` shows a month-over-month income/spend/net table instead |
 | `moneta networth` | Net worth (vested only); unvested listed as potential |
 | `moneta cashflow [--start D --end D]` | Accrual spend vs cash out for a range (default: this month) |
+| `moneta txns [--month M \| --start D --end D] [--account ID] [--merchant NAME]` | Every transaction in range, with why it is or isn't counted as spend (the audit/trust view) |
 | `moneta recurring [--events] [--end\|--not-a-bill\|--habit\|--re-review ID]` | Series; missed payments/price increases; cancel, overrule, or reopen a series |
 | `moneta obligations` | Loans/financing: payment, months left, deferred-interest warnings |
 | `moneta review` | Resolve ambiguous classifications interactively |
@@ -180,6 +187,11 @@ Unset = no LLM; ambiguous items go to `moneta review` instead.
 | `moneta status` | Last sync run: when, success/failure, counts |
 | `moneta backup [dest]` | Online DB snapshot via SQLite `VACUUM INTO` |
 | `moneta serve` | Run the FastAPI server |
+
+Every read command above (`power`, `networth`, `cashflow`, `txns`, `recurring`,
+`obligations`, `accounts`, `status`) accepts `--json` for scripting: raw API
+response on stdout, no rich markup — see the user guide's
+[Reading the numbers](docs/user-guide.md#reading-the-numbers) section.
 
 ## Configuration
 

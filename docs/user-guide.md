@@ -127,9 +127,47 @@ The flagship view for the current month:
   is due before month-end.
 
 `moneta power --history N` (e.g. `--history 6`, 1-60 months) replaces the table above with a
-compact Month/Income/Spend/Net history instead. Past months report *actual observed* income
-and spend for that calendar month — not today's recurring-series state — so a since-cancelled
-bill or an old raise still shows correctly even though no series reflects it anymore.
+compact Month/Income/Spend/Net history instead. The newest row is the current, still-in-progress
+month; every row (including that one) reports *actual observed* income and spend for that
+calendar month — not today's recurring-series state — so a since-cancelled bill or an old raise
+still shows correctly even though no series reflects it anymore.
+
+### `moneta txns` — auditing the numbers
+
+`moneta power`'s "Spent so far" is a single number; `moneta txns` is how you check it —
+every transaction in a date range, with the exact reason it is or isn't counted as spend:
+
+```bash
+moneta txns                          # this month, every transaction
+moneta txns --month 2026-06          # a specific month
+moneta txns --start 2026-06-01 --end 2026-06-15 --account 3
+moneta txns --merchant netflix       # case-insensitive substring match
+```
+
+`--month` and `--start`/`--end` are mutually exclusive. Counted rows show a plain `✓`;
+excluded rows render dim with the reason in the same column — one of:
+
+| Reason | Meaning |
+|---|---|
+| `inflow` | Money coming in, not spend |
+| `transfer` | The inflow leg of an internal transfer (always excluded) |
+| `loan payment` | Outflow leg of a transfer into a loan/financing account (counted as a fixed cost instead, in `power`) |
+| `credit-card payment` | Outflow leg of a transfer paying a credit card (the underlying purchases are counted instead) |
+| `fixed cost (series X)` | Tagged to an active, non-discretionary recurring series (counted in `power`'s fixed costs instead) |
+| `non-spend account` | Posted to an account type that isn't spend-eligible (e.g. a loan or brokerage account) |
+| `foreign currency` | Posted to a non-primary-currency account (excluded from all aggregates) |
+
+`excluded_because` is the *first* matching reason in that order — a row only ever gets one.
+
+The footer has two lines:
+
+- `Counted as spend: -$X.YY` — always printed; the sum of every counted row in the
+  requested range, regardless of date.
+- `Through today (power's spent-so-far): -$X.YY` (dim) — printed only when the requested
+  range includes today; sums counted rows dated on or before today. This is the number
+  that matches `moneta power`'s "Spent so far" exactly (both clamp to today). The first
+  line does *not* claim that parity — a full-month view includes future-dated rows that
+  `power` hasn't counted yet, and a past month has no "through today" concept at all.
 
 ### `moneta networth`
 
@@ -298,17 +336,22 @@ moneta serve --host 0.0.0.0        # public bind — refused unless MONETA_API_T
 Every money field in an API response is an integer number of cents, named `*_cents`
 (e.g. `"remaining_cents": 355568` is $3,555.68) — clients do their own formatting.
 
-Fields split into two sign conventions, decided per field rather than globally:
+Fields split into three sign conventions, decided per field rather than globally:
 
 - **Signed** (storage convention — negative = outflow, positive = inflow): `balance_cents`
-  (accounts), `expected_cents` (recurring series), `net_worth_cents`, `spending_power_cents`,
-  `remaining_cents`, and review-context amounts (`amount_cents` on samples/candidates,
+  (accounts), `expected_cents` (recurring series), `TxnRow.amount_cents`, `net_worth_cents`,
+  `spending_power_cents`, `remaining_cents`, `per_day_remaining_cents`, `PowerMonth.net_cents`,
+  and review-context amounts (`amount_cents` on samples/candidates,
   `old_amount_cents`/`new_amount_cents`).
+- **Signed sums** (a plain sum of underlying signed values, not forced positive — can go
+  negative, e.g. an overdrawn account makes `liquid_cents` negative): `liquid_cents`,
+  `vested_holdings_cents`.
 - **Unsigned magnitudes** (a labeled quantity, e.g. "Fixed costs" or "Liabilities" — the label
   carries the direction, not the sign): `monthly_income_cents`, `total_fixed_cents`,
-  `spent_so_far_cents`, `SeriesLine.monthly_cents`, `liquid_cents`, `vested_holdings_cents`,
-  `liabilities_cents`, `unvested_potential_cents`, `accrual_cents`, `cash_out_cents`,
-  `balance_owed_cents`, `monthly_payment_cents`.
+  `spent_so_far_cents`, `SeriesLine.monthly_cents`, `SeriesLine.expected_cents`,
+  `UpcomingCharge.expected_cents`, `liabilities_cents`, `unvested_potential_cents`,
+  `accrual_cents`, `cash_out_cents`, `balance_owed_cents`, `monthly_payment_cents`,
+  `PowerMonth.income_cents`, `PowerMonth.spend_cents`.
 
 New money fields document their sign here as they ship. The CLI never hand-negates a
 magnitude field — it calls `fmt_outflow(magnitude_cents)` (renders with the display minus)
