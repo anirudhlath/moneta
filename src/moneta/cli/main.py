@@ -119,8 +119,31 @@ def status(json_output: Annotated[bool, typer.Option("--json")] = False) -> None
 
 
 @app.command()
-def power(json_output: Annotated[bool, typer.Option("--json")] = False) -> None:
+def power(
+    history: Annotated[
+        int | None,
+        typer.Option(
+            "--history", help="Show the last N months' income/spend/net instead of this month."
+        ),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
     """Monthly spending power: income - fixed costs."""
+    if history is not None:
+        rows = request("GET", "/power/history", params={"months": history})
+        if json_output:
+            print(json.dumps(rows))
+            return
+        table = Table("Month", "Income", "Spend", "Net")
+        for m in rows:
+            table.add_row(
+                m["month"],
+                fmt_money(m["income_cents"]),
+                fmt_outflow(m["spend_cents"]),
+                fmt_money(m["net_cents"]),
+            )
+        console.print(table)
+        return
     r = request("GET", "/power")
     if json_output:
         print(json.dumps(r))

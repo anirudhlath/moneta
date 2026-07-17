@@ -126,6 +126,11 @@ The flagship view for the current month:
   `Upcoming this month: Rent $1400.00 (Jul 15) · Netflix $15.99 (Jul 28)`. Omitted when nothing
   is due before month-end.
 
+`moneta power --history N` (e.g. `--history 6`, 1-60 months) replaces the table above with a
+compact Month/Income/Spend/Net history instead. Past months report *actual observed* income
+and spend for that calendar month — not today's recurring-series state — so a since-cancelled
+bill or an old raise still shows correctly even though no series reflects it anymore.
+
 ### `moneta networth`
 
 Liquid balances + **vested** holdings − liabilities. Unvested shares are listed separately as

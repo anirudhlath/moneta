@@ -132,6 +132,7 @@ Rich tables with stable IDs everywhere a follow-up action exists (`recurring --e
 | 2026-07-16 | **Safe-to-spend per day** | `PowerReport` gains `days_left` and signed `per_day_remaining_cents` (`round(remaining / days_left)`, month-end floors `days_left` to 1, no division by zero, negative remaining stays negative — no clamp). `moneta power` renders `Per day (N days left)  $X.YY` right after Remaining. |
 | 2026-07-16 | **Upcoming charges** | `PowerReport.upcoming` lists active, non-discretionary, non-cc-payment outflow series with `next_expected_on` in `(today, month_end]`, plus derived loan payments whose projected next date falls in the window — sorted by date. `moneta power` renders a dim `Upcoming this month: X $A.BB (Jul 18) · Y $C.DD (Jul 28)` line under the table; nothing when empty. |
 | 2026-07-16 | **`--json` on every read command** | `power`, `networth`, `cashflow`, `recurring`, `obligations`, `accounts`, `txns`, and `status` accept `--json`, printing the raw API response to stdout with no rich markup — scriptable, pipeable to `jq`. Combining `--json` with a write flag (`recurring --end/--not-a-bill/--habit/--re-review`, `accounts --set-type/--set-promo/--set-financing`) is a clean, request-free error. |
+| 2026-07-16 | **Power history** | `GET /power/history?months=N` (1-60, default 6) returns newest-first per-month rows (`income_cents`/`spend_cents` magnitudes, signed `net_cents`); past months report *actual observed* accrual income/spend for that calendar month, not today's recurring-series state, via a new `accrual_income` beside `accrual_spend`. `moneta power --history N` renders a Month/Income/Spend/Net table instead of the current-month view. |
 
 ## 8. Roadmap
 
@@ -147,7 +148,7 @@ Sourced from `docs/backlog/` (one file per ticket — see each for context and a
 - Recurring reactivate via CLI; friendlier remote-CLI connection errors.
 
 **Low**
-- Notifications digest; power history over time; transaction categorization; transfer-dedup edge cases; Plaid cursor-based incremental sync; Plaid Link update mode; vesting source adapter seam; SimpleFIN adapter injectable clock; test-coverage gaps.
+- Notifications digest; transaction categorization; transfer-dedup edge cases; Plaid cursor-based incremental sync; Plaid Link update mode; vesting source adapter seam; SimpleFIN adapter injectable clock; test-coverage gaps.
 
 ## 9. Risks & open questions
 

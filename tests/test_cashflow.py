@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from moneta.api import create_app
 from moneta.models import Account, AccountType, TransferLink
-from moneta.views.cashflow import accrual_spend, cash_out
+from moneta.views.cashflow import accrual_income, accrual_spend, cash_out
 from tests.factories import make_account, make_txn
 
 
@@ -89,3 +89,22 @@ async def test_loan_account_purchase_not_accrual(session: AsyncSession) -> None:
         description="FURNITURE STORE FINANCED PURCHASE",
     )
     assert await accrual_spend(session, date(2026, 7, 1), date(2026, 7, 31)) == 0
+
+
+async def test_accrual_income_counts_paycheck_inflow(session: AsyncSession) -> None:
+    checking = await make_account(session, type=AccountType.checking)
+    await make_txn(
+        session,
+        checking,
+        amount_cents=250000,
+        posted_on=date(2026, 7, 2),
+        description="ACME CORP PAYROLL",
+    )
+    assert await accrual_income(session, date(2026, 7, 1), date(2026, 7, 31)) == 250000
+
+
+async def test_accrual_income_excludes_linked_inflow(session: AsyncSession) -> None:
+    await _cc_purchase_and_payment(session)
+    # the only positive-amount txn in this fixture is the CC payment's inflow leg
+    # (credit account, +8000, transfer-linked) — it must not count as income.
+    assert await accrual_income(session, date(2026, 7, 1), date(2026, 7, 31)) == 0

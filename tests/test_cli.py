@@ -670,6 +670,73 @@ def test_power_upcoming_charges_render_dim_line(tmp_path: Path, monkeypatch) -> 
     assert f"Upcoming this month: Rent $1400.00 ({label})" in result.output
 
 
+def test_power_history_runs_in_process(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["power", "--history", "3"])
+    assert result.exit_code == 0
+    assert "Month" in result.output
+    assert "Spending power" not in result.output  # --history replaces the normal view
+
+
+def test_power_history_table_renders_month_income_spend_net(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        assert (method, path, params) == ("GET", "/power/history", {"months": 3})
+        return [
+            {
+                "month": "2026-07",
+                "income_cents": 300000,
+                "spend_cents": 5000,
+                "net_cents": 295000,
+            },
+            {
+                "month": "2026-06",
+                "income_cents": 250000,
+                "spend_cents": 260000,
+                "net_cents": -10000,
+            },
+            {"month": "2026-05", "income_cents": 250000, "spend_cents": 4000, "net_cents": 246000},
+        ]
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["power", "--history", "3"])
+    assert result.exit_code == 0
+    for header in ("Month", "Income", "Spend", "Net"):
+        assert header in result.output
+    assert "2026-07" in result.output
+    assert "$3000.00" in result.output  # income: fmt_money
+    assert "-$50.00" in result.output  # spend: fmt_outflow(5000)
+    assert "$2950.00" in result.output  # net: fmt_money, positive
+    assert "-$100.00" in result.output  # net: fmt_money, negative month
+    assert "Spending power" not in result.output
+
+
+def test_power_history_and_json_prints_history(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        assert (method, path, params) == ("GET", "/power/history", {"months": 1})
+        return [
+            {"month": "2026-07", "income_cents": 300000, "spend_cents": 5000, "net_cents": 295000}
+        ]
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["power", "--history", "1", "--json"])
+    assert result.exit_code == 0
+    body = json.loads(result.stdout)
+    assert body == [
+        {"month": "2026-07", "income_cents": 300000, "spend_cents": 5000, "net_cents": 295000}
+    ]
+    assert "│" not in result.stdout
+
+
 def test_review_non_integer_answer_skips_cleanly(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     _isolate(monkeypatch, tmp_path)
 

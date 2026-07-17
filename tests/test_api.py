@@ -739,3 +739,85 @@ async def test_money_field_signs(
     recurring = (await client.get("/recurring")).json()
     outflow_series = next(s for s in recurring if s["direction"] == "outflow")
     assert outflow_series["expected_cents"] < 0
+
+    cashflow = (await client.get("/cashflow")).json()
+    assert cashflow["accrual_cents"] >= 0
+    assert cashflow["cash_out_cents"] >= 0
+
+
+def _months_back(today: date, n: int) -> date:
+    """First day of the calendar month `n` months before `today`'s month."""
+    year, month = today.year, today.month - n
+    while month <= 0:
+        year, month = year - 1, month + 12
+    return date(year, month, 1)
+
+
+async def test_power_history_months_out_of_range_is_422(client: httpx.AsyncClient) -> None:
+    assert (await client.get("/power/history", params={"months": 0})).status_code == 422
+    assert (await client.get("/power/history", params={"months": 61})).status_code == 422
+
+
+async def test_power_history_multi_month_rows_newest_first(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from calendar import monthrange
+
+    from moneta.models import AccountType
+
+    today = date.today()
+    this_month_start = _months_back(today, 0)
+    last_month_start = _months_back(today, 1)
+    last_month_end = date(
+        last_month_start.year,
+        last_month_start.month,
+        monthrange(last_month_start.year, last_month_start.month)[1],
+    )
+
+    async with sessionmaker() as session:
+        checking = await make_account(session, type=AccountType.checking)
+        # this (current, partial) month: one paycheck, one purchase
+        await make_txn(
+            session, checking, amount_cents=300000, posted_on=today, description="PAYROLL"
+        )
+        await make_txn(
+            session, checking, amount_cents=-5000, posted_on=today, description="GROCERY"
+        )
+        # last month: different amounts, entirely inside the prior calendar month
+        await make_txn(
+            session,
+            checking,
+            amount_cents=250000,
+            posted_on=last_month_start,
+            description="PAYROLL",
+        )
+        await make_txn(
+            session,
+            checking,
+            amount_cents=-4000,
+            posted_on=last_month_end,
+            description="GROCERY",
+        )
+        await session.commit()
+
+    async with _client(create_app(sessionmaker, adapter=None, llm=None)) as c:
+        r = await c.get("/power/history", params={"months": 2})
+    assert r.status_code == 200
+    rows = r.json()
+    assert len(rows) == 2
+
+    assert rows[0]["month"] == f"{this_month_start.year:04d}-{this_month_start.month:02d}"
+    assert rows[0]["income_cents"] == 300000
+    assert rows[0]["spend_cents"] == 5000
+    assert rows[0]["net_cents"] == 295000
+
+    assert rows[1]["month"] == f"{last_month_start.year:04d}-{last_month_start.month:02d}"
+    assert rows[1]["income_cents"] == 250000
+    assert rows[1]["spend_cents"] == 4000
+    assert rows[1]["net_cents"] == 246000
+
+
+async def test_power_history_default_is_six_months(client: httpx.AsyncClient) -> None:
+    r = await client.get("/power/history")
+    assert r.status_code == 200
+    assert len(r.json()) == 6
