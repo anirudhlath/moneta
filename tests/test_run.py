@@ -114,6 +114,8 @@ async def test_run_sync_records_success_audit_row(session: AsyncSession) -> None
 
 async def test_run_sync_records_failure_and_reraises(session: AsyncSession) -> None:
     class FailingAdapter:
+        source = "fake"
+
         async def fetch(self, since: date | None = None) -> Snapshot:
             raise RuntimeError("bridge down")
 

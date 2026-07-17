@@ -69,11 +69,13 @@ async def test_fetch_parses_snapshot() -> None:
         "https://user:pass@bridge.example/simplefin",
         client=_mock_client(httpx.MockTransport(handle)),
     )
+    assert adapter.source == "simplefin"
     snap = await adapter.fetch()
     assert snap.accounts[0].id == "ACT-1"
     assert snap.accounts[0].org_name == "Chase"
     assert snap.accounts[0].balance == Decimal("1234.56")
     assert snap.accounts[0].balance_date == date(2025, 7, 1)
+    assert snap.accounts[0].source == "simplefin"
     # pending transaction skipped
     assert [t.id for t in snap.transactions] == ["TRN-1"]
     assert snap.transactions[0].amount == Decimal("-42.50")

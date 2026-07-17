@@ -48,9 +48,10 @@ async def session(
 
 
 class FakeAdapter:
-    def __init__(self, snapshot: Snapshot) -> None:
+    def __init__(self, snapshot: Snapshot, source: str = "fake") -> None:
         self.snapshot = snapshot
         self.since: date | None = None
+        self.source = source
 
     async def fetch(self, since: date | None = None) -> Snapshot:
         self.since = since
@@ -60,8 +61,9 @@ class FakeAdapter:
 class RecordingAdapter:
     """Records the `since` value run_sync passes to fetch."""
 
-    def __init__(self) -> None:
+    def __init__(self, source: str = "fake") -> None:
         self.since: date | None | str = "never-called"
+        self.source = source
 
     async def fetch(self, since: date | None = None) -> Snapshot:
         self.since = since

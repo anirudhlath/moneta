@@ -17,6 +17,7 @@ class AccountDTO(BaseModel):
     balance: Decimal
     balance_date: date
     type_hint: AccountType | None = None
+    source: str = ""
 
 
 class TransactionDTO(BaseModel):
@@ -42,6 +43,9 @@ class Snapshot(BaseModel):
 
 
 class AggregatorAdapter(Protocol):
+    @property
+    def source(self) -> str: ...  # "simplefin" / "plaid" / a test fake's own name
+
     async def fetch(self, since: date | None = None) -> Snapshot: ...
 
 
@@ -68,6 +72,12 @@ class MergedAdapter:
 
     def __init__(self, adapters: Sequence[AggregatorAdapter]) -> None:
         self._adapters = list(adapters)
+
+    @property
+    def source(self) -> str:
+        # transitional shim: MergedAdapter dies in the next task once run_sync
+        # iterates adapters itself and computes a real per-source `since`.
+        return "merged"
 
     async def fetch(self, since: date | None = None) -> Snapshot:
         return await gather_snapshots(a.fetch(since) for a in self._adapters)

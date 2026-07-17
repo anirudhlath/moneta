@@ -58,6 +58,23 @@ async def test_ingest_is_idempotent(session: AsyncSession) -> None:
         assert n == 1
 
 
+async def test_ingest_stamps_source_on_create_and_backfills_on_update(
+    session: AsyncSession,
+) -> None:
+    snap = _snap()
+    snap.accounts[0].source = "simplefin"
+    await ingest_snapshot(session, snap)
+    acct = (await session.execute(select(Account))).scalar_one()
+    assert acct.source == "simplefin"
+
+    # simulate a pre-existing account synced before source tracking existed
+    acct.source = ""
+    await session.commit()
+    await ingest_snapshot(session, snap)  # re-sync naturally backfills it
+    acct = (await session.execute(select(Account))).scalar_one()
+    assert acct.source == "simplefin"
+
+
 async def test_ingest_updates_balance_not_type(session: AsyncSession) -> None:
     await ingest_snapshot(session, _snap())
     acct = (await session.execute(select(Account))).scalar_one()

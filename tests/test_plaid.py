@@ -246,6 +246,7 @@ async def test_fetch_parses_accounts() -> None:
         return httpx.Response(200, json=_ACCOUNTS_PAYLOAD)
 
     adapter = PlaidAdapter(_plaid_client(handle), [_item()])
+    assert adapter.source == "plaid"
     snap = await adapter.fetch()
     chk, card, brok = snap.accounts
     assert chk.id == "acc-chk"
@@ -254,6 +255,7 @@ async def test_fetch_parses_accounts() -> None:
     assert chk.balance == Decimal("110.94")
     assert chk.balance_date == date(2026, 7, 8)
     assert chk.type_hint == AccountType.checking
+    assert chk.source == "plaid" and card.source == "plaid" and brok.source == "plaid"
     # liability balances negated: Plaid positive-owed -> moneta negative
     assert card.balance == Decimal("-410.00")
     assert card.type_hint == AccountType.credit
@@ -528,6 +530,8 @@ def test_save_items_leaves_no_tmp_file(tmp_path: Path) -> None:
 
 
 class _BoomAdapter:
+    source = "boom"
+
     async def fetch(self, since: date | None = None) -> Snapshot:
         raise RuntimeError("boom")
 

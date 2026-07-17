@@ -192,6 +192,7 @@ def _parse_account(acct: dict[str, Any], org_name: str) -> AccountDTO:
         balance=balance,
         balance_date=balance_date,
         type_hint=_map_type(acct.get("type", ""), acct.get("subtype")),
+        source="plaid",
     )
 
 
@@ -199,6 +200,10 @@ class PlaidAdapter:
     def __init__(self, client: PlaidClient, items: list[PlaidItem]) -> None:
         self._client = client
         self._items = items
+
+    @property
+    def source(self) -> str:
+        return "plaid"
 
     async def fetch(self, since: date | None = None) -> Snapshot:
         # `since` is deliberately ignored: /transactions/sync replays from an empty

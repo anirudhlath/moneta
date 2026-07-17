@@ -56,6 +56,10 @@ class SimpleFINAdapter:
         self._url, self._auth = _split_auth(access_url)
         self._client = client
 
+    @property
+    def source(self) -> str:
+        return "simplefin"
+
     async def fetch(self, since: date | None = None) -> Snapshot:
         own = self._client or httpx.AsyncClient()
         try:
@@ -117,6 +121,7 @@ def _parse_snapshot(data: dict[str, Any]) -> Snapshot:
                 currency=acct.get("currency", "USD"),
                 balance=Decimal(acct["balance"]),
                 balance_date=_ts_to_date(acct["balance-date"]),
+                source="simplefin",
             )
         )
         for txn in acct.get("transactions", []):
