@@ -2,12 +2,11 @@ from collections.abc import Iterable
 from datetime import date
 
 from pydantic import BaseModel
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.cadence import advance_expected_on, month_bounds, monthly_cents, monthlyize
 from moneta.models import (
-    SPEND_ACCOUNT_TYPES,
     Account,
     AccountType,
     Cadence,
@@ -16,7 +15,8 @@ from moneta.models import (
     SeriesStatus,
     Transaction,
 )
-from moneta.queries import classified_links, linked_txn_ids, loan_payment_stats, primary_currency
+from moneta.queries import classified_links, loan_payment_stats, primary_currency
+from moneta.views.transactions import link_field, spend_reason
 
 
 class SeriesLine(BaseModel):
@@ -144,32 +144,37 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
         fixed.sort(key=lambda line: line.monthly_cents, reverse=True)
     upcoming.sort(key=lambda u: u.expected_on)
 
-    linked_ids = linked_txn_ids(links)
     primary = await primary_currency(session)
+    by_outflow = {link.outflow_id: link for link in links}
+    inflow_ids = {link.inflow_id for link in links}
+    # date-range-only fetch: spend_reason (same predicate transactions.py's trust view
+    # uses) decides inclusion — including the inflow/link exclusions — so this can
+    # never quietly diverge from what `moneta txns` counts (design 2026-07-16 §2/§3).
     month_txns = (
-        (
-            await session.execute(
-                select(Transaction)
-                .join(Account, Transaction.account_id == Account.id)
-                .outerjoin(RecurringSeries, Transaction.series_id == RecurringSeries.id)
-                .where(
-                    Transaction.amount_cents < 0,
-                    Transaction.posted_on >= month_start,
-                    Transaction.posted_on <= today,
-                    or_(
-                        Transaction.series_id.is_(None),
-                        RecurringSeries.status != SeriesStatus.active,
-                        RecurringSeries.discretionary.is_(True),
-                    ),
-                    Account.type.in_(SPEND_ACCOUNT_TYPES),
-                    Account.currency == primary,
-                )
+        await session.execute(
+            select(Transaction, Account, RecurringSeries)
+            .join(Account, Transaction.account_id == Account.id)
+            .outerjoin(RecurringSeries, Transaction.series_id == RecurringSeries.id)
+            .where(
+                Transaction.posted_on >= month_start,
+                Transaction.posted_on <= today,
             )
         )
-        .scalars()
-        .all()
+    ).all()
+    spent_cents = sum(
+        -txn.amount_cents
+        for txn, account, series in month_txns
+        if spend_reason(
+            txn.amount_cents,
+            account.type,
+            account.currency,
+            primary,
+            link_field(txn.id, by_outflow, inflow_ids),
+            series.status if series is not None else None,
+            series.discretionary if series is not None else None,
+        )
+        is None
     )
-    spent_cents = sum(-t.amount_cents for t in month_txns if t.id not in linked_ids)
 
     power = monthly_income - total_fixed
     remaining = power - spent_cents

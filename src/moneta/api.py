@@ -42,7 +42,7 @@ from moneta.views.cashflow import accrual_income, accrual_spend, cash_out
 from moneta.views.financing import Obligation, compute_obligations
 from moneta.views.networth import NetWorthReport, net_worth_report
 from moneta.views.power import PowerReport, power_report
-from moneta.views.transactions import TxnRow, transactions_report
+from moneta.views.transactions import TxnRow, spend_totals, transactions_report
 
 
 class AccountOut(BaseModel):
@@ -129,6 +129,14 @@ def _month_bounds(today: date, months_back: int) -> tuple[date, date]:
     while month <= 0:
         year, month = year - 1, month + 12
     return month_bounds(date(year, month, 1))
+
+
+class TransactionsReport(BaseModel):
+    start: date
+    end: date
+    counted_total_cents: int  # magnitude, sum of every counted row regardless of date
+    through_today_cents: int | None  # magnitude through today; None if range excludes today
+    transactions: list[TxnRow]
 
 
 class SyncRunOut(BaseModel):
@@ -288,15 +296,24 @@ def create_app(
         end: date | None = None,
         account_id: int | None = None,
         merchant: str | None = None,
-    ) -> list[TxnRow]:
+    ) -> TransactionsReport:
         """Trust/audit view: every transaction in range, with why it is or isn't
-        counted as spend. Defaults to the current calendar month."""
+        counted as spend, plus server-computed totals. Defaults to the current
+        calendar month."""
         today = date.today()
         default_start, default_end = month_bounds(today)
         range_start = start or default_start
         range_end = end or default_end
-        return await transactions_report(
+        rows = await transactions_report(
             session, range_start, range_end, account_id=account_id, merchant=merchant
+        )
+        counted_total, through_today = spend_totals(rows, range_start, range_end, today)
+        return TransactionsReport(
+            start=range_start,
+            end=range_end,
+            counted_total_cents=counted_total,
+            through_today_cents=through_today,
+            transactions=rows,
         )
 
     @app.get("/recurring")

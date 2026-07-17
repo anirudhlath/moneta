@@ -426,7 +426,13 @@ def test_txns_filters_pass_through_as_query_params(monkeypatch) -> None:  # type
         params: dict[str, Any] | None = None,
     ) -> Any:
         calls.append((method, path, params))
-        return []
+        return {
+            "start": "2026-01-01",
+            "end": "2026-01-31",
+            "counted_total_cents": 0,
+            "through_today_cents": None,
+            "transactions": [],
+        }
 
     monkeypatch.setattr("moneta.cli.main.request", fake_request)
     result = runner.invoke(
@@ -468,7 +474,13 @@ def test_txns_month_flag_expands_to_full_month(monkeypatch) -> None:  # type: ig
         params: dict[str, Any] | None = None,
     ) -> Any:
         calls.append((method, path, params))
-        return []
+        return {
+            "start": "2026-02-01",
+            "end": "2026-02-28",
+            "counted_total_cents": 0,
+            "through_today_cents": None,
+            "transactions": [],
+        }
 
     monkeypatch.setattr("moneta.cli.main.request", fake_request)
     result = runner.invoke(app, ["txns", "--month", "2026-02"])
@@ -491,38 +503,44 @@ def test_txns_footer_sums_only_counted_rows(monkeypatch) -> None:  # type: ignor
         json_body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
     ) -> Any:
-        return [
-            {
-                "id": 1,
-                "posted_on": "2026-07-05",
-                "account": "Checking",
-                "account_type": "checking",
-                "merchant": "Coffee Shop",
-                "description": "COFFEE SHOP",
-                "amount_cents": -2500,
-                "series": None,
-                "series_status": None,
-                "series_discretionary": None,
-                "link": None,
-                "counted_in_spend": True,
-                "excluded_because": None,
-            },
-            {
-                "id": 2,
-                "posted_on": "2026-07-05",
-                "account": "Checking",
-                "account_type": "checking",
-                "merchant": "Netflix",
-                "description": "NETFLIX",
-                "amount_cents": -1599,
-                "series": "Netflix",
-                "series_status": "active",
-                "series_discretionary": False,
-                "link": None,
-                "counted_in_spend": False,
-                "excluded_because": "fixed cost (series Netflix)",
-            },
-        ]
+        return {
+            "start": "2026-07-01",
+            "end": "2026-07-31",
+            "counted_total_cents": 2500,
+            "through_today_cents": 2500,
+            "transactions": [
+                {
+                    "id": 1,
+                    "posted_on": "2026-07-05",
+                    "account": "Checking",
+                    "account_type": "checking",
+                    "merchant": "Coffee Shop",
+                    "description": "COFFEE SHOP",
+                    "amount_cents": -2500,
+                    "series": None,
+                    "series_status": None,
+                    "series_discretionary": None,
+                    "link": None,
+                    "counted_in_spend": True,
+                    "excluded_because": None,
+                },
+                {
+                    "id": 2,
+                    "posted_on": "2026-07-05",
+                    "account": "Checking",
+                    "account_type": "checking",
+                    "merchant": "Netflix",
+                    "description": "NETFLIX",
+                    "amount_cents": -1599,
+                    "series": "Netflix",
+                    "series_status": "active",
+                    "series_discretionary": False,
+                    "link": None,
+                    "counted_in_spend": False,
+                    "excluded_because": "fixed cost (series Netflix)",
+                },
+            ],
+        }
 
     monkeypatch.setattr("moneta.cli.main.request", fake_request)
     result = runner.invoke(app, ["txns"])
@@ -1336,8 +1354,10 @@ def test_txns_json_output(tmp_path: Path, monkeypatch) -> None:  # type: ignore[
     result = runner.invoke(app, ["txns", "--json"])
     assert result.exit_code == 0
     body = json.loads(result.stdout)
-    assert isinstance(body, list)
-    assert "counted_in_spend" in body[0]
+    assert isinstance(body["transactions"], list)
+    assert "counted_in_spend" in body["transactions"][0]
+    assert body["counted_total_cents"] == 2500
+    assert body["through_today_cents"] == 2500
 
 
 def test_status_json_output_null_before_any_sync(  # type: ignore[no-untyped-def]

@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from moneta.api import create_app
 from moneta.models import AccountType, SeriesStatus, TransferLink
+from moneta.views.power import power_report
 from moneta.views.transactions import transactions_report
 from tests.factories import make_account, make_series, make_txn
 
@@ -298,9 +299,11 @@ async def test_endpoint_defaults_to_current_month_and_pins_signed_int(
 
     assert r.status_code == 200
     body = r.json()
-    assert len(body) == 1
-    assert isinstance(body[0]["amount_cents"], int)
-    assert body[0]["amount_cents"] == -1234  # signed, per design §1
+    assert len(body["transactions"]) == 1
+    assert isinstance(body["transactions"][0]["amount_cents"], int)
+    assert body["transactions"][0]["amount_cents"] == -1234  # signed, per design §1
+    assert body["counted_total_cents"] == 1234
+    assert body["through_today_cents"] == 1234
 
 
 async def test_endpoint_filters_pass_through(
@@ -331,5 +334,60 @@ async def test_endpoint_filters_pass_through(
 
     assert r.status_code == 200
     body = r.json()
-    assert len(body) == 1
-    assert body[0]["merchant"] == "Netflix"
+    assert len(body["transactions"]) == 1
+    assert body["transactions"][0]["merchant"] == "Netflix"
+
+
+async def test_power_and_transactions_agree_on_spent_so_far(
+    session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """Parity: power.spent_so_far_cents and /transactions' through_today_cents are
+    built from the same spend_reason predicate (design 2026-07-16 §2/§3) and must
+    always agree for a range that covers today."""
+    checking = await make_account(session, type=AccountType.checking)
+    credit = await make_account(session, type=AccountType.credit)
+    loan = await make_account(session, type=AccountType.loan)
+    brokerage = await make_account(session, type=AccountType.brokerage)
+    netflix = await make_series(session, merchant="Netflix", expected_cents=-1599)
+
+    today = date.today()
+    month_start = today.replace(day=1)
+    # plain spend — counted
+    await make_txn(session, checking, amount_cents=-2500, posted_on=month_start)
+    # inflow — excluded
+    await make_txn(session, checking, amount_cents=300000, posted_on=month_start)
+    # active non-discretionary series — excluded (fixed cost)
+    await make_txn(
+        session,
+        checking,
+        amount_cents=-1599,
+        merchant="Netflix",
+        posted_on=month_start,
+        series_id=netflix.id,
+    )
+    # non-spend account — excluded
+    await make_txn(session, brokerage, amount_cents=-5000, posted_on=month_start)
+    # cc payment link — outflow excluded (purchase counted instead), inflow excluded (inflow)
+    cc_out = await make_txn(session, checking, amount_cents=-8000, posted_on=month_start)
+    cc_in = await make_txn(session, credit, amount_cents=8000, posted_on=month_start)
+    session.add(
+        TransferLink(outflow_id=cc_out.id, inflow_id=cc_in.id, confidence=1.0, method="rule")
+    )
+    # loan payment link — outflow excluded (counted as a fixed cost line instead)
+    loan_out = await make_txn(session, checking, amount_cents=-13500, posted_on=month_start)
+    loan_in = await make_txn(session, loan, amount_cents=13500, posted_on=month_start)
+    session.add(
+        TransferLink(outflow_id=loan_out.id, inflow_id=loan_in.id, confidence=1.0, method="rule")
+    )
+    await session.commit()
+
+    power = await power_report(session, today=today)
+
+    app = create_app(sessionmaker, adapter=None, llm=None)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get("/transactions")
+    body = r.json()
+
+    assert power.spent_so_far_cents == 2500  # only the plain checking spend
+    assert body["through_today_cents"] == power.spent_so_far_cents

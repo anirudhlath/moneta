@@ -1,6 +1,7 @@
 """Transaction drill-down: the trust view. Every row shown, never silently hidden;
-`counted_in_spend` replicates `views/power.py`'s spent-so-far rule exactly, and
-`excluded_because` explains why a row isn't counted when it isn't (design 2026-07-16 §2).
+`counted_in_spend`/`excluded_because` are built from `spend_reason`, the same pure
+predicate `views/power.py`'s spent-so-far consumes (design 2026-07-16 §2) — one spend
+rule, not two hand-mirrored copies.
 """
 
 from datetime import date
@@ -36,7 +37,7 @@ class TxnRow(BaseModel):
     excluded_because: str | None  # human-readable single reason when not counted
 
 
-def _link_field(
+def link_field(
     txn_id: int, by_outflow: dict[int, ClassifiedLink], inflow_ids: set[int]
 ) -> str | None:
     outflow_link = by_outflow.get(txn_id)
@@ -51,16 +52,22 @@ def _link_field(
     return None
 
 
-def _excluded_because(
-    txn: Transaction,
-    account: Account,
-    series: RecurringSeries | None,
-    link: str | None,
+def spend_reason(
+    txn_amount_cents: int,
+    account_type: str,
+    currency: str,
     primary: str,
+    link: str | None,
+    series_status: str | None,
+    series_discretionary: bool | None,
 ) -> str | None:
-    """First matching reason, in spec §2's precedence order. `counted_in_spend` is
-    `excluded_because is None` by construction — never a separately maintained bool."""
-    if txn.amount_cents >= 0:
+    """The counted-in-spend predicate, in spec §2's precedence order — pure, no
+    session. `None` means counted; any other value is the (generic) reason it isn't.
+    `series_status`/`series_discretionary` describe the txn's owning series, or None
+    when it isn't tagged to one. Shared by transactions._excluded_because (which adds
+    the series' merchant name to the "fixed cost" reason) and power.spent_so_far, so
+    the two views can never quietly diverge on what counts as spend."""
+    if txn_amount_cents >= 0:
         return "inflow"
     if link == "loan_payment":
         return "loan payment"
@@ -68,13 +75,36 @@ def _excluded_because(
         return "credit-card payment"
     if link == "internal":
         return "transfer"
-    if series is not None and series.status == SeriesStatus.active and not series.discretionary:
-        return f"fixed cost (series {series.merchant})"
-    if account.type not in SPEND_ACCOUNT_TYPES:
+    if series_status == SeriesStatus.active and not series_discretionary:
+        return "fixed cost"
+    if account_type not in SPEND_ACCOUNT_TYPES:
         return "non-spend account"
-    if account.currency != primary:
+    if currency != primary:
         return "foreign currency"
     return None
+
+
+def _excluded_because(
+    txn: Transaction,
+    account: Account,
+    series: RecurringSeries | None,
+    link: str | None,
+    primary: str,
+) -> str | None:
+    """`_excluded_because` string for a TxnRow. `counted_in_spend` is
+    `excluded_because is None` by construction — never a separately maintained bool."""
+    reason = spend_reason(
+        txn.amount_cents,
+        account.type,
+        account.currency,
+        primary,
+        link,
+        series.status if series is not None else None,
+        series.discretionary if series is not None else None,
+    )
+    if reason == "fixed cost" and series is not None:
+        return f"fixed cost (series {series.merchant})"
+    return reason
 
 
 async def transactions_report(
@@ -107,7 +137,7 @@ async def transactions_report(
 
     result: list[TxnRow] = []
     for txn, account, series in rows:
-        link = _link_field(txn.id, by_outflow, inflow_ids)
+        link = link_field(txn.id, by_outflow, inflow_ids)
         reason = _excluded_because(txn, account, series, link, primary)
         result.append(
             TxnRow(
@@ -127,3 +157,18 @@ async def transactions_report(
             )
         )
     return result
+
+
+def spend_totals(rows: list[TxnRow], start: date, end: date, today: date) -> tuple[int, int | None]:
+    """Envelope totals for a transactions_report result: (counted_total_cents,
+    through_today_cents). counted_total sums every counted row's magnitude,
+    regardless of date. through_today sums only counted rows dated on or before
+    `today`, and is None when [start, end] doesn't cover `today` at all — there's no
+    "through today" concept for a range that doesn't include it."""
+    counted_total = sum(-r.amount_cents for r in rows if r.counted_in_spend)
+    if not (start <= today <= end):
+        return counted_total, None
+    through_today = sum(
+        -r.amount_cents for r in rows if r.counted_in_spend and r.posted_on <= today
+    )
+    return counted_total, through_today

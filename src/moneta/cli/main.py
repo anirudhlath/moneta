@@ -358,39 +358,28 @@ def txns(
     if merchant is not None:
         params["merchant"] = merchant
 
-    rows = request("GET", "/transactions", params=params or None)
+    r = request("GET", "/transactions", params=params or None)
     if json_output:
-        print(json.dumps(rows))
+        print(json.dumps(r))
         return
     table = Table("Date", "Account", "Merchant", "Amount", "Counted")
-    today = date.today()
-    default_start, default_end = month_bounds(today)
-    range_start = date.fromisoformat(params["start"]) if "start" in params else default_start
-    range_end = date.fromisoformat(params["end"]) if "end" in params else default_end
-    covers_today = range_start <= today <= range_end
-    counted_magnitude = 0
-    through_today_magnitude = 0
-    for r in rows:
-        counted = r["counted_in_spend"]
-        cell = "✓" if counted else (r["excluded_because"] or "")
+    for row in r["transactions"]:
+        counted = row["counted_in_spend"]
+        cell = "✓" if counted else (row["excluded_because"] or "")
         table.add_row(
-            r["posted_on"],
-            escape(r["account"]),
-            escape(r["merchant"] or r["description"]),
-            fmt_money(r["amount_cents"]),
+            row["posted_on"],
+            escape(row["account"]),
+            escape(row["merchant"] or row["description"]),
+            fmt_money(row["amount_cents"]),
             cell,
             style=None if counted else "dim",
         )
-        if counted:
-            counted_magnitude += -r["amount_cents"]
-            if covers_today and date.fromisoformat(r["posted_on"]) <= today:
-                through_today_magnitude += -r["amount_cents"]
     console.print(table)
-    console.print(f"Counted as spend: {fmt_outflow(counted_magnitude)}")
-    if covers_today:
+    console.print(f"Counted as spend: {fmt_outflow(r['counted_total_cents'])}")
+    if r["through_today_cents"] is not None:
         console.print(
             f"[dim]Through today (power's spent-so-far): "
-            f"{fmt_outflow(through_today_magnitude)}[/dim]"
+            f"{fmt_outflow(r['through_today_cents'])}[/dim]"
         )
 
 
