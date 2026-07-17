@@ -11,6 +11,7 @@ from moneta.cli.main import app
 from moneta.db import init_db, make_sessionmaker
 from moneta.models import (
     AccountType,
+    Cadence,
     Direction,
     EventKind,
     ReviewItem,
@@ -404,6 +405,28 @@ def test_power_negative_money_renders_minus_before_dollar(tmp_path: Path, monkey
     assert result.exit_code == 0
     assert "-$5000.00" in result.output  # fixed costs / spending power / remaining
     assert "$-" not in result.output  # one sign format everywhere
+
+
+def test_power_biweekly_renders_per_cycle_and_monthly(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+
+    async def _seed(session: AsyncSession) -> None:
+        await make_series(
+            session,
+            merchant="Acme Payroll",
+            direction=Direction.inflow,
+            cadence=Cadence.biweekly,
+            expected_cents=250000,
+        )
+        await make_series(session, merchant="Netflix", expected_cents=-1599)
+
+    _seed_db(tmp_path, _seed)
+    result = runner.invoke(app, ["power"])
+    assert result.exit_code == 0
+    assert "$2500.00 every 2 weeks ≈ $5416.67/mo" in result.output
+    assert "$15.99" in result.output  # monthly row stays bare
+    assert "(monthly)" not in result.output
+    assert "(biweekly)" not in result.output
 
 
 def test_review_non_integer_answer_skips_cleanly(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]

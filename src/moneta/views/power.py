@@ -23,6 +23,7 @@ class SeriesLine(BaseModel):
     merchant: str
     cadence: Cadence
     monthly_cents: int
+    expected_cents: int  # per-cycle magnitude (design 2026-07-16 §3)
 
 
 class PowerReport(BaseModel):
@@ -38,7 +39,12 @@ class PowerReport(BaseModel):
 
 def _series_lines(series: Iterable[RecurringSeries]) -> tuple[list[SeriesLine], int]:
     lines = [
-        SeriesLine(merchant=s.merchant, cadence=s.cadence, monthly_cents=abs(monthly_cents(s)))
+        SeriesLine(
+            merchant=s.merchant,
+            cadence=s.cadence,
+            monthly_cents=abs(monthly_cents(s)),
+            expected_cents=abs(s.expected_cents),
+        )
         for s in series
     ]
     lines.sort(key=lambda line: line.monthly_cents, reverse=True)
@@ -102,6 +108,7 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
                 merchant=f"{names.get(lp.account_id, f'account {lp.account_id}')} — payment",
                 cadence=lp.cadence,
                 monthly_cents=abs(monthlyize(lp.expected_cents, lp.cadence)),
+                expected_cents=abs(lp.expected_cents),
             )
             fixed.append(line)
             total_fixed += line.monthly_cents

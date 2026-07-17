@@ -113,6 +113,8 @@ The flagship view for the current month:
 - **Fixed costs** — detected recurring outflows (rent, subscriptions, loan payments), itemized.
   Credit-card *payments* are excluded — the purchases behind them are counted instead, so
   nothing is double-counted.
+- Non-monthly rows (income or fixed costs) show both numbers explicitly, e.g.
+  `$2500.00 every 2 weeks ≈ $5416.67/mo` — monthly rows stay a bare amount.
 - **Spending power** = income − fixed costs.
 - **Spent so far / remaining** — discretionary spend this month (accrual: credit purchases
   count when made, not when the card is paid).

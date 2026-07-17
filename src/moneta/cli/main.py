@@ -1,6 +1,6 @@
 from datetime import date
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 from rich.console import Console
@@ -39,6 +39,19 @@ def fmt_money(cents: int) -> str:
 def fmt_outflow(magnitude_cents: int) -> str:
     """Renders an unsigned outflow/liability magnitude with its display minus."""
     return fmt_money(-magnitude_cents)
+
+
+_CADENCE_PHRASE = {"weekly": "every week", "biweekly": "every 2 weeks", "annual": "every year"}
+
+
+def _series_line_amount(line: dict[str, Any]) -> str:
+    """Amount cell for a power-table series row (design 2026-07-16 §3): non-monthly
+    cadences show the per-cycle amount alongside the monthly equivalent; monthly
+    rows stay a bare amount."""
+    phrase = _CADENCE_PHRASE.get(line["cadence"])
+    if phrase is None:
+        return fmt_money(line["monthly_cents"])
+    return f"{fmt_money(line['expected_cents'])} {phrase} ≈ {fmt_money(line['monthly_cents'])}/mo"
 
 
 @app.command()
@@ -102,14 +115,10 @@ def power() -> None:
     table = Table(title=f"Spending power — {r['month']}", show_header=False)
     table.add_row("Income (detected)", f"{fmt_money(r['monthly_income_cents'])}/mo")
     for line in r["income_sources"]:
-        table.add_row(
-            f"  {escape(line['merchant'])} ({line['cadence']})", fmt_money(line["monthly_cents"])
-        )
+        table.add_row(f"  {escape(line['merchant'])}", _series_line_amount(line))
     table.add_row("Fixed costs", f"{fmt_outflow(r['total_fixed_cents'])}/mo")
     for line in r["fixed_costs"]:
-        table.add_row(
-            f"  {escape(line['merchant'])} ({line['cadence']})", fmt_money(line["monthly_cents"])
-        )
+        table.add_row(f"  {escape(line['merchant'])}", _series_line_amount(line))
     table.add_row(
         "[bold]Spending power[/bold]", f"[bold]{fmt_money(r['spending_power_cents'])}/mo[/bold]"
     )

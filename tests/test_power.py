@@ -54,6 +54,20 @@ async def test_power_report_full_picture(session: AsyncSession) -> None:
     assert income == [("Acme Payroll", Cadence.biweekly, 541667)]
 
 
+async def test_series_line_carries_expected_cents(session: AsyncSession) -> None:
+    await make_series(
+        session,
+        merchant="Acme Payroll",
+        direction=Direction.inflow,
+        cadence=Cadence.biweekly,
+        expected_cents=250000,
+    )
+    report = await power_report(session, today=date(2026, 7, 7))
+    line = report.income_sources[0]
+    assert line.expected_cents == 250000
+    assert line.monthly_cents == 541667
+
+
 async def test_credit_payment_series_excluded_from_fixed(session: AsyncSession) -> None:
     checking = await make_account(session, type=AccountType.checking)
     credit = await make_account(session, type=AccountType.credit)

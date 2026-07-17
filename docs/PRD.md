@@ -128,6 +128,7 @@ Rich tables with stable IDs everywhere a follow-up action exists (`recurring --e
 | 2026-07-16 | **Ended/discretionary spend bucketing** | Transactions tagged to an ended or discretionary series now count toward `spent_so_far` in `power` instead of disappearing from every bucket — a cancelled-but-still-charging subscription, or a habit's spending, was previously invisible money. |
 | 2026-07-16 | **Recurring overrule CLI** | `moneta recurring --not-a-bill/--habit/--re-review ID` (mutually exclusive with each other and `--end`) — `POST /recurring/{id}/{not-a-bill,habit,re-review}` find-or-create the series' `recurring_cluster` ledger item and apply a manual resolution through the existing `apply_resolution` path, so a wrongly-confirmed bill or habit is always human-correctable. |
 | 2026-07-16 | **Manual financing-mode override** | `moneta accounts --set-financing ID true\|false` (`PATCH /accounts` gains `financing_mode`); accounts table shows `credit (financing)`. A manual escape hatch alongside the `financing_account` review prompt, for correcting or pre-empting the fingerprint detector's verdict. |
+| 2026-07-16 | **Per-cycle cadence labels** | `SeriesLine` gains `expected_cents` (per-cycle magnitude); `moneta power` renders non-monthly income/fixed-cost rows as `$265.72 every 2 weeks ≈ $575.73/mo`, monthly rows stay bare, and the merchant cell drops its `(cadence)` suffix entirely — the ambiguity between a per-cycle charge and its monthly-equivalent is resolved in the amount text itself. |
 
 ## 8. Roadmap
 
@@ -139,7 +140,6 @@ Sourced from `docs/backlog/` (one file per ticket — see each for context and a
 - Transaction drill-down command (inspect what's behind a number).
 
 **Medium**
-- Power rows should show per-cycle and monthly-equivalent amounts explicitly (cadence label next to a monthlyized number is ambiguous).
 - Safe-to-spend *today* (prorated within the month).
 - Upcoming charges surfaced in `power`.
 - Sync progress feedback; sync-staleness warning in `status`; per-item sync warnings surfaced to the user.
