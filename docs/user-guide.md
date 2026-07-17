@@ -273,6 +273,22 @@ moneta serve --host 0.0.0.0        # public bind — refused unless MONETA_API_T
 Every money field in an API response is an integer number of cents, named `*_cents`
 (e.g. `"remaining_cents": 355568` is $3,555.68) — clients do their own formatting.
 
+Fields split into two sign conventions, decided per field rather than globally:
+
+- **Signed** (storage convention — negative = outflow, positive = inflow): `balance_cents`
+  (accounts), `expected_cents` (recurring series), `net_worth_cents`, `spending_power_cents`,
+  `remaining_cents`, and review-context amounts (`amount_cents` on samples/candidates,
+  `old_amount_cents`/`new_amount_cents`).
+- **Unsigned magnitudes** (a labeled quantity, e.g. "Fixed costs" or "Liabilities" — the label
+  carries the direction, not the sign): `monthly_income_cents`, `total_fixed_cents`,
+  `spent_so_far_cents`, `SeriesLine.monthly_cents`, `liquid_cents`, `vested_holdings_cents`,
+  `liabilities_cents`, `unvested_potential_cents`, `accrual_cents`, `cash_out_cents`,
+  `balance_owed_cents`, `monthly_payment_cents`.
+
+New money fields document their sign here as they ship. The CLI never hand-negates a
+magnitude field — it calls `fmt_outflow(magnitude_cents)` (renders with the display minus)
+instead of `fmt_money(-magnitude_cents)`.
+
 Point any CLI at it:
 
 ```bash

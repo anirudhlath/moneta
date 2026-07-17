@@ -708,3 +708,34 @@ async def test_accounts_and_recurring_money_fields_are_ints(
     series = (await client.get("/recurring")).json()
     assert series[0]["expected_cents"] == -1599
     assert "expected_amount" not in series[0]
+
+
+async def test_money_field_signs(
+    client: httpx.AsyncClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """Pins the documented per-field sign convention (design §1): flow fields keep
+    the storage sign (negative = outflow); aggregate/labeled-magnitude fields are
+    unsigned."""
+    from moneta.models import AccountType
+
+    async with sessionmaker() as session:
+        await make_account(session, type=AccountType.credit, balance_cents=-121500)
+        checking = await make_account(session, type=AccountType.checking)
+        await make_txn(session, checking, amount_cents=-2500, posted_on=date.today())
+        await make_series(session, expected_cents=-1599)
+        await session.commit()
+
+    power = (await client.get("/power")).json()
+    assert power["total_fixed_cents"] >= 0
+    assert power["spent_so_far_cents"] >= 0
+    assert isinstance(power["remaining_cents"], int)  # signed: either sign is valid
+
+    accounts = (await client.get("/accounts")).json()
+    assert any(a["balance_cents"] < 0 for a in accounts)
+
+    networth = (await client.get("/networth")).json()
+    assert networth["liabilities_cents"] >= 0
+
+    recurring = (await client.get("/recurring")).json()
+    outflow_series = next(s for s in recurring if s["direction"] == "outflow")
+    assert outflow_series["expected_cents"] < 0

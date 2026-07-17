@@ -901,3 +901,10 @@ def test_fmt_money_formats_cents() -> None:
     assert fmt_money(-3609) == "-$36.09"
     assert fmt_money(-5) == "-$0.05"
     assert fmt_money(123456789) == "$1234567.89"
+
+
+def test_fmt_outflow_renders_magnitude_with_display_minus() -> None:
+    from moneta.cli.main import fmt_outflow
+
+    assert fmt_outflow(512242) == "-$5122.42"
+    assert fmt_outflow(0) == "$0.00"

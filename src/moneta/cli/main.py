@@ -36,6 +36,11 @@ def fmt_money(cents: int) -> str:
     return f"{sign}${whole}.{frac:02d}"
 
 
+def fmt_outflow(magnitude_cents: int) -> str:
+    """Renders an unsigned outflow/liability magnitude with its display minus."""
+    return fmt_money(-magnitude_cents)
+
+
 @app.command()
 def sync(
     full: Annotated[
@@ -100,7 +105,7 @@ def power() -> None:
         table.add_row(
             f"  {escape(line['merchant'])} ({line['cadence']})", fmt_money(line["monthly_cents"])
         )
-    table.add_row("Fixed costs", f"{fmt_money(-r['total_fixed_cents'])}/mo")
+    table.add_row("Fixed costs", f"{fmt_outflow(r['total_fixed_cents'])}/mo")
     for line in r["fixed_costs"]:
         table.add_row(
             f"  {escape(line['merchant'])} ({line['cadence']})", fmt_money(line["monthly_cents"])
@@ -108,7 +113,7 @@ def power() -> None:
     table.add_row(
         "[bold]Spending power[/bold]", f"[bold]{fmt_money(r['spending_power_cents'])}/mo[/bold]"
     )
-    table.add_row("Spent so far", fmt_money(-r["spent_so_far_cents"]))
+    table.add_row("Spent so far", fmt_outflow(r["spent_so_far_cents"]))
     table.add_row("[bold]Remaining[/bold]", f"[bold]{fmt_money(r['remaining_cents'])}[/bold]")
     console.print(table)
 
@@ -120,7 +125,7 @@ def networth() -> None:
     table = Table(title="Net worth", show_header=False)
     table.add_row("Liquid", fmt_money(r["liquid_cents"]))
     table.add_row("Vested holdings", fmt_money(r["vested_holdings_cents"]))
-    table.add_row("Liabilities", fmt_money(-r["liabilities_cents"]))
+    table.add_row("Liabilities", fmt_outflow(r["liabilities_cents"]))
     table.add_row("[bold]Net worth[/bold]", f"[bold]{fmt_money(r['net_worth_cents'])}[/bold]")
     table.add_row("Unvested (potential)", fmt_money(r["unvested_potential_cents"]))
     console.print(table)
