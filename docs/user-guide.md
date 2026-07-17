@@ -235,11 +235,16 @@ of one. There's no `sync --notify` flag — compose the two yourself, e.g. in cr
 0 6 * * * cd ~/code/private/moneta && uv run moneta sync && uv run moneta digest
 ```
 
-A delivery failure (ntfy.sh unreachable, etc.) logs a warning and leaves the cursor
-untouched — the same events/warnings are retried on the next `moneta digest` rather than
-silently lost. `moneta digest --json` prints the raw `{"sent": bool, "events": int,
-"warnings": int}` response — the one write command where `--json` is allowed, since printing
-the result *is* the point. Unset `ntfy_topic` is a clean 400 with a setup hint, not a crash.
+A delivery failure (ntfy.sh unreachable, etc.) logs a warning (host only — the topic itself,
+a publish/read credential, is never written to the log) and leaves the cursor untouched — the
+same events/warnings are retried on the next `moneta digest` rather than silently lost.
+`moneta digest --json` prints the raw `{"sent": bool, "events": int, "warnings": int}`
+response — the one write command where `--json` is allowed, since printing the result *is*
+the point. Unset `ntfy_topic` is a clean 400 with a setup hint, not a crash.
+
+The very first `moneta digest` baselines its cursor to setup time instead of replaying every
+series event in your history — only events from that point forward show up in digests
+(deferred-interest warnings are current-state, so they still send on the first run).
 
 ## Reading the numbers
 

@@ -9,6 +9,7 @@ lost — the same content is re-attempted next run.
 """
 
 from datetime import date
+from urllib.parse import urlsplit
 
 import httpx
 from loguru import logger
@@ -32,7 +33,12 @@ class DigestResult(BaseModel):
 async def _state(session: AsyncSession) -> DigestState:
     state = await session.get(DigestState, 1)
     if state is None:
-        state = DigestState(id=1, last_event_id=0, warned_account_ids=[])
+        # First-ever digest: seed the cursor at the newest existing event so
+        # this run reports only what happens from here on, not the whole
+        # history (which would also permanently wedge against ntfy's ~4KB
+        # body cap, since the cursor only advances on a successful send).
+        seed = (await session.execute(select(func.max(SeriesEvent.id)))).scalar_one_or_none() or 0
+        state = DigestState(id=1, last_event_id=seed, warned_account_ids=[])
         session.add(state)
         await session.flush()
     return state
@@ -110,7 +116,14 @@ async def run_digest(
             resp = await own.post(ntfy_topic, content=body, headers={"Title": _TITLE})
             resp.raise_for_status()
         except httpx.HTTPError as exc:
-            logger.warning("digest: delivery to {} failed: {}", ntfy_topic, exc)
+            # ntfy_topic is a bearer credential (anyone who knows it can publish/read
+            # the topic) — never let it reach the on-disk log, including via the
+            # exception text, which embeds the full URL for HTTP status errors.
+            host = urlsplit(ntfy_topic).hostname
+            scrubbed = str(exc).replace(ntfy_topic, "<topic>")
+            logger.warning(
+                "digest: delivery to {} failed: {}: {}", host, type(exc).__name__, scrubbed
+            )
             # not delivered — the cursor/warned set must NOT advance, or these
             # events/warnings would silently never be sent
             return DigestResult(sent=False, events=len(rows), warnings=len(new_risk))
