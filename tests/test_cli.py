@@ -1184,7 +1184,7 @@ def test_sync_prints_warnings(tmp_path: Path, monkeypatch) -> None:  # type: ign
                 "warnings": [
                     "simplefin: bridge error: re-authenticate at the institution",
                     "Plaid item Old Bank skipped (ITEM_LOGIN_REQUIRED: re-link)"
-                    " — re-link with: moneta setup plaid-link",
+                    " — repair with: moneta setup plaid-relink it-dead",
                 ],
             }
         return []
@@ -1320,6 +1320,59 @@ def test_setup_plaid_link_happy_path(tmp_path: Path, monkeypatch) -> None:  # ty
     assert items[0].item_id == "it-1"
     assert items[0].access_token == "access-1"
     assert items[0].products == ["transactions"]
+
+
+def test_setup_plaid_relink_unknown_item_errors_cleanly(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _setup_plaid(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["setup", "plaid-relink", "nope"])
+    assert result.exit_code == 1
+    assert "plaid-list" in result.output
+
+
+def test_setup_plaid_relink_keeps_item_unchanged(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    plaid_mod = _setup_plaid(tmp_path, monkeypatch)
+    plaid_mod.save_items(
+        plaid_mod.items_path(tmp_path),
+        [
+            plaid_mod.PlaidItem(
+                item_id="it-1",
+                access_token="access-1",
+                institution_name="Chase",
+                products=["transactions"],
+            )
+        ],
+    )
+
+    seen_access_token: dict[str, str | None] = {}
+
+    async def fake_create(client: Any, products: list[str], access_token: str | None = None) -> Any:
+        seen_access_token["value"] = access_token
+        assert products == ["transactions"]
+        return "lt-1", "https://hosted.plaid.com/link/abc"
+
+    async def fake_poll(
+        client: Any, link_token: str, timeout: float = 900.0, interval: float = 3.0
+    ) -> Any:
+        assert link_token == "lt-1"
+        return "public-unused", "Chase"
+
+    async def fail_exchange(client: Any, public_token: str) -> Any:
+        raise AssertionError("update mode must not exchange a public token")
+
+    monkeypatch.setattr(plaid_mod, "create_hosted_link", fake_create)
+    monkeypatch.setattr(plaid_mod, "poll_link_result", fake_poll)
+    monkeypatch.setattr(plaid_mod, "exchange_public_token", fail_exchange)
+
+    result = runner.invoke(app, ["setup", "plaid-relink", "it-1"])
+    assert result.exit_code == 0
+    assert "hosted.plaid.com" in result.output
+    assert "Relinked Chase" in result.output
+    assert seen_access_token["value"] == "access-1"
+
+    items = plaid_mod.load_items(plaid_mod.items_path(tmp_path))
+    assert len(items) == 1
+    assert items[0].item_id == "it-1"
+    assert items[0].access_token == "access-1"
 
 
 def test_setup_plaid_list_and_unlink(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]

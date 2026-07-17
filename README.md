@@ -152,7 +152,9 @@ uv run moneta sync
 ```
 
 `plaid-link` links one institution per run (re-run it for each bank);
-`moneta setup plaid-list` / `plaid-unlink <item-id>` manage linked banks.
+`moneta setup plaid-list` / `plaid-unlink <item-id>` manage linked banks. If sync
+starts warning `ITEM_LOGIN_REQUIRED`, repair it in place (no duplicate accounts):
+`moneta setup plaid-relink <item-id>`.
 
 The first sync pulls all history your institutions retain. `moneta sync --full`
 re-pulls everything — use it after linking a new SimpleFIN account so its history

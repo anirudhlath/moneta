@@ -77,12 +77,24 @@ moneta setup plaid-list                # show linked institutions
 moneta setup plaid-unlink <ITEM_ID>    # unlink (stops Plaid billing); synced data stays in the db
 ```
 
+If a bank's login expires (a sync warning naming `ITEM_LOGIN_REQUIRED`), repair it in place —
+**don't** unlink and re-`plaid-link`, which would create a second, duplicate set of accounts
+for that bank (Plaid account ids are per-item):
+
+```bash
+moneta setup plaid-relink <ITEM_ID>    # find the id with plaid-list
+```
+
+This opens the same hosted-link flow in *update mode*: you re-authorize in the browser, and
+on completion the item keeps its original id and access token — no exchange call, no new item,
+no duplicate accounts. An unknown item id is a clean error pointing at `plaid-list`.
+
 Notes:
 - Plaid replays its full history (up to 730 days) on every sync, so plain `moneta sync`
   suffices after linking — no `--full` needed for Plaid.
 - Plaid supplies real account types, which take precedence over moneta's name-based inference.
-- If one bank's login expires, that bank is skipped with a warning; the rest of the sync proceeds.
-  Re-run `moneta setup plaid-link` for that bank to restore access.
+- If one bank's login expires, that bank is skipped with a warning; the rest of the sync
+  proceeds. `moneta setup plaid-relink <ITEM_ID>` restores access without duplicating accounts.
 
 ## Syncing
 
@@ -120,10 +132,12 @@ Synced: 12 new transactions, 1 transfers linked, 0 new series, 0 events.
 ```
 
 (A real example: a Plaid item losing its login shows `⚠ Plaid item Apple Card skipped
-(ITEM_LOGIN_REQUIRED) — re-link with: moneta setup plaid-link` — previously this only reached
-the log file; now it's visible in the sync summary the moment it happens.) Only when **every**
-configured source fails does the sync itself fail (nothing gets ingested, so `moneta status`
-correctly reports the run as failed rather than a quiet success over an empty pull).
+(ITEM_LOGIN_REQUIRED) — repair with: moneta setup plaid-relink <item-id>` — previously this
+only reached the log file; now it's visible in the sync summary the moment it happens, and
+the hint points at the update-mode repair, not a duplicate-account-risking re-link.) Only when
+**every** configured source fails does the sync itself fail (nothing gets ingested, so
+`moneta status` correctly reports the run as failed rather than a quiet success over an empty
+pull).
 
 Every sync is recorded — success or failure — and a failed sync leaves your data untouched.
 

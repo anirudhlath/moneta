@@ -132,6 +132,30 @@ async def test_create_hosted_link_payload_and_result() -> None:
     assert body["transactions"] == {"days_requested": 730}
 
 
+async def test_create_hosted_link_includes_access_token_when_passed() -> None:
+    seen: dict[str, Any] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"link_token": "lt-1", "hosted_link_url": "u"})
+
+    client = _plaid_client(handle)
+    await create_hosted_link(client, ["transactions"], access_token="access-1")
+    assert seen["body"]["access_token"] == "access-1"
+
+
+async def test_create_hosted_link_omits_access_token_when_absent() -> None:
+    seen: dict[str, Any] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"link_token": "lt-1", "hosted_link_url": "u"})
+
+    client = _plaid_client(handle)
+    await create_hosted_link(client, ["transactions"])
+    assert "access_token" not in seen["body"]
+
+
 async def test_create_hosted_link_omits_days_without_transactions_product() -> None:
     seen: dict[str, Any] = {}
 
@@ -438,7 +462,7 @@ async def test_item_login_required_skips_item_but_not_sync() -> None:
     assert len(snap.accounts) == 3  # only the healthy item's accounts
     assert snap.warnings == [
         "Plaid item Old Bank skipped (ITEM_LOGIN_REQUIRED: re-link)"
-        " — re-link with: moneta setup plaid-link"
+        " — repair with: moneta setup plaid-relink it-dead"
     ]
 
 

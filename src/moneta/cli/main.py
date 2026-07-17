@@ -820,6 +820,39 @@ def setup_plaid_link(
     console.print(f"[green]Linked {name}.[/green] Run: moneta sync")
 
 
+@setup_app.command("plaid-relink")
+def setup_plaid_relink(item_id: str) -> None:
+    """Re-authorize a broken Plaid item (e.g. ITEM_LOGIN_REQUIRED) via hosted-link
+    update mode: same item id, same access token, no duplicate accounts."""
+    import asyncio
+
+    from moneta.aggregator import plaid
+
+    client, settings = _plaid_client()
+    path = plaid.items_path(settings.config_dir)
+    items = plaid.load_items(path)
+    match = next((it for it in items if it.item_id == item_id), None)
+    if match is None:
+        console.print(
+            f"[red]Error:[/red] no linked item {item_id!r} (see: moneta setup plaid-list)"
+        )
+        raise typer.Exit(1)
+
+    async def _relink() -> str:
+        link_token, url = await plaid.create_hosted_link(
+            client, match.products, access_token=match.access_token
+        )
+        console.print(f"Open this link in your browser to re-authorize:\n[bold]{url}[/bold]")
+        console.print("Waiting for you to finish (Ctrl-C aborts)…")
+        await plaid.poll_link_result(client, link_token)
+        # update mode re-authorizes the SAME item in place: no exchange call, no
+        # item appended/replaced in the store
+        return match.institution_name or match.item_id
+
+    name = asyncio.run(_relink())
+    console.print(f"[green]Relinked {name}.[/green] Run: moneta sync")
+
+
 @setup_app.command("plaid-list")
 def setup_plaid_list() -> None:
     """List linked Plaid institutions."""
