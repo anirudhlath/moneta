@@ -145,6 +145,8 @@ async def _retire_questions(
                     and abs((out.posted_on - inn.posted_on).days) <= 6
                     and logical.account_roots[out.account_id]
                     != logical.account_roots[inn.account_id]
+                    and logical.accounts[logical.account_roots[out.account_id]].currency
+                    == logical.accounts[logical.account_roots[inn.account_id]].currency
                 ):
                     candidates.add(inn.id)
             if out is None or out_id in linked or not candidates:

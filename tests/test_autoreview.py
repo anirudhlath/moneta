@@ -1,6 +1,7 @@
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +16,7 @@ from moneta.models import (
     ReviewStatus,
     SeriesEvent,
     SeriesStatus,
+    SyncRun,
     Transaction,
     TransferLink,
 )
@@ -27,6 +29,8 @@ from moneta.pipelines.review import (
     review_context,
     verify_series,
 )
+from moneta.pipelines.run import run_sync
+from tests.conftest import RecordingAdapter
 from tests.factories import make_account, make_price_change_item, make_series, make_txn
 
 
@@ -442,3 +446,122 @@ async def test_price_change_context_includes_recent_occurrences(session: AsyncSe
     ctx = await review_context(session, item)
     assert ctx["old_amount_cents"] == -1599 and ctx["new_amount_cents"] == -1899
     assert ctx["samples"] == [{"posted_on": "2026-07-15", "amount_cents": -1899}]
+
+
+async def test_currency_correction_then_sync_retires_stale_transfer_without_failing(
+    session: AsyncSession,
+) -> None:
+    checking = await make_account(session, source="plaid")
+    savings = await make_account(session, source="simplefin")
+    out = await make_txn(session, checking, description="ACH OUT", merchant="Bank")
+    inn = await make_txn(
+        session, savings, amount_cents=1000, description="DEPOSIT IN", merchant="Bank"
+    )
+    prior_out = await make_txn(
+        session, checking, amount_cents=-2000, description="Prior transfer", merchant="Bank"
+    )
+    prior = ReviewItem(
+        kind="transfer_pair",
+        question="Prior unrelated no",
+        payload={"outflow_id": prior_out.id, "candidates": []},
+        status="resolved",
+        resolution={"inflow_id": None, "resolved_by": "manual"},
+    )
+    pending = ReviewItem(
+        kind="transfer_pair",
+        question="Transfer?",
+        payload={"outflow_id": out.id, "candidates": [inn.id]},
+    )
+    session.add_all([prior, pending])
+    await session.commit()
+    raw_before = [
+        (t.id, t.aggregator_id, t.posted_on, t.amount_cents, t.description, t.raw)
+        for t in await session.scalars(select(Transaction).order_by(Transaction.id))
+    ]
+    savings.currency = "EUR"
+    await session.commit()
+    llm = ScriptedLLM({"ACH OUT": {"inflow_id": inn.id, "confident": True}})
+    report = await run_sync(session, [RecordingAdapter()], llm, today=date(2026, 7, 5))
+    assert report.auto_resolved == 0 and report.overlap.reviews_superseded == 1
+    assert pending.status == "resolved" and pending.resolution is not None
+    assert pending.resolution["resolved_by"] == "reconciliation"
+    assert prior.resolution == {"inflow_id": None, "resolved_by": "manual"}
+    assert list(await session.scalars(select(TransferLink))) == []
+    assert (await session.scalars(select(SyncRun))).one().success is True
+    assert llm.prompts == []
+    raw_after = [
+        (t.id, t.aggregator_id, t.posted_on, t.amount_cents, t.description, t.raw)
+        for t in await session.scalars(select(Transaction).order_by(Transaction.id))
+    ]
+    assert raw_after == raw_before
+
+
+@pytest.mark.parametrize("violation", ["currency", "amount", "date", "family", "missing"])
+async def test_autoreview_filters_incompatible_transfer_candidates_and_rejects_their_answers(
+    session: AsyncSession, violation: str
+) -> None:
+    out_account = await make_account(session)
+    in_account = await make_account(
+        session,
+        currency="EUR" if violation == "currency" else "USD",
+        canonical_account_id=out_account.id if violation == "family" else None,
+    )
+    valid_account = await make_account(session)
+    out = await make_txn(session, out_account, description="ACH OUT")
+    bad = await make_txn(
+        session,
+        in_account,
+        amount_cents=999 if violation == "amount" else 1000,
+        posted_on=out.posted_on + timedelta(days=7 if violation == "date" else 0),
+        description="STALE IN",
+    )
+    valid = await make_txn(session, valid_account, amount_cents=1000, description="VALID IN")
+    bad_id = 999999 if violation == "missing" else bad.id
+    item = ReviewItem(
+        kind="transfer_pair",
+        question="Transfer?",
+        payload={"outflow_id": out.id, "candidates": [bad_id, valid.id]},
+    )
+    session.add(item)
+    await session.commit()
+    assert [c["id"] for c in (await review_context(session, item))["candidates"]] == [valid.id]
+    llm = ScriptedLLM({"ACH OUT": {"inflow_id": bad_id, "confident": True}})
+    assert await autoreview_items(session, llm) == 0
+    assert item.status == "open" and item.resolution is None
+    assert list(await session.scalars(select(TransferLink))) == []
+
+
+async def test_autoreview_rejection_preserves_earlier_resolutions_in_same_batch(
+    session: AsyncSession,
+) -> None:
+    out_account = await make_account(session)
+    in_account = await make_account(session)
+    out = await make_txn(session, out_account, description="ACH OUT")
+    inn = await make_txn(session, in_account, amount_cents=1000)
+    merchant = ReviewItem(
+        kind="merchant",
+        question="Merchant?",
+        payload={"descriptor": "UNCLEAR", "fallback": "Unclear"},
+    )
+    transfer = ReviewItem(
+        kind="transfer_pair",
+        question="Transfer?",
+        payload={"outflow_id": out.id, "candidates": [inn.id]},
+    )
+    session.add_all([merchant, transfer])
+    await session.commit()
+
+    class CorrectingLLM:
+        async def classify_json(self, prompt: str) -> dict[str, Any] | None:
+            if "UNCLEAR" in prompt:
+                return {"merchant": "Known Merchant", "confident": True}
+            # The snapshot changes after the prompt: apply_resolution must remain
+            # authoritative, with its validation rejection contained to this item.
+            in_account.currency = "EUR"
+            return {"inflow_id": inn.id, "confident": True}
+
+    assert await autoreview_items(session, CorrectingLLM()) == 1
+    assert merchant.resolution == {"merchant": "Known Merchant", "resolved_by": "llm"}
+    assert transfer.status == "open" and transfer.resolution is None
+    assert list(await session.scalars(select(TransferLink))) == []
+    assert (await session.scalars(select(MerchantAlias))).one().merchant == "Known Merchant"

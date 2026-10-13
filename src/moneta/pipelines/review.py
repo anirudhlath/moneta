@@ -173,8 +173,26 @@ async def review_context(session: AsyncSession, item: ReviewItem) -> dict[str, A
         }
     if item.kind == ReviewKind.transfer_pair:
         outflow_id = item.payload.get("outflow_id")
-        candidate_ids = [c for c in item.payload.get("candidates", []) if isinstance(c, int)]
-        ids = ([outflow_id] if isinstance(outflow_id, int) else []) + candidate_ids
+        logical = await load_logical_data(session)
+        survivors = {t.id: t for t in logical.transactions}
+        out_root = logical.transaction_roots.get(outflow_id) if type(outflow_id) is int else None
+        out = survivors.get(out_root) if out_root is not None else None
+        candidate_ids: list[int] = []
+        for candidate in item.payload.get("candidates", []):
+            target = logical.transaction_roots.get(candidate) if type(candidate) is int else None
+            inn = survivors.get(target) if target is not None else None
+            if (
+                out is not None
+                and inn is not None
+                and out.amount_cents < 0
+                and inn.amount_cents == -out.amount_cents
+                and abs((out.posted_on - inn.posted_on).days) <= 6
+                and logical.account_roots[out.account_id] != logical.account_roots[inn.account_id]
+                and logical.accounts[logical.account_roots[out.account_id]].currency
+                == logical.accounts[logical.account_roots[inn.account_id]].currency
+            ):
+                candidate_ids.append(candidate)
+        ids = ([outflow_id] if type(outflow_id) is int else []) + candidate_ids
         summaries = await txn_summaries(session, ids)
         context: dict[str, Any] = {
             "candidates": [summaries[c] for c in candidate_ids if c in summaries]
@@ -432,7 +450,19 @@ async def autoreview_items(session: AsyncSession, llm: Classifier) -> int:
         resolution = _validated(item, answer)
         if resolution is None:
             continue
-        await apply_resolution(session, item, resolution, resolved_by="llm")
+        if (
+            item.kind == ReviewKind.transfer_pair
+            and resolution["inflow_id"] is not None
+            and resolution["inflow_id"] not in {c["id"] for c in context["candidates"]}
+        ):
+            continue
+        try:
+            async with session.begin_nested():
+                await apply_resolution(session, item, resolution, resolved_by="llm")
+        except ValueError:
+            # Observations may have changed after the prompt. A classification
+            # rejection leaves this item open without discarding earlier answers.
+            continue
         resolved += 1
     await session.commit()
     return resolved

@@ -103,3 +103,7 @@ Task 5: fix round 1/5 (2 addressed, 1 open; commits b0e41ee..03cd10d). Scoped re
 Task 5 fix 2 implementation: RED 2 failures; GREEN 2 passed, final covering set 170 passed; full suite 616 passed with pristine output, lint/format check/strict mypy passed (82 files). Supersession filter now follows latest-per-observation reduction, preventing resurrection. Real tests cover multiple prior human/LLM answers, reversed iteration, accepted-link stability, future new human choices and unchanged source facts/history.
 
 Task 5: fix round 2/5 (1 addressed, 0 open; commits 03cd10d..b1d5e63). Scoped reviewer `/root/rereview5_adjudication` found no new breakage; compliance and quality gates pass. All public API handoffs remain assigned to Task 6.
+
+Task 6 implementation: 31 initial RED failures, six transfer validation RED failures and one stale-alias transfer guard RED, followed by 229 focused and 670 full tests passing; lint, format and strict typing clean (84 files). Signed-off commit `7095dba`; shared durable mutations rebuild locally without fetching.
+
+Task 6 review: `/root/review6_interfaces` found Important cross-contract breakage: stronger transfer currency validation can raise during automatic review when reconciliation leaves a stale currency-corrected candidate. Original implementer is fixing invalid candidate cleanup and safe automatic-resolution rejection with regression coverage; live validation remains Task 7.
