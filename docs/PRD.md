@@ -1,11 +1,12 @@
 # Moneta — Product Requirements Document
 
-**Status:** living document — reflects what is shipped on `main` plus the prioritized roadmap
+**Status:** living document — existing features plus the tested cross-provider implementation on `cross-provider-history`; whole-branch review and local rollout pending
 **Owner:** Anirudh Lath
-**Last updated:** 2026-07-16
+**Last updated:** 2026-10-13
 **Deep-dive specs:** [design doc](superpowers/specs/2026-07-07-moneta-design.md) ·
 [LLM recurring verification](superpowers/specs/2026-07-09-llm-recurring-verification-design.md) ·
-[Plaid integration](superpowers/specs/2026-07-09-plaid-integration-design.md)
+[Plaid integration](superpowers/specs/2026-07-09-plaid-integration-design.md) ·
+[Combined provider history](superpowers/specs/2026-10-12-cross-provider-history-design.md)
 
 ---
 
@@ -29,6 +30,7 @@ Existing personal-finance apps (Origin, Copilot) fail in four specific ways:
 - Financing obligations represented as their **monthly payment**, derived from observed transfers — never manually entered.
 - Minimal ongoing manual work: a review queue for genuinely ambiguous classifications, nothing else.
 - Boring reliability: every sync is audited, the database is migratable and backupable, and the numbers are single-currency and local-calendar-day correct.
+- Both providers may cover the same real account: retain every source observation and older unique history, while counting each balance and overlapping transaction once.
 
 ## 3. Non-goals
 
@@ -43,7 +45,7 @@ One user: the owner. Technical, runs the CLI locally (or against their own serve
 
 ## 5. Architecture in one paragraph
 
-A FastAPI server owns **all** logic; the typer CLI is a thin HTTP client that runs the app in-process (ASGI) when no server is configured, so the CLI works with zero setup. Data flows: `run_sync` iterates every configured aggregator adapter (SimpleFIN, Plaid, or both — each fetched on its own per-source incremental window) → ingest → merchant normalization → transfer dedup → LLM auto-review → recurring detection → LLM verification → series events, all committing into SQLite (WAL, Alembic-migrated). Views (power, net worth, cashflow, financing) are pure reads. Money is integer cents end-to-end; the LLM only ever classifies — it never produces a money value.
+A FastAPI server owns **all** logic; the typer CLI is a thin HTTP client that runs the app in-process (ASGI) when no server is configured, so the CLI works with zero setup. Data flows: `run_sync` iterates every configured aggregator adapter (SimpleFIN, Plaid, or both — each fetched on its own per-source incremental window) → ingest → merchant normalization → provider-overlap reconciliation → transfer dedup → financing detection → LLM auto-review → recurring detection → LLM verification → series events, all committing into SQLite (WAL, Alembic-migrated). Shared logical projections feed every accounting view and downstream detector; original provider records remain available for audit. Views (power, net worth, cashflow, financing) are pure reads. Money is integer cents end-to-end; the LLM only ever classifies — it never produces a money value.
 
 ## 6. Shipped features
 
@@ -55,8 +57,10 @@ A FastAPI server owns **all** logic; the typer CLI is a thin HTTP client that ru
 | **Plaid adapter** | Full alternative/complement to SimpleFIN: credentials via `moneta setup plaid`, banks linked one-at-a-time through Plaid Hosted Link (`plaid-link` prints a URL, polls until the browser flow finishes), managed with `plaid-list` / `plaid-unlink` / `plaid-relink`. Replays its full `/transactions/sync` history (≤730 days) every run; dedup absorbs the overlap. Plaid's inverted sign conventions are normalized at the adapter boundary. Supplies real account types (`type_hint`) that beat keyword inference. Per-item auth failures degrade gracefully instead of failing the sync, with a CLI hint naming the exact repair command. |
 | **Per-source sync windows** | `run_sync` iterates every configured adapter itself (no merging layer): each source's incremental window is computed from *that source's own* newest stored transaction (`Account.source`, stamped by every adapter and migrated in place), not one global window. A stalled or outage-affected source self-heals on its next successful sync instead of being masked by another source's daily full-history replay (e.g. Plaid). A source failing to fetch degrades to a warning and the sync continues on the rest — unless it's the only configured source (or every source fails), in which case the sync fails as before. |
 | **Incremental sync with overlap** | Each source resumes from *its own* newest stored transaction minus a 7-day overlap; first sync and `sync --full` pull from the epoch for every source (all history each institution retains). A brand-new source added to an already-populated database inherits the existing global newest date on its first run rather than the epoch — `sync --full` after adding a source ensures full history. |
+| **Combined provider history** | Both providers keep syncing the same real account. Conservative identity uses corroborated institution, currency, known type, matching nonempty suffix, and unique candidates; uncertain or conflicting metadata goes to review. Default accounts/status count logical roots, taking the freshest balance (root wins ties), never summed provider balances. `accounts --sources` exposes provider/mask/saved relationship; manual link/unlink decisions are durable and reversible. |
+| **Overlap reconciliation** | Transactions match one-to-one only across providers inside a confirmed account, with exact signed cents/currency and compatible identity. Same-provider repeated purchases stay separate; offsets ≤4 days require extra corroboration and uniqueness. Older-only and newer-only observations remain in every historical view. Raw IDs, payloads, dates, descriptions, balances, and holdings remain stored. Conflicting reviewed classifications go to review. `moneta reconcile [--json]` rebuilds locally without fetching, LLM calls, or advancing freshness. |
 | **Sync warnings surfaced** | Adapter-level problems that used to be log-only (a SimpleFIN bridge error, a Plaid item needing re-link) are collected on `Snapshot.warnings` → `SyncReport.warnings` and printed by `moneta sync` as `⚠ {warning}` in yellow, right in the sync summary. |
-| **Upstream correction handling** | A re-synced transaction whose amount/description changed updates in place, clears the stale merchant (normalization re-derives it), and drops any transfer link the correction invalidated — without losing its series membership. |
+| **Upstream correction handling** | A re-synced transaction whose amount/date/description changed updates in place, clears a stale merchant when the description changes, and revalidates provider duplicates and transfer links. A former duplicate can become visible again. Reconciliation itself changes bookkeeping rather than raw money; prior resolved review answers remain intact. |
 | **Account type inference & overrides** | SimpleFIN gives no types, so they're inferred from name/org keywords; `moneta accounts --set-type` overrides survive re-sync; Plaid type hints win over inference. `moneta accounts --set-financing ID true\|false` manually flags/clears `financing_mode` (shown as `credit (financing)`), the same flag the `financing_account` review prompt sets. |
 | **Financing-mode detection** | A deterministic fingerprint over `credit`-typed accounts — repeated near-equal payment credits against a positive owed balance, with no real purchase debits since payments began — opens a one-time `financing_account` review question rather than silently reclassifying. A confirmed account gets loan semantics: its payments count as fixed costs and it appears in `obligations`. Daily-use accounts (purchases dominate) never trigger it. Known limitation: a hybrid card carrying both everyday spend and a promo plan can't be split from transaction data alone. |
 | **Sync audit trail** | Every `run_sync` writes a `SyncRun` row (started/finished, success or the error, full report). `moneta status` answers "did last night's sync work?"; failures leave domain tables untouched. |
@@ -86,14 +90,15 @@ A FastAPI server owns **all** logic; the typer CLI is a thin HTTP client that ru
 | **Spending power** (`moneta power`) | The flagship: detected monthly income (itemized by source) − detected fixed costs (itemized), plus spent-so-far and remaining this month. Credit-card payment series are excluded from fixed costs (their purchases are counted instead — no double count). |
 | **Net worth** (`moneta networth`) | Liquid + *vested* holdings − liabilities. Unvested reported separately as potential, never summed in. Foreign-currency accounts are excluded and reported as such. |
 | **Cashflow** (`moneta cashflow`) | Accrual spend vs. cash out for a date range (default: this month) — keeps "spent so far" honest when purchases go on credit. |
-| **Transaction drill-down** (`moneta txns`) | The trust companion to spending power: every transaction in a date range (default: this month; filterable by account/merchant), with `excluded_because` giving the first matching reason a row isn't counted as spend — inflow, transfer, loan payment, credit-card payment, an active non-discretionary fixed-cost series, non-spend account, or foreign currency — mirroring `power`'s spent-so-far rule exactly instead of leaving it a black box. |
+| **Transaction drill-down** (`moneta txns`) | Combined logical transactions in a date range (default: this month; filterable by account/merchant). `--sources` adds retained duplicate observations with `excluded_because="provider_duplicate"`; totals stay deduplicated. Other exclusions are inflow, transfer, loan payment, credit-card payment, active fixed-cost series, non-spend account, or foreign currency, matching power's spent-so-far rules. Root and alias account filters both include combined retained history. |
 | **Financing obligations** (`moneta obligations`) | Derived, never stored: any `loan`-type or financing-mode account with a payment derived from its transfer-linked outflows (per-account, not merchant-string grouped) gets payment, balance, months-left = balance ÷ payment, and a deferred-interest warning when payoff lands after `promo_expires_on` (the one optional manual field in the system). |
-| **Single-currency correctness** | A majority-vote primary currency filters all aggregate views and recurring grouping, so mixed-currency accounts can't corrupt the numbers. |
+| **Single-currency correctness** | A majority vote over logical accounts chooses the primary currency and filters aggregate views and recurring grouping; identity links reject incompatible currencies. No FX conversion is inferred. |
+| **Logical holdings & vesting** | Choose one available provider holdings set per logical account without erasing holdings when another provider reports none. Preserve imported vesting; conflicting annotations produce warnings. Missing balances, margin borrowing, vesting, and loan terms remain explicit limitations rather than inferred money. |
 | **Local-calendar-day dates** | Timestamps convert in the process's local timezone — an evening purchase lands on the day the user experienced. |
 
 ### 6.4 Human-in-the-loop review
 
-`moneta review` walks the queue interactively with an upfront summary: transfer matches (pick a numbered candidate), recurring-series questions (y/n), price changes (y/n, showing old → new amounts), merchant names (type or skip). Human and LLM resolutions flow through the same auditable path, tagged `resolved_by`. LLM-flagged verification items are human-only — the LLM never answers its own doubts.
+`moneta review` walks the queue interactively with an upfront summary: account identity and transaction overlap (provider context, numbered candidates, `0` for none, Enter to skip), transfer matches (numbered candidates), recurring series (`b` bill / `h` habit / `n` not recurring), financing and price changes (y/n), merchant names (type or skip). Human and LLM resolutions flow through the same validated, auditable path, tagged `resolved_by`. LLM-flagged verification items are human-only. Explicit financing metadata writes append durable provenance and settle related open questions; aliases edit their root's metadata.
 
 ### 6.5 The LLM boundary (product principle)
 
@@ -109,6 +114,7 @@ Provider-agnostic via LiteLLM (any model string), JSON mode, temperature 0, conf
 | **Bearer-token auth** | `MONETA_API_TOKEN` enforces `Authorization: Bearer` on every endpoint; `serve` refuses to bind publicly without it; docs/OpenAPI routes are disabled when a token is set. |
 | **Backup** | `moneta backup [dest]` — online SQLite snapshot via `VACUUM INTO`, safe while running, written 0600, defaults to a timestamped file next to the DB. Refuses to overwrite. |
 | **Migrations** | Alembic owns the schema; `init_db` upgrades to head and adopts pre-Alembic databases by stamping the baseline. A parity test pins migrations against the ORM models. |
+| **Provider-history rollout** | Additive migration `0006`; synthetic on-disk 0005 rehearsal verifies raw observations, resolved answers, older history, logical totals, and repeated reconciliation. Operational rollout requires a fresh private backup, private-copy validation, then tested local integration and report regeneration; financial fixtures and reports stay outside git. |
 | **Durability** | WAL + busy-timeout on file-backed SQLite (server + CLI can write concurrently); config dir 0700 and every file 0600 (credentials, DB, snapshots, logs). |
 | **Logging & status** | Rotating log file in the config dir; warnings mirror to stderr; `moneta status` shows the last sync run (including in-flight/incomplete). |
 | **Vesting import** | `moneta import vesting file.csv` (`symbol,vested_quantity,unvested_quantity`) — vested truth from a NetBenefits export, not a manually maintained schedule. |
@@ -122,6 +128,7 @@ Rich tables with stable IDs everywhere a follow-up action exists (`recurring --e
 
 | Date | Release | What shipped |
 |---|---|---|
+| 2026-10-13 | **Combined provider history — implementation ready, rollout pending** | Logical balances/holdings, retained union of provider history, conservative identity and one-to-one duplicates, reversible account controls, overlap reviews, source audit, local reconciliation, and correction revalidation. Synthetic rehearsal passed; whole-branch review and private/live rollout remain open. |
 | 2026-07-07 | **v1 core** | Design doc; FastAPI + thin CLI; SimpleFIN; ingest/normalize/transfers/recurring/events pipelines; power, networth, financing views; review queue; LLM auto-review; vesting import. |
 | 2026-07-08 | **Full-history sync & stale series** | Epoch-based first sync/`--full`, SimpleFIN window-walking, series auto-end/reactivation rules. |
 | 2026-07-15 | **CLI UX quick wins** | Series IDs in tables, event merchants, `moneta cashflow` command, itemized income in `power`. |
@@ -165,4 +172,5 @@ Sourced from `docs/backlog/` (one file per ticket — see each for context and a
 
 - **NetBenefits has no official API** — vesting truth currently depends on a manual CSV export (high-priority mapping ticket shortens the path).
 - **Aggregator data quality** — upstream corrections are handled, and per-source sync windows plus `moneta status`/staleness footers now surface a stalled or failing source instead of masking it; `sync --full` remains the recovery tool for backfilling once a source is fixed.
+- **Ambiguous source identity and incomplete holdings** — unresolved overlap remains visible until reviewed. Missing vesting, loan balances, or borrowing data and provider failures must be disclosed; forecasts remain provisional when evidence is incomplete.
 - **LLM cost/quality drift** — mitigated by the classification-only boundary, confidence gating, and full degradation to human review; any LiteLLM-supported model can be swapped in via config.

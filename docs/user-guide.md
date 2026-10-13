@@ -96,6 +96,71 @@ Notes:
 - If one bank's login expires, that bank is skipped with a warning; the rest of the sync
   proceeds. `moneta setup plaid-relink <ITEM_ID>` restores access without duplicating accounts.
 
+### Combined provider history
+
+The same real account can stay connected through SimpleFIN and Plaid. Both sources
+keep syncing. Default accounts and reports show one logical account, using the most
+recent reported balance; a balance-date tie prefers the established account's source.
+Balances are never added together. The account count in `moneta status` uses these
+logical accounts too.
+
+An automatic account match needs the same currency, compatible known type,
+corroborated institution, matching nonempty masked suffix, and a unique counterpart.
+Equal balances or similar names alone are insufficient. Plausible matches with
+missing or ambiguous suffix evidence go to `moneta review`; check provider, suffix, and metadata
+context before confirming. Conflicting saved type, financing, or promo decisions
+must be resolved before linking. Existing reviewed answers remain in the audit history.
+
+After identity is confirmed, reports combine all retained transactions. Matching
+observations from different providers count once, while older Plaid-only history
+and newer SimpleFIN-only transactions remain available. Repeated purchases within
+one provider stay separate. Matching requires equal signed cents, currency, and
+compatible merchant/payment identity. Posting-date offsets of up to four days need
+extra corroboration and a unique counterpart. Uncertain matches and conflicting
+reviewed classifications remain visible for review.
+
+Inspect the evidence and apply a manual identity decision when needed:
+
+```fish
+moneta accounts --sources
+moneta txns --sources --start 2024-10-01 --end 2026-07-31 --account <ID>
+moneta accounts --link-source <SOURCE_ID> --to <ROOT_ID>
+moneta accounts --unlink-source <SOURCE_ID>
+moneta reconcile
+```
+
+Use IDs from the account listing. Linking preserves the target's shared metadata;
+unlinking restores the detached source's independent balance and makes its
+transactions eligible again. These decisions are saved and survive later syncs.
+`accounts --unlink-source` changes how retained data is counted; the separately
+named `setup plaid-unlink` disconnects a Plaid institution. Neither identity control
+deletes original provider observations.
+
+`moneta reconcile` rebuilds overlap, transfers, recurring estimates, and events from
+stored data. It fetches no providers, calls no LLM, and does not advance sync
+freshness. Use `moneta sync` to obtain upstream corrections: a changed amount/date
+can dissolve a former duplicate and invalid transfer links are revalidated. The
+original reviewed answers remain recorded. To correct an uncertain transaction
+match, use its numbered overlap question in `moneta review`; `0` explicitly chooses
+none, while Enter leaves it unanswered.
+
+All aggregate views still use one primary currency; linking incompatible currencies
+is rejected and no conversion is inferred. Holdings use one source's available set
+per logical account, so a source without holdings does not erase another's set.
+Imported vesting is retained; conflicting annotations produce warnings. Missing
+vesting, loan balances, margin borrowing, or interest terms are not filled in by
+account linking. Treat forecasts as provisional when source data or review answers
+are incomplete.
+
+For an existing database, take a fresh owner-only backup with the currently installed
+version **before upgrading**: app startup can migrate the database even on a read
+command. Rehearse the upgrade and reconciliation on a private copy with an explicit
+`MONETA_DB_PATH` and separate `MONETA_CONFIG_DIR`. Compare original source IDs,
+amounts, dates, descriptions, raw payloads, balance observations, holdings, and all
+resolved answers; verify older unique history, single-counted totals, and a stable
+second reconciliation before applying the change to the live database. Keep
+backups, credentials, financial fixtures, and generated reports outside git.
+
 ## Syncing
 
 ```bash
@@ -104,7 +169,7 @@ moneta sync --full     # re-pull all history — use after linking a new source
 moneta status          # is data fresh? did the last sync work? what changed
 ```
 
-A sync runs the full pipeline: ingest → merchant normalization → transfer dedup →
+A sync runs the full pipeline: ingest → merchant normalization → provider-overlap reconciliation → transfer dedup →
 financing-account detection → LLM auto-review → recurring detection → LLM verification →
 series events. The summary line tells you what changed (new transactions, transfers linked,
 new series, events); if items need your attention (including a financing check) it points
@@ -115,7 +180,8 @@ first sync isn't a silent wait. Pointed at a remote server (`MONETA_API_URL` set
 the spinner — the fetch itself is happening on the server, out of the client's view.
 
 Each configured source (SimpleFIN, Plaid, ...) syncs on its **own** incremental window,
-computed from that source's own newest stored transaction — not a single global window. This
+computed from that source's own newest stored transaction, including observations
+superseded by another provider — not a single global window. This
 means a SimpleFIN outage, or a bank that's been silently failing for weeks, self-heals on the
 next successful sync instead of staying masked by Plaid's daily full-history replay. The
 tradeoff: a brand-new source's first-ever sync on an already-populated database inherits the
@@ -285,6 +351,7 @@ moneta txns                          # this month, every transaction
 moneta txns --month 2026-06          # a specific month
 moneta txns --start 2026-06-01 --end 2026-06-15 --account 3
 moneta txns --merchant netflix       # case-insensitive substring match
+moneta txns --sources               # include original provider observations
 ```
 
 `--month` and `--start`/`--end` are mutually exclusive. Counted rows show a plain `✓`;
@@ -292,6 +359,7 @@ excluded rows render dim with the reason in the same column — one of:
 
 | Reason | Meaning |
 |---|---|
+| `superseded provider observation` | Another provider's observation of the same transaction; retained for audit, excluded from totals (`provider_duplicate` in JSON) |
 | `inflow` | Money coming in, not spend |
 | `transfer` | The inflow leg of an internal transfer (always excluded) |
 | `loan payment` | Outflow leg of a transfer into a loan/financing account (counted as a fixed cost instead, in `power`) |
@@ -301,6 +369,10 @@ excluded rows render dim with the reason in the same column — one of:
 | `foreign currency` | Posted to a non-primary-currency account (excluded from all aggregates) |
 
 `excluded_because` is the *first* matching reason in that order — a row only ever gets one.
+Default rows are logical survivors. `--sources` adds duplicate observations with their
+original signed amounts, dates, and descriptions; the footer totals still count only
+survivors. An account filter accepts either the root ID or a source alias ID and
+returns the combined account history.
 
 The footer has two lines:
 
@@ -406,6 +478,9 @@ for cards used exclusively as financing vehicles; a hybrid card should stay a pl
 
 ```bash
 moneta accounts                                    # list accounts with IDs, types, balances
+moneta accounts --sources                          # physical accounts with provider, mask, canonical ID
+moneta accounts --link-source <SOURCE_ID> --to <ROOT_ID>
+moneta accounts --unlink-source <SOURCE_ID>
 moneta accounts --set-type <ID> <TYPE>             # checking|savings|credit|brokerage|loan|unknown
 moneta accounts --set-promo <ID> YYYY-MM-DD        # promo expiry for a financing account
 moneta accounts --set-financing <ID> true|false    # mark a credit card as financing (loan semantics)
@@ -416,6 +491,25 @@ promo powers the deferred-interest warning; financing-mode gives a credit accoun
 semantics (its payments count as fixed costs instead of its purchases) without waiting on
 the `financing_account` review prompt. A financing-mode account shows as `credit (financing)`
 in the Type column.
+
+Metadata writes using a source alias ID update its logical root. Explicit financing
+choices, including `false`, are recorded and settle related open financing questions.
+Link/unlink cannot be combined with each other or metadata writes; `--link-source`
+and `--to` must appear together. Invalid IDs, types, financing values, dates, and
+conflicting flags fail before any request. Linking rejects cycles, incompatible
+currencies, and conflicting saved metadata.
+
+### `moneta reconcile`
+
+```fish
+moneta reconcile
+moneta reconcile --json
+```
+
+Rebuilds stored provider overlap and derived estimates. JSON returns integer counts
+`accounts_linked`, `transactions_suppressed`, `transactions_restored`,
+`reviews_opened`, and `reviews_superseded`. A repeated unchanged run is stable;
+counts describe changes made by that run, not all currently linked records.
 
 ### Scripting: `--json`
 
@@ -429,8 +523,10 @@ script, and returns before any table is built. `moneta status --json` merges
 which is `null` when no sync has ever run (the rest of the object is still
 populated). Combining `--json` with a write flag
 (`recurring --end/--not-a-bill/--habit/--re-review/--reactivate`,
-`accounts --set-type/--set-promo/--set-financing`) is a clean error — no
+`accounts --set-type/--set-promo/--set-financing/--link-source/--to/--unlink-source`) is a clean error — no
 request fires.
+`accounts --sources --json` and `txns --sources --json` are read-only audit output.
+The explicit write command `reconcile --json` supports structured results.
 
 ## The review queue
 
@@ -445,6 +541,8 @@ You'll see an upfront summary, then one question at a time:
 
 | Question type | How to answer |
 |---|---|
+| Shared account identity | Pick a numbered candidate after checking provider, mask, currency, type, and any metadata conflicts; `0` chooses none; Enter skips |
+| Overlapping provider transaction | Compare numbered observations' signed amount, posting date, description, account, and provider; pick a duplicate counterpart, `0` chooses none; Enter skips |
 | Transfer match ("which inflow matches…") | Type the number of the right candidate, or Enter to skip |
 | Bill, habit, or not recurring ("Is X a recurring bill?") | `b` bill (fixed cost) / `h` habit (discretionary, still tracked) / `n` not recurring |
 | Financing check ("X looks like promo financing being paid down…") | `y` treat its payments as fixed costs / `n` leave it as a plain credit card |
@@ -480,6 +578,9 @@ moneta import vesting shares.csv
 ```
 
 Re-import whenever a vest happens.
+Combined-provider holdings preserve these annotations and count one holdings set.
+Conflicting vesting annotations are warned about rather than silently discarded;
+inspect the sources and correct the imported vesting before trusting the total.
 
 ## Server mode & remote access
 
@@ -514,6 +615,24 @@ Fields split into three sign conventions, decided per field rather than globally
 New money fields document their sign here as they ship. The CLI never hand-negates a
 magnitude field — it calls `fmt_outflow(magnitude_cents)` (renders with the display minus)
 instead of `fmt_money(-magnitude_cents)`.
+
+Provider history and identity endpoints use the same signed-cents convention:
+
+| Request | Contract |
+|---|---|
+| `GET /accounts` | One row per logical root, root metadata, selected latest balance |
+| `GET /accounts?sources=true` | Original account rows plus `source`, nullable `mask`, and saved nullable `canonical_account_id`; a root stores `null`, an alias stores its target ID |
+| `GET /transactions?sources=true` | Existing envelope and filters, including suppressed observations with `excluded_because="provider_duplicate"`; totals count survivors |
+| `POST /accounts/{id}/link` | Body `{"canonical_account_id": ROOT_ID}`; returns `{"ok":true}` after reconciliation and rebuilding |
+| `POST /accounts/{id}/unlink` | No body; returns `{"ok":true}` after detaching and rebuilding |
+| `POST /reconcile` | No body; returns the five integer reconciliation counts listed above |
+| `POST /review/{id}/resolve` (account overlap) | Body `{"resolution":{"canonical_account_id": CANDIDATE_ID_OR_NULL}}` |
+| `POST /review/{id}/resolve` (transaction overlap) | Body `{"resolution":{"duplicate_of_id": CANDIDATE_ID_OR_NULL}}` |
+
+Overlap answers must name a listed integer candidate or explicit `null` for none;
+boolean IDs, missing answer keys, cycles, currency/metadata conflicts, and invalid
+transaction amount/date/family matches are rejected with HTTP 422. An unknown source
+account returns 404. Account metadata PATCHes through an alias update the root.
 
 Point any CLI at it:
 
@@ -572,6 +691,9 @@ Files in the config dir (all owner-only, dir is 0700):
 | One source failed but the sync "succeeded" | That's by design when at least one other source is configured and healthy — check the `⚠` warning line the sync prints (or `moneta status`/the log) for which source and why; a source only fails the whole sync when it's the only one configured, or every configured source fails together. |
 | A bank's history is missing | `moneta sync --full` re-pulls everything the institution retains for every configured source (needed after adding a new source, or after an outage longer than the 7-day overlap). |
 | Account has the wrong type | `moneta accounts --set-type <ID> <TYPE>` — sticks across syncs. |
+| A shared bank appears twice | Inspect `moneta accounts --sources` and account overlap questions in `moneta review`; confirm identity only with corroborating evidence, then link or reconcile. |
+| A provider match is wrong | Reverse an account link with `moneta accounts --unlink-source <ID>` or choose none in the transaction overlap review; source observations remain available. |
+| Reconciliation did not make data fresh | It only rebuilds stored data; run `moneta sync` and inspect source warnings for new observations. |
 | Merchant names look wrong | Answer the merchant questions in `moneta review`; after rule improvements, `moneta renormalize` re-applies naming to all history. |
 | A subscription shows as active but is cancelled | `moneta recurring --end <ID>`. |
 | A series was wrongly confirmed as a recurring bill | `moneta recurring --not-a-bill <ID>` — ends it and suppresses it from every future sync. |

@@ -1,6 +1,10 @@
 # Cross-provider accounts and historical transaction overlap
 
-Status: approved by the user on 2026-10-12; implementation-plan review is pending.
+Status: approved by the user on 2026-10-12; implementation ready on
+`cross-provider-history`, with synthetic migration/reconciliation rehearsal and
+documentation complete. Final whole-branch review, private-copy validation, local
+integration, live reconciliation, and report regeneration remain pending. The live
+database is unchanged by implementation.
 
 ## Intended outcome
 

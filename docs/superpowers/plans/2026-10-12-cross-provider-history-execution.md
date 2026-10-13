@@ -49,8 +49,8 @@
 - Task 3: complete (commits dfe37e5..25785fd, review clean; two deferred minors).
 - Task 4: complete (commits 25785fd..fae06d5, review clean).
 - Task 5: complete (commits fae06d5..b1d5e63, review clean).
-- Task 6: running — API, CLI and review operations; base `b1d5e63`, implementer `/root/task6_interfaces`.
-- Task 7: pending — documentation, whole-branch review and local rollout.
+- Task 6: complete (commits b1d5e63..225c4eb, review clean).
+- Task 7: running — documentation and on-disk rollout regression, followed by final whole-branch review and authorized private/live operations; base `225c4eb`.
 
 ## Verification
 
@@ -107,3 +107,9 @@ Task 5: fix round 2/5 (1 addressed, 0 open; commits 03cd10d..b1d5e63). Scoped re
 Task 6 implementation: 31 initial RED failures, six transfer validation RED failures and one stale-alias transfer guard RED, followed by 229 focused and 670 full tests passing; lint, format and strict typing clean (84 files). Signed-off commit `7095dba`; shared durable mutations rebuild locally without fetching.
 
 Task 6 review: `/root/review6_interfaces` found Important cross-contract breakage: stronger transfer currency validation can raise during automatic review when reconciliation leaves a stale currency-corrected candidate. Original implementer is fixing invalid candidate cleanup and safe automatic-resolution rejection with regression coverage; live validation remains Task 7.
+
+Task 6 fix 1 implementation: seven meaningful RED failures then GREEN; 162 focused and 677 full tests passed, clean lint/format/strict typing (84 files). Candidate cleanup/context now enforce transfer compatibility; per-answer validation savepoints leave invalid automatic answers open and preserve prior answers. Signed-off commit `225c4eb`; scoped re-review pending.
+
+Rollout preparation (read-only): live schema `0005`, physical counts, review state and history range recorded in the private rollout notes. Preserve every existing resolved review record. The original checkout's draft documents match commit `4426f46` exactly; no user edits detected.
+
+Task 6: fix round 1/5 (1 addressed, 0 open; commits 7095dba..225c4eb). Scoped reviewer `/root/rereview6_stale` confirmed candidate cleanup, filtered live prompts and per-answer rejection containment; no new Critical/Important breakage. Public interfaces and both task gates now pass.

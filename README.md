@@ -156,6 +156,24 @@ uv run moneta sync
 starts warning `ITEM_LOGIN_REQUIRED`, repair it in place (no duplicate accounts):
 `moneta setup plaid-relink <item-id>`.
 
+Connecting the same real account through both providers is supported. Both keep
+syncing, while reports count its balance and overlapping transactions once and
+retain older history available only from Plaid. Accounts link automatically only
+with corroborated institution, currency, type, and masked suffix; uncertain matches
+go to `moneta review`. Inspect the original observations with `moneta accounts
+--sources` and `moneta txns --sources`. Manual links are reversible:
+
+```fish
+moneta accounts --sources
+moneta accounts --link-source <SOURCE_ID> --to <ROOT_ID>
+moneta accounts --unlink-source <SOURCE_ID>
+moneta reconcile
+```
+
+`reconcile` rebuilds from stored observations without fetching providers or making
+the last sync look newer. See [combined provider history](docs/user-guide.md#combined-provider-history)
+for review, corrections, and safe upgrades.
+
 The first sync pulls all history your institutions retain. `moneta sync --full`
 re-pulls everything — use it after linking a new SimpleFIN account so its history
 isn't skipped by the incremental window. Plaid replays its full history (up to
@@ -179,12 +197,14 @@ Unset = no LLM; ambiguous items go to `moneta review` instead.
 | `moneta power [--history N]` | Income, fixed costs, spending power, spent so far, remaining, per-day, upcoming charges; `--history N` shows a month-over-month income/spend/net table instead |
 | `moneta networth` | Net worth (vested only); unvested listed as potential |
 | `moneta cashflow [--start D --end D]` | Accrual spend vs cash out for a range (default: this month) |
-| `moneta txns [--month M \| --start D --end D] [--account ID] [--merchant NAME]` | Every transaction in range, with why it is or isn't counted as spend (the audit/trust view) |
+| `moneta txns [--month M \| --start D --end D] [--account ID] [--merchant NAME] [--sources]` | Combined retained history; source audit includes superseded provider observations without counting them again |
 | `moneta recurring [--events] [--end\|--not-a-bill\|--habit\|--re-review ID]` | Series; missed payments/price increases; cancel, overrule, or reopen a series |
 | `moneta obligations` | Loans/financing: payment, months left, deferred-interest warnings |
 | `moneta review` | Resolve ambiguous classifications interactively |
 | `moneta digest [--json]` | Push new series events + financing warnings to ntfy.sh (cursor-tracked); cron with `moneta sync && moneta digest` |
-| `moneta accounts [--set-type ID TYPE] [--set-promo ID DATE] [--set-financing ID true\|false]` | List accounts; set type / promo expiry / financing-mode flag |
+| `moneta accounts [--sources] [--set-type ID TYPE] [--set-promo ID DATE] [--set-financing ID true\|false]` | List logical accounts or original source records; set shared type / promo expiry / financing metadata |
+| `moneta accounts --link-source ID --to ID` / `--unlink-source ID` | Confirm or reverse a shared account identity; refresh derived reports |
+| `moneta reconcile [--json]` | Reconcile stored provider overlap and rebuild estimates; no provider fetch |
 | `moneta import vesting <file.csv>` | Vesting data (`symbol,vested_quantity,unvested_quantity`) |
 | `moneta renormalize` | Re-apply improved merchant rules to already-synced data |
 | `moneta status` | Health check: last sync (when, success/failure, what changed), account/open-review counts, configured sources, LLM status |
