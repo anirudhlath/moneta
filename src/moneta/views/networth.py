@@ -37,6 +37,12 @@ async def net_worth_report(session: AsyncSession) -> NetWorthReport:
     unvested_cents = 0
     holdings = [h for h in logical.holdings if logical.accounts[h.account_id].currency == primary]
     for h in holdings:
+        if h.vesting_unresolved:
+            logical.warnings.append(
+                f"Account {h.account_id}, {h.symbol}: {h.market_value_cents} cents excluded "
+                "from vested and unvested totals pending vesting review; net worth is provisional"
+            )
+            continue
         if h.vested_quantity is None or h.quantity <= 0:
             vested_cents += h.market_value_cents
             continue

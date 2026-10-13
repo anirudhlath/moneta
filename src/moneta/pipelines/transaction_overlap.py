@@ -229,6 +229,7 @@ def _decisions(
                     item.resolution["is_recurring"],
                     bool(item.resolution.get("discretionary")),
                 )
+                decisions[txn.id]["recurring_merchant"] = txn.merchant
         if txn.id in transfer_choices:
             inflow = transfer_choices[txn.id]
             decisions[txn.id]["transfer"] = endpoint(inflow) if inflow is not None else None
@@ -246,6 +247,16 @@ def _conflicts(
     right: dict[str, object],
     occurrences: set[frozenset[int]],
 ) -> bool:
+    # A recurring decision is keyed by merchant. Moving it to a differently
+    # reviewed merchant would silently change which classification applies.
+    names = {
+        value
+        for decision in (left, right)
+        for key, value in decision.items()
+        if key in ("merchant", "recurring_merchant")
+    }
+    if len(names) > 1:
+        return True
     for key in left.keys() & right.keys():
         a, b = left[key], right[key]
         if isinstance(a, _TransferChoice) and isinstance(b, _TransferChoice):
@@ -254,6 +265,36 @@ def _conflicts(
         elif a != b:
             return True
     return False
+
+
+def human_recurring_keys(items: list[ReviewItem]) -> set[tuple[str, str]]:
+    return {
+        (item.payload["merchant"], item.payload["direction"])
+        for item in items
+        if item.kind == ReviewKind.recurring_cluster
+        and item.status == ReviewStatus.resolved
+        and item.resolution
+        and isinstance(item.resolution.get("is_recurring"), bool)
+        and item.resolution.get("resolved_by") not in ("llm", "reconciliation")
+        and isinstance(item.payload.get("merchant"), str)
+        and isinstance(item.payload.get("direction"), str)
+    }
+
+
+async def reviewed_merchant_occurrences(session: AsyncSession, roots: dict[int, int]) -> set[int]:
+    """Occurrences with a human merchant or merchant-bound recurrence choice."""
+    aliases = list(await session.scalars(select(MerchantAlias)))
+    manual = {a.raw_descriptor for a in aliases if a.source == AliasSource.manual}
+    recurring = human_recurring_keys(list(await session.scalars(select(ReviewItem))))
+    return {
+        roots[t.id]
+        for t in await session.scalars(select(Transaction))
+        if t.id in roots
+        and (
+            t.description in manual
+            or (t.merchant, "outflow" if t.amount_cents < 0 else "inflow") in recurring
+        )
+    }
 
 
 async def reconcile_transactions(session: AsyncSession) -> tuple[int, int]:
@@ -267,6 +308,13 @@ async def reconcile_transactions(session: AsyncSession) -> tuple[int, int]:
     items = list(await session.scalars(select(ReviewItem).order_by(ReviewItem.id)))
     aliases = list(await session.scalars(select(MerchantAlias)))
     links = list(await session.scalars(select(TransferLink)))
+    by_descriptor = {a.raw_descriptor: a for a in aliases}
+    # Survivor classifications are derived from the current group. Reconstitute
+    # each observation's own descriptor classification before matching, so an
+    # unlink/correction cannot leave a formerly borrowed decision behind.
+    for txn in txns:
+        if txn.description in by_descriptor:
+            txn.merchant = by_descriptor[txn.description].merchant
     decisions = _decisions(txns, aliases, items, links)
     rejected: set[frozenset[int]] = set()
     chosen: dict[int, int] = {}
@@ -447,6 +495,33 @@ async def reconcile_transactions(session: AsyncSession) -> tuple[int, int]:
             }
     for txn in txns:
         txn.duplicate_of_id = roots[txn.id] if roots[txn.id] != txn.id else None
+    for survivor_id, members in groups.items():
+        survivor = by_id[survivor_id]
+        names = {
+            value
+            for member in members
+            for key, value in decisions[member].items()
+            if key in ("merchant", "recurring_merchant") and isinstance(value, str)
+        }
+        if len(names) != 1:
+            continue  # An explicit duplicate choice may adjudicate incompatible metadata.
+        merchant = next(iter(names))
+        if survivor.merchant != merchant:
+            if survivor.description not in by_descriptor:
+                # Older/imported tags may predate the alias cache. Keep their own
+                # normalization as derived provenance for a future unlink.
+                alias = MerchantAlias(
+                    raw_descriptor=survivor.description,
+                    merchant=survivor.merchant or rule_normalize(survivor.description),
+                    source=AliasSource.rule,
+                )
+                session.add(alias)
+                by_descriptor[survivor.description] = alias
+            survivor.merchant = merchant
+        for member in sorted(members):
+            if "recurring" in decisions[member] and by_id[member].series_id is not None:
+                survivor.series_id = by_id[member].series_id
+                break
     await session.flush()
     return (
         sum(before[t.id] is None and t.duplicate_of_id is not None for t in txns),

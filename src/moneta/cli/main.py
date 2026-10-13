@@ -682,26 +682,29 @@ def _review_one(item: dict[str, object]) -> dict[str, object] | None:
     if item["kind"] in ("account_overlap", "transaction_overlap"):
         account_kind = item["kind"] == "account_overlap"
         source = ctx.get("account" if account_kind else "transaction")
-        if source:
-            console.print(
-                f"    source: {source['source']} — "
-                f"{source.get('name') or source.get('description')}"
+
+        def detail(observation: dict[str, Any]) -> str:
+            if account_kind:
+                return (
+                    f"{observation['name']} ({observation['source']}, "
+                    f"mask {observation.get('mask') or '?'}, "
+                    f"{observation.get('org_name') or '?'}, "
+                    f"{observation.get('currency') or '?'}, "
+                    f"{observation.get('type') or '?'})"
+                )
+            return (
+                f"{observation['source']}: {fmt_money(observation['amount_cents'])} "
+                f"on {observation['posted_on']} — {observation.get('account') or '?'} — "
+                f"{observation['description']}"
             )
+
+        if source:
+            console.print(f"    source: {escape(detail(source))}")
         if ctx.get("metadata_conflicts"):
             console.print(f"    Conflicting metadata: {', '.join(ctx['metadata_conflicts'])}")
         candidates = ctx.get("candidates") or []
         for n, candidate in enumerate(candidates, 1):
-            if account_kind:
-                detail = (
-                    f"{candidate['name']} ({candidate['source']}, "
-                    f"mask {candidate.get('mask') or '?'})"
-                )
-            else:
-                detail = (
-                    f"{candidate['source']}: {fmt_money(candidate['amount_cents'])} "
-                    f"on {candidate['posted_on']} — {candidate['description']}"
-                )
-            console.print(f"    {n}. {escape(detail)}")
+            console.print(f"    {n}. {escape(detail(candidate))}")
         console.print("    Provider identity decisions preserve every original observation.")
         answer = typer.prompt(
             "Match number (Enter to skip, 0 = none of these)", default="", show_default=False

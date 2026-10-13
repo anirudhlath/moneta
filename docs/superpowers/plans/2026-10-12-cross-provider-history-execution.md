@@ -50,7 +50,7 @@
 - Task 4: complete (commits 25785fd..fae06d5, review clean).
 - Task 5: complete (commits fae06d5..b1d5e63, review clean).
 - Task 6: complete (commits b1d5e63..225c4eb, review clean).
-- Task 7: running — documentation and on-disk rollout regression, followed by final whole-branch review and authorized private/live operations; base `225c4eb`.
+- Task 7: running — documentation/on-disk regression approved; final preservation fix wave active, then scoped re-review and authorized private/live operations.
 
 ## Verification
 
@@ -113,3 +113,15 @@ Task 6 fix 1 implementation: seven meaningful RED failures then GREEN; 162 focus
 Rollout preparation (read-only): live schema `0005`, physical counts, review state and history range recorded in the private rollout notes. Preserve every existing resolved review record. The original checkout's draft documents match commit `4426f46` exactly; no user edits detected.
 
 Task 6: fix round 1/5 (1 addressed, 0 open; commits 7095dba..225c4eb). Scoped reviewer `/root/rereview6_stale` confirmed candidate cleanup, filtered live prompts and per-answer rejection containment; no new Critical/Important breakage. Public interfaces and both task gates now pass.
+
+Task 7 phase A implementation: real frozen `0005` on-disk harness initially GREEN because Tasks 1–6 already supply the required behavior. Independent raw SQL fingerprints, all original reviews/sync audit and default/source API assertions cover migration plus two reconcile/rebuild runs. Documentation, QA, spec and handoff updated coherently; signed-off `d4c8766`. Final full gate: 678 tests passed, clean lint/format/strict typing (85 files), no warnings. Phase A task review pending; whole-branch review and real-data operations remain open.
+
+Task 7 phase A review: `/root/review7_documentation` approved spec compliance and task quality with no findings; checked all docs and Task 6 contract handoff, frozen schema, independent fingerprints and literal logical/source/repeat expectations. No tests rerun. Final whole-branch review now starts over `bea881e..d4c8766`; Task 3's two deferred minors are included for explicit triage.
+
+Final review: `/root/final_branch_review` completed the whole-branch pass with four Important findings (automatic transfer answers override human rejection; alias-only financing/promotion settings disappear; complementary reviewed transaction classifications disappear; conflict-unknown vesting is counted fully vested). All were reproduced on synthetic in-memory data, including two full syncs for transfer oscillation. Three Minors: both deferred Task 3 stale question/conflict-label issues and incomplete source-side CLI overlap context. No Critical finding; one combined fix wave covers all seven before private/live operations.
+
+Final Ruling: preserve a sole explicit alias financing/promotion decision when a group root has uninformed defaults, overriding the literal root-only projection instruction where necessary — the spec's preservation of user decisions is binding — if wrong, the linked account's effective obligation or promotion metadata may need alignment and re-review.
+
+Final review declined-to-judge mapping: real backup/enrichment/private/live/report operations remain mandatory Task 7 phase B after this gate. Ordinary never-annotated holdings and missing loan/margin/interest inference are explicit non-goals; reports retain their limitations. A separate public undo-one-automatic-transaction command is outside the approved surface; the fix wave must keep guide language precise about existing review and account unlink controls.
+
+Final fix wave: `/root/final_preservation_fixes` owns all R1–R4 and M1–M3 in one combined pass, base `d4c8766`; synthetic failing regressions before product fixes, one final full gate and one scoped re-review. Real-data operations remain untouched.

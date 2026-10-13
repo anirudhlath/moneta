@@ -19,7 +19,11 @@ from moneta.models import (
     TransferLink,
 )
 from moneta.pipelines.account_overlap import propose_account_links
-from moneta.pipelines.transaction_overlap import reconcile_transactions
+from moneta.pipelines.transaction_overlap import (
+    human_recurring_keys,
+    reconcile_transactions,
+    reviewed_merchant_occurrences,
+)
 from moneta.pipelines.transfers import effective_transfer_choices
 
 
@@ -94,6 +98,7 @@ async def _retire_questions(
     suppressed = [t for t in txns if t.id not in survivors]
     raw_descriptors = {t.description for t in suppressed}
     live_descriptors = {t.description for t in survivors.values()}
+    reviewed_merchants = await reviewed_merchant_occurrences(session, logical.transaction_roots)
 
     def key(txn: Transaction) -> tuple[str | None, str]:
         return txn.merchant, "outflow" if txn.amount_cents < 0 else "inflow"
@@ -112,14 +117,30 @@ async def _retire_questions(
     items = list(
         await session.scalars(select(ReviewItem).where(ReviewItem.status == ReviewStatus.open))
     )
+    choices, _ = effective_transfer_choices(
+        list(await session.scalars(select(ReviewItem))), logical.transaction_roots
+    )
+    recurring_choices = human_recurring_keys(list(await session.scalars(select(ReviewItem))))
     for item in items:
         if item.kind == ReviewKind.merchant:
             descriptor = item.payload.get("descriptor")
-            if descriptor in raw_descriptors and descriptor not in live_descriptors:
+            if any(
+                t.description == descriptor
+                and logical.transaction_roots[t.id] in reviewed_merchants
+                for t in txns
+            ):
+                _supersede(
+                    item,
+                    "Occurrence already has a human merchant or recurring classification",
+                    today,
+                )
+            elif descriptor in raw_descriptors and descriptor not in live_descriptors:
                 _supersede(item, "Descriptor is supported only by suppressed observations", today)
         elif item.kind == ReviewKind.recurring_cluster:
             series_key = (item.payload.get("merchant"), item.payload.get("direction"))
-            if series_key in raw_keys and series_key not in live_keys:
+            if series_key in recurring_choices:
+                _supersede(item, "Recurring cluster already has a human decision", today)
+            elif series_key in raw_keys and series_key not in live_keys:
                 _supersede(
                     item, "Recurring cluster is supported only by suppressed observations", today
                 )
@@ -129,6 +150,11 @@ async def _retire_questions(
         elif item.kind == ReviewKind.transfer_pair:
             old_out = item.payload.get("outflow_id")
             out_id = logical.transaction_roots.get(old_out) if type(old_out) is int else None
+            if out_id in choices and choices[out_id].method == LinkMethod.manual:
+                _supersede(
+                    item, "Occurrence already has an effective human transfer decision", today
+                )
+                continue
             out = survivors.get(out_id) if out_id is not None else None
             candidates: set[int] = set()
             for candidate in item.payload.get("candidates", []):

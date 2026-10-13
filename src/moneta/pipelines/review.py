@@ -33,7 +33,12 @@ from moneta.models import (
 )
 from moneta.pipelines.account_overlap import set_account_link
 from moneta.pipelines.events import apply_price_change
-from moneta.pipelines.transaction_overlap import set_transaction_duplicate
+from moneta.pipelines.transaction_overlap import (
+    human_recurring_keys,
+    reviewed_merchant_occurrences,
+    set_transaction_duplicate,
+)
+from moneta.pipelines.transfers import effective_transfer_choices
 from moneta.queries import foreign_series_ids, price_review_matches_currency, primary_currency
 
 _MERCHANT_PROMPT = """You are auto-resolving a personal-finance review question.
@@ -256,6 +261,10 @@ async def apply_resolution(
     resolved_by: str = "manual",
 ) -> None:
     """Apply a resolution's effects and mark the item resolved. Caller commits."""
+    if item.kind == ReviewKind.recurring_cluster and resolved_by != "manual":
+        protected_keys = human_recurring_keys(list(await session.scalars(select(ReviewItem))))
+        if (item.payload.get("merchant"), item.payload.get("direction")) in protected_keys:
+            raise ValueError("Automatic recurring resolution cannot override a human decision")
     if item.kind in (ReviewKind.account_overlap, ReviewKind.transaction_overlap):
         key = (
             "canonical_account_id" if item.kind == ReviewKind.account_overlap else "duplicate_of_id"
@@ -280,6 +289,18 @@ async def apply_resolution(
     elif item.kind == ReviewKind.merchant and isinstance(resolution.get("merchant"), str):
         merchant = resolution["merchant"]
         raw = item.payload["descriptor"]
+        if resolved_by != "manual":
+            logical = await load_logical_data(session)
+            protected = await reviewed_merchant_occurrences(session, logical.transaction_roots)
+            if any(
+                logical.transaction_roots[t.id] in protected
+                for t in await session.scalars(
+                    select(Transaction).where(Transaction.description == raw)
+                )
+            ):
+                raise ValueError(
+                    "Automatic merchant resolution cannot override a human classification"
+                )
         source = AliasSource.llm if resolved_by == "llm" else AliasSource.manual
         alias = (
             await session.execute(select(MerchantAlias).where(MerchantAlias.raw_descriptor == raw))
@@ -308,6 +329,20 @@ async def apply_resolution(
             raise ValueError("resolution.inflow_id must be a candidate integer ID or null")
         out_id = logical.transaction_roots[raw_out]
         in_id = logical.transaction_roots[target] if target is not None else None
+        history = list(await session.scalars(select(ReviewItem)))
+        choices, conflicts = effective_transfer_choices(history, logical.transaction_roots)
+        manual_links = {
+            logical.transaction_roots.get(link.outflow_id)
+            for link in await session.scalars(
+                select(TransferLink).where(TransferLink.method == LinkMethod.manual)
+            )
+        }
+        if resolved_by != "manual" and (
+            out_id in conflicts
+            or out_id in manual_links
+            or (out_id in choices and choices[out_id].method == LinkMethod.manual)
+        ):
+            raise ValueError("Automatic transfer resolution cannot override a human decision")
         if in_id is not None:
             by_id = {t.id: t for t in logical.transactions}
             out, inn = by_id[out_id], by_id[in_id]
@@ -324,6 +359,24 @@ async def apply_resolution(
                     "Transfer requires distinct accounts, one currency, opposite cents "
                     "and dates within six days"
                 )
+        if resolved_by == "manual":
+            # Explicit new adjudication supersedes the occurrence's prior answers,
+            # including answers saved against a different provider observation.
+            prior_ids = [
+                old.id
+                for old in history
+                if old is not item
+                and old.kind == ReviewKind.transfer_pair
+                and old.status == ReviewStatus.resolved
+                and old.resolution
+                and "inflow_id" in old.resolution
+                and logical.transaction_roots.get(old.payload.get("outflow_id", -1)) == out_id
+            ]
+            if prior_ids:
+                item.payload = {
+                    **item.payload,
+                    "transfer_review_ids": sorted(set(prior_ids)),
+                }
         for link in await session.scalars(select(TransferLink)):
             if logical.transaction_roots.get(link.outflow_id) == out_id:
                 await session.delete(link)
@@ -380,6 +433,8 @@ async def apply_resolution(
         acct = await session.get(Account, logical.account_roots.get(account_id, account_id))
         if acct is not None:
             acct.financing_mode = resolution["financing"]
+            if acct.id != account_id:
+                item.payload = {**item.payload, "effective_account_id": acct.id}
     item.status = ReviewStatus.resolved
     item.resolution = {**resolution, "resolved_by": resolved_by}
 
@@ -422,6 +477,40 @@ async def autoreview_items(session: AsyncSession, llm: Classifier) -> int:
     for item in items:
         if item.payload.get("llm_flagged"):
             continue  # opened because the LLM already looked — human-only
+        if item.kind == ReviewKind.recurring_cluster:
+            protected_keys = human_recurring_keys(list(await session.scalars(select(ReviewItem))))
+            if (item.payload.get("merchant"), item.payload.get("direction")) in protected_keys:
+                item.status = ReviewStatus.resolved
+                item.resolution = {
+                    "resolved_by": "reconciliation",
+                    "superseded_reason": "Recurring cluster already has a human decision",
+                }
+                continue
+        if item.kind == ReviewKind.transfer_pair:
+            logical = await load_logical_data(session)
+            choices, conflicts = effective_transfer_choices(
+                list(await session.scalars(select(ReviewItem))), logical.transaction_roots
+            )
+            out_id = logical.transaction_roots.get(item.payload.get("outflow_id", -1))
+            manual_links = {
+                logical.transaction_roots.get(link.outflow_id)
+                for link in await session.scalars(
+                    select(TransferLink).where(TransferLink.method == LinkMethod.manual)
+                )
+            }
+            if out_id in manual_links or (
+                out_id in choices and choices[out_id].method == LinkMethod.manual
+            ):
+                item.status = ReviewStatus.resolved
+                item.resolution = {
+                    "resolved_by": "reconciliation",
+                    "superseded_reason": (
+                        "Occurrence already has an effective human transfer decision"
+                    ),
+                }
+                continue
+            if out_id in conflicts:
+                continue
         context = await review_context(session, item)
         if item.kind == ReviewKind.merchant:
             prompt = _MERCHANT_PROMPT.format(

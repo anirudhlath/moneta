@@ -8,7 +8,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from moneta.api import create_app
-from moneta.models import ReviewItem, ReviewKind, ReviewStatus, SyncRun, Transaction, TransferLink
+from moneta.models import (
+    AccountType,
+    ReviewItem,
+    ReviewKind,
+    ReviewStatus,
+    SyncRun,
+    Transaction,
+    TransferLink,
+)
 from moneta.pipelines.transfers import effective_transfer_choices
 from tests.conftest import RecordingAdapter
 from tests.factories import make_account, make_price_change_item, make_series, make_txn
@@ -23,6 +31,79 @@ async def client(
         base_url="http://test",
     ) as client:
         yield client
+
+
+@pytest.mark.parametrize("via_alias", [False, True])
+async def test_explicit_root_metadata_clear_never_resurrects_alias_defaults(
+    client: httpx.AsyncClient, session: AsyncSession, via_alias: bool
+) -> None:
+    from moneta.logical import load_logical_data
+    from moneta.pipelines.reconcile import rebuild_logical_derived, reconcile_provider_overlap
+
+    root = await make_account(session, source="plaid", type=AccountType.credit)
+    alias = await make_account(
+        session,
+        source="simplefin",
+        canonical_account_id=root.id,
+        financing_mode=True,
+        promo_expires_on=date(2027, 1, 1),
+    )
+    await session.commit()
+    logical = await load_logical_data(session)
+    assert logical.accounts[root.id].financing_mode is True
+    assert logical.accounts[root.id].promo_expires_on == date(2027, 1, 1)
+    response = await client.patch(
+        f"/accounts/{alias.id if via_alias else root.id}",
+        json={"financing_mode": False, "promo_expires_on": None},
+    )
+    assert response.status_code == 200
+    await session.refresh(root)
+    for _ in range(2):
+        await reconcile_provider_overlap(session, date(2026, 7, 15))
+        await rebuild_logical_derived(session, None, date(2026, 7, 15))
+        account = (await load_logical_data(session)).accounts[root.id]
+        assert account.financing_mode is False
+        assert account.promo_expires_on is None
+        assert alias.financing_mode is True and alias.promo_expires_on == date(2027, 1, 1)
+
+
+async def test_promotion_only_patch_does_not_answer_financing_question(
+    client: httpx.AsyncClient, session: AsyncSession
+) -> None:
+    from moneta.pipelines.financing import detect_financing
+
+    root = await make_account(session, type=AccountType.credit, balance_cents=-10000)
+    for month in (6, 7):
+        await make_txn(session, root, posted_on=date(2026, month, 1), amount_cents=1000)
+    await session.commit()
+    assert (
+        await client.patch(f"/accounts/{root.id}", json={"promo_expires_on": None})
+    ).status_code == 200
+    assert await detect_financing(session) == 1
+    assert await detect_financing(session) == 0
+
+
+async def test_explicit_null_promotion_conflicts_with_new_source_saved_date(
+    client: httpx.AsyncClient, session: AsyncSession
+) -> None:
+    root = await make_account(
+        session, source="plaid", name="Credit", type=AccountType.credit, mask="1234"
+    )
+    alias = await make_account(
+        session,
+        source="simplefin",
+        name="Credit",
+        type=AccountType.credit,
+        mask="1234",
+        promo_expires_on=date(2027, 1, 1),
+    )
+    await session.commit()
+    assert (
+        await client.patch(f"/accounts/{root.id}", json={"promo_expires_on": None})
+    ).status_code == 200
+    result = await client.post(f"/accounts/{alias.id}/link", json={"canonical_account_id": root.id})
+    assert result.status_code == 422
+    assert "promo_expires_on" in result.json()["detail"]
 
 
 async def test_logical_accounts_status_and_source_transactions(

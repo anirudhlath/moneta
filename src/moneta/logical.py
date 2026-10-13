@@ -6,7 +6,8 @@ from datetime import date
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.models import Account, AccountType, Holding, Transaction
+from moneta.account_metadata import account_decisions, effective_account_metadata
+from moneta.models import Account, AccountType, Holding, ReviewItem, Transaction
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class LogicalHolding:
     market_value_cents: int
     vested_quantity: float | None
     unvested_quantity: float | None
+    vesting_unresolved: bool
 
 
 @dataclass(frozen=True)
@@ -113,6 +115,7 @@ async def load_logical_data(session: AsyncSession) -> LogicalData:
         accounts = list(await session.scalars(select(Account).order_by(Account.id)))
         transactions = list(await session.scalars(select(Transaction).order_by(Transaction.id)))
         holdings = list(await session.scalars(select(Holding).order_by(Holding.id)))
+        decisions = account_decisions(list(await session.scalars(select(ReviewItem))))
 
     account_roots = resolve_account_roots(accounts)
     physical_accounts = {account.id: account for account in accounts}
@@ -126,6 +129,7 @@ async def load_logical_data(session: AsyncSession) -> LogicalData:
         if any(account.currency != root.currency for account in group):
             raise ValueError(f"Conflicting currency in logical account {root_id}")
         latest = min(group, key=lambda account: _observation_order(account, root_id))
+        financing, promotion = effective_account_metadata(root, group, decisions)
         logical_accounts[root_id] = LogicalAccount(
             id=root.id,
             aggregator_id=root.aggregator_id,
@@ -135,8 +139,8 @@ async def load_logical_data(session: AsyncSession) -> LogicalData:
             currency=root.currency,
             balance_cents=latest.balance_cents,
             balance_date=latest.balance_date,
-            promo_expires_on=root.promo_expires_on,
-            financing_mode=root.financing_mode,
+            promo_expires_on=promotion,
+            financing_mode=financing,
             source=root.source,
             mask=root.mask,
             balance_account_id=latest.id,
@@ -171,10 +175,11 @@ async def load_logical_data(session: AsyncSession) -> LogicalData:
         ).append(holding)
 
     warnings: list[str] = []
-    effective_vesting: dict[tuple[int, str], tuple[float | None, float | None]] = {}
+    effective_vesting: dict[tuple[int, str], tuple[float | None, float | None, bool]] = {}
     for (root_id, symbol), observations in sorted(holdings_by_symbol.items()):
         vested, unvested, conflicting = _effective_vesting(observations, root_id)
-        effective_vesting[root_id, symbol] = vested, unvested
+        unresolved = conflicting and vested is None and unvested is None
+        effective_vesting[root_id, symbol] = vested, unvested, unresolved
         if conflicting:
             warnings.append(
                 f"Conflicting vesting annotations for account {root_id}, {symbol}; requires review"
@@ -189,7 +194,7 @@ async def load_logical_data(session: AsyncSession) -> LogicalData:
         for holding in sorted(
             holdings_by_account[selected.id], key=lambda row: (row.symbol, row.id)
         ):
-            vested, unvested = effective_vesting[root_id, holding.symbol]
+            vested, unvested, unresolved = effective_vesting[root_id, holding.symbol]
             logical_holdings.append(
                 LogicalHolding(
                     id=holding.id,
@@ -200,6 +205,7 @@ async def load_logical_data(session: AsyncSession) -> LogicalData:
                     market_value_cents=holding.market_value_cents,
                     vested_quantity=vested,
                     unvested_quantity=unvested,
+                    vesting_unresolved=unresolved,
                 )
             )
 

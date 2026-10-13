@@ -43,10 +43,13 @@ Existing apps (Origin, Copilot) fail in four specific ways that moneta is built 
   Stale series auto-end; a genuinely new charge at cadence revives them.
 - **Transfer dedup** — candidate pairs scored on amount, date proximity, and
   account direction; high-confidence pairs auto-link, ambiguous ones escalate.
+  Human decisions remain effective across provider aliases and later automatic review.
 - **RSU-vesting-aware net worth** — liquid + *vested* holdings − liabilities;
   unvested reported separately, never summed in. Vesting quantities import via CSV
   (`symbol,vested_quantity,unvested_quantity`; a direct Fidelity NetBenefits
   export mapping is tracked in `docs/backlog/high/`).
+  Conflicting alias annotations without a root annotation exclude that holding's
+  value from totals with a provisional-coverage warning until reviewed.
 - **Financing obligations** — derived, not entered: any loan or financing-mode
   account's monthly payment is derived per-account from its transfer-linked
   payments (not merchant-string grouping, so shared bank descriptors across

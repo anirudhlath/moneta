@@ -28,6 +28,10 @@ async def detect_financing(session: AsyncSession) -> int:
         )
     ).scalars()
     for item in items:
+        if item.payload.get("metadata_only") and not isinstance(
+            (item.resolution or {}).get("financing"), bool
+        ):
+            continue
         account_id = item.payload.get("account_id")
         if isinstance(account_id, int):
             asked.add(logical.account_roots.get(account_id, account_id))

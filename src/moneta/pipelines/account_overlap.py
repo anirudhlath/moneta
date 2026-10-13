@@ -10,6 +10,7 @@ from itertools import combinations, product
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from moneta.account_metadata import AccountDecisions, account_decisions
 from moneta.identity import normalize_institution
 from moneta.logical import resolve_account_roots
 from moneta.models import Account, AccountType, ReviewItem, ReviewKind, ReviewStatus
@@ -62,33 +63,27 @@ async def _history(session: AsyncSession) -> list[ReviewItem]:
     )
 
 
-async def _financing_decisions(session: AsyncSession) -> dict[int, bool]:
-    """Recover explicit negatives, which otherwise look like the default False."""
-    decisions: dict[int, bool] = {}
-    items = await session.scalars(
-        select(ReviewItem)
-        .where(
-            ReviewItem.kind == ReviewKind.financing_account,
-            ReviewItem.status == ReviewStatus.resolved,
-        )
-        .order_by(ReviewItem.id)
-    )
-    for item in items:
-        account_id = item.payload.get("account_id")
-        financing = (item.resolution or {}).get("financing")
-        if type(account_id) is int and isinstance(financing, bool):
-            decisions[account_id] = financing
-    return decisions
-
-
-def _metadata_conflicts(accounts: list[Account], financing: dict[int, bool]) -> list[str]:
+def _metadata_conflicts(accounts: list[Account], decisions: AccountDecisions) -> list[str]:
     """Compare saved values across every member, without treating defaults as decisions."""
     conflicts: list[str] = []
     if len({a.type for a in accounts if a.type != AccountType.unknown}) > 1:
         conflicts.append("type")
-    if len({a.promo_expires_on for a in accounts if a.promo_expires_on is not None}) > 1:
+    if (
+        len(
+            {
+                decisions.promotion.get(a.id, a.promo_expires_on)
+                for a in accounts
+                if a.promo_expires_on is not None or a.id in decisions.promotion
+            }
+        )
+        > 1
+    ):
         conflicts.append("promo_expires_on")
-    modes = {a.financing_mode for a in accounts if a.financing_mode or financing.get(a.id) is False}
+    modes = {
+        decisions.financing.get(a.id, a.financing_mode)
+        for a in accounts
+        if a.financing_mode or a.id in decisions.financing
+    }
     if len(modes) > 1:
         conflicts.append("financing_mode")
     return conflicts
@@ -143,7 +138,9 @@ async def set_account_link(
     affected_accounts = [
         account for account in accounts if proposed_roots[account.id] == affected_root
     ]
-    conflicts = _metadata_conflicts(affected_accounts, await _financing_decisions(session))
+    conflicts = _metadata_conflicts(
+        affected_accounts, account_decisions(list(await session.scalars(select(ReviewItem))))
+    )
     if conflicts:
         raise ValueError(f"Cannot group accounts with conflicting metadata: {', '.join(conflicts)}")
 
@@ -201,7 +198,7 @@ async def propose_account_links(session: AsyncSession) -> int:
     for account in accounts:
         groups.setdefault(roots[account.id], []).append(account)
     history = await _history(session)
-    financing = await _financing_decisions(session)
+    decisions = account_decisions(list(await session.scalars(select(ReviewItem))))
     protected: set[int] = set()
     open_items: dict[int, ReviewItem] = {}
     for item in history:
@@ -218,7 +215,7 @@ async def propose_account_links(session: AsyncSession) -> int:
             protected.add(roots[account_id])
 
     candidates: dict[int, set[int]] = {root: set() for root in groups}
-    metadata_conflicts: dict[int, set[str]] = {root: set() for root in groups}
+    metadata_conflicts: dict[frozenset[int], list[str]] = {}
     strong: set[tuple[int, int]] = set()
     for left_id, right_id in combinations(groups, 2):
         left, right = groups[left_id], groups[right_id]
@@ -227,9 +224,8 @@ async def propose_account_links(session: AsyncSession) -> int:
             continue
         candidates[left_id].add(right_id)
         candidates[right_id].add(left_id)
-        conflicts = _metadata_conflicts(left + right, financing)
-        metadata_conflicts[left_id].update(conflicts)
-        metadata_conflicts[right_id].update(conflicts)
+        conflicts = _metadata_conflicts(left + right, decisions)
+        metadata_conflicts[frozenset((left_id, right_id))] = conflicts
         sources = [account.source for account in left + right]
         if (
             not conflicts
@@ -290,10 +286,23 @@ async def propose_account_links(session: AsyncSession) -> int:
     for account_id, alternatives in candidates.items():
         alternatives = alternatives - protected
         if not alternatives or account_id in linked or account_id in protected:
+            if account_id in open_items and open_items[account_id].status == ReviewStatus.open:
+                open_items[account_id].status = ReviewStatus.resolved
+                open_items[account_id].resolution = {
+                    "resolved_by": "reconciliation",
+                    "superseded_reason": (
+                        "Identity candidates vanished or are protected by a manual decision"
+                    ),
+                }
             continue
         payload = {"account_id": account_id, "candidates": sorted(alternatives)}
-        if metadata_conflicts[account_id]:
-            payload["metadata_conflicts"] = sorted(metadata_conflicts[account_id])
+        retained_conflicts = {
+            field
+            for candidate in alternatives
+            for field in metadata_conflicts[frozenset((account_id, candidate))]
+        }
+        if retained_conflicts:
+            payload["metadata_conflicts"] = sorted(retained_conflicts)
         if account_id in open_items:
             open_items[account_id].payload = payload
         else:

@@ -494,6 +494,10 @@ in the Type column.
 
 Metadata writes using a source alias ID update its logical root. Explicit financing
 choices, including `false`, are recorded and settle related open financing questions.
+An unconfigured root inherits a sole saved financing/promotion choice from its aliases;
+an explicit root choice takes precedence. Clearing financing with `false`, or clearing
+the promotion through an account PATCH with `{"promo_expires_on": null}`, remains
+effective on subsequent syncs. A promotion-only edit does not answer financing questions.
 Link/unlink cannot be combined with each other or metadata writes; `--link-source`
 and `--to` must appear together. Invalid IDs, types, financing values, dates, and
 conflicting flags fail before any request. Linking rejects cycles, incompatible
@@ -580,7 +584,11 @@ moneta import vesting shares.csv
 Re-import whenever a vest happens.
 Combined-provider holdings preserve these annotations and count one holdings set.
 Conflicting vesting annotations are warned about rather than silently discarded;
-inspect the sources and correct the imported vesting before trusting the total.
+root annotations remain authoritative. When aliases conflict and the root has no
+annotation, the holding's value is excluded from both vested and unvested totals,
+with a warning giving the excluded integer cents; net worth is provisional until
+review. Ordinary holdings with no annotations keep their existing treatment.
+Inspect the sources and correct imported vesting before trusting the total.
 
 ## Server mode & remote access
 
@@ -620,7 +628,7 @@ Provider history and identity endpoints use the same signed-cents convention:
 
 | Request | Contract |
 |---|---|
-| `GET /accounts` | One row per logical root, root metadata, selected latest balance |
+| `GET /accounts` | One row per logical root, effective metadata (root choices take precedence), selected latest balance |
 | `GET /accounts?sources=true` | Original account rows plus `source`, nullable `mask`, and saved nullable `canonical_account_id`; a root stores `null`, an alias stores its target ID |
 | `GET /transactions?sources=true` | Existing envelope and filters, including suppressed observations with `excluded_because="provider_duplicate"`; totals count survivors |
 | `POST /accounts/{id}/link` | Body `{"canonical_account_id": ROOT_ID}`; returns `{"ok":true}` after reconciliation and rebuilding |
@@ -692,7 +700,7 @@ Files in the config dir (all owner-only, dir is 0700):
 | A bank's history is missing | `moneta sync --full` re-pulls everything the institution retains for every configured source (needed after adding a new source, or after an outage longer than the 7-day overlap). |
 | Account has the wrong type | `moneta accounts --set-type <ID> <TYPE>` — sticks across syncs. |
 | A shared bank appears twice | Inspect `moneta accounts --sources` and account overlap questions in `moneta review`; confirm identity only with corroborating evidence, then link or reconcile. |
-| A provider match is wrong | Reverse an account link with `moneta accounts --unlink-source <ID>` or choose none in the transaction overlap review; source observations remain available. |
+| A provider match is wrong | Reverse an account link with `moneta accounts --unlink-source <ID>` to restore its observations. For an uncertain match with an open transaction overlap question, choose none in that review. Automatic matches do not necessarily have open questions; there is no separate public transaction-unlink endpoint. |
 | Reconciliation did not make data fresh | It only rebuilds stored data; run `moneta sync` and inspect source warnings for new observations. |
 | Merchant names look wrong | Answer the merchant questions in `moneta review`; after rule improvements, `moneta renormalize` re-applies naming to all history. |
 | A subscription shows as active but is cancelled | `moneta recurring --end <ID>`. |

@@ -580,6 +580,20 @@ def create_app(
             acct.type = body.type
         if "promo_expires_on" in body.model_fields_set:
             acct.promo_expires_on = body.promo_expires_on
+            session.add(
+                ReviewItem(
+                    kind=ReviewKind.financing_account,
+                    question="Explicit promotion metadata decision",
+                    payload={"account_id": acct.id, "metadata_only": True},
+                    status=ReviewStatus.resolved,
+                    resolution={
+                        "promo_expires_on": (
+                            body.promo_expires_on.isoformat() if body.promo_expires_on else None
+                        ),
+                        "resolved_by": "manual",
+                    },
+                )
+            )
         if "financing_mode" in body.model_fields_set and body.financing_mode is not None:
             resolution = {"financing": body.financing_mode}
             for item in await session.scalars(
