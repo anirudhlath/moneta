@@ -793,3 +793,139 @@ async def test_currency_switch_never_rewinds_series_event_cursor(session: AsyncS
     await session.commit()
     await detect_recurring(session, None, TODAY)
     assert series.next_expected_on == date(2026, 9, 1)
+
+
+@pytest.mark.parametrize("alias_source", ["plaid", "simplefin"])
+async def test_transfer_adjudication_does_not_resurrect_superseded_answers(
+    session: AsyncSession, alias_source: str
+) -> None:
+    from moneta.pipelines.reconcile import rebuild_logical_derived
+    from moneta.pipelines.review import apply_resolution
+    from moneta.pipelines.transaction_overlap import set_transaction_duplicate
+    from moneta.pipelines.transfers import effective_transfer_choices
+
+    root = await make_account(session, source="simplefin" if alias_source == "plaid" else "plaid")
+    alias = await make_account(session, source=alias_source, canonical_account_id=root.id)
+    target = await make_account(session, source=root.source)
+    out = await make_txn(session, root, amount_cents=-1000, description="Payment Store")
+    copy = await make_txn(session, alias, amount_cents=-1000, description="Payment Store")
+    inn = await make_txn(session, target, amount_cents=1000, description="Payment Store")
+    history: list[ReviewItem] = []
+    for txn, choice, resolved_by in [
+        (out, inn.id, "manual"),
+        (out, None, "manual"),
+        (copy, None, "manual"),
+        (copy, inn.id, "manual"),
+        (out, inn.id, "llm"),
+        (copy, None, "llm"),
+    ]:
+        item = ReviewItem(
+            kind=ReviewKind.transfer_pair,
+            question="prior answer",
+            payload={"outflow_id": txn.id, "candidates": [inn.id]},
+            status=ReviewStatus.resolved,
+            resolution={"inflow_id": choice, "resolved_by": resolved_by},
+        )
+        session.add(item)
+        history.append(item)
+    await session.flush()
+    await set_transaction_duplicate(session, copy.id, out.id)
+    await session.commit()
+    original = [(item.payload.copy(), dict(item.resolution or {})) for item in history]
+    observations = [
+        (txn.id, txn.account_id, txn.amount_cents, txn.posted_on, txn.description, txn.raw.copy())
+        for txn in [out, copy, inn]
+    ]
+    await reconcile_provider_overlap(session, TODAY)
+    await rebuild_logical_derived(session, None, TODAY)
+    question = (
+        await session.scalars(
+            select(ReviewItem).where(
+                ReviewItem.kind == ReviewKind.transfer_pair, ReviewItem.status == ReviewStatus.open
+            )
+        )
+    ).one()
+    assert question.payload["transfer_review_ids"] == [history[1].id, history[3].id]
+    await apply_resolution(session, question, {"inflow_id": inn.id})
+    await session.commit()
+    # Even answers newer than adjudication cannot upgrade LLM authority to human.
+    for txn in [out, copy]:
+        session.add(
+            ReviewItem(
+                kind=ReviewKind.transfer_pair,
+                question="later machine answer",
+                payload={"outflow_id": txn.id, "candidates": [inn.id]},
+                status=ReviewStatus.resolved,
+                resolution={"inflow_id": None, "resolved_by": "llm"},
+            )
+        )
+    await session.commit()
+
+    for _ in range(3):
+        await reconcile_provider_overlap(session, TODAY)
+        await rebuild_logical_derived(session, None, TODAY)
+        links = list(await session.scalars(select(TransferLink)))
+        assert [
+            (link.outflow_id, link.inflow_id, link.method, link.confidence) for link in links
+        ] == [(out.id, inn.id, "manual", 1.0)]
+        assert (
+            list(
+                await session.scalars(
+                    select(ReviewItem).where(
+                        ReviewItem.kind == ReviewKind.transfer_pair,
+                        ReviewItem.status == ReviewStatus.open,
+                    )
+                )
+            )
+            == []
+        )
+    logical = await load_logical_data(session)
+    decisions, conflicts = effective_transfer_choices(
+        list(reversed(list(await session.scalars(select(ReviewItem))))), logical.transaction_roots
+    )
+    assert conflicts == {}
+    assert (decisions[out.id].inflow_id, decisions[out.id].method) == (inn.id, "manual")
+
+    # A genuinely new human answer on the alias is not covered by adjudication.
+    newer = ReviewItem(
+        kind=ReviewKind.transfer_pair,
+        question="new human answer",
+        payload={"outflow_id": copy.id, "candidates": [inn.id]},
+        status=ReviewStatus.resolved,
+        resolution={"inflow_id": None, "resolved_by": "manual"},
+    )
+    session.add(newer)
+    await session.commit()
+    await reconcile_provider_overlap(session, TODAY)
+    await rebuild_logical_derived(session, None, TODAY)
+    assert list(await session.scalars(select(TransferLink))) == []
+    new_question = (
+        await session.scalars(
+            select(ReviewItem).where(
+                ReviewItem.kind == ReviewKind.transfer_pair, ReviewItem.status == ReviewStatus.open
+            )
+        )
+    ).one()
+    assert new_question.payload["transfer_review_ids"] == [question.id, newer.id]
+    await apply_resolution(session, new_question, {"inflow_id": None})
+    await session.commit()
+    for _ in range(2):
+        await reconcile_provider_overlap(session, TODAY)
+        await rebuild_logical_derived(session, None, TODAY)
+        assert list(await session.scalars(select(TransferLink))) == []
+        assert (
+            list(
+                await session.scalars(
+                    select(ReviewItem).where(
+                        ReviewItem.kind == ReviewKind.transfer_pair,
+                        ReviewItem.status == ReviewStatus.open,
+                    )
+                )
+            )
+            == []
+        )
+    assert [(item.payload, item.resolution) for item in history] == original
+    assert [
+        (txn.id, txn.account_id, txn.amount_cents, txn.posted_on, txn.description, txn.raw)
+        for txn in [out, copy, inn]
+    ] == observations

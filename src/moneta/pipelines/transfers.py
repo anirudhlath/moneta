@@ -113,12 +113,15 @@ def effective_transfer_choices(
 
     for item in valid:
         row = item.payload["outflow_id"]
-        if row not in roots or item.id in superseded:
+        if row not in roots:
             continue
         if row not in latest or priority(item) > priority(latest[row]):
             latest[row] = item
     groups: dict[int, list[ReviewItem]] = {}
     for row, item in latest.items():
+        # Adjudicate effective answers, never expose the history they replaced.
+        if item.id in superseded:
+            continue
         groups.setdefault(roots[row], []).append(item)
     selected: dict[int, EffectiveTransferChoice] = {}
     conflicts: dict[int, list[ReviewItem]] = {}

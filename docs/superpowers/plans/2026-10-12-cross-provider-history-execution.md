@@ -48,7 +48,7 @@
 - Task 2: complete (commits 3ba8128..dfe37e5, review clean).
 - Task 3: complete (commits dfe37e5..25785fd, review clean; two deferred minors).
 - Task 4: complete (commits 25785fd..fae06d5, review clean).
-- Task 5: fix round 1 running — base `b0e41ee`, original implementer `/root/task5_integration` resumed for two Important integration findings.
+- Task 5: fix round 2 running — base `03cd10d`, original implementer `/root/task5_integration` resumed for adjudication-history regression.
 - Task 6: pending — API, CLI and review operations.
 - Task 7: pending — documentation, whole-branch review and local rollout.
 
@@ -93,3 +93,9 @@ Task 5 diagnostic: confirmed that corrected alias currency can supply the select
 Task 5 implementation: initial RED 8 failures/78 passes; subsequent integration and manual transfer-priority regressions observed RED before their changes. Final focused GREEN 194 passed; full suite 598 passed with pristine output, lint/format check/strict mypy passed (82 files). Shared accounting, recurrence/events/review/financing consumers now use logical data; source fetch/ingest/normalization and physical _sync_since unchanged. Rebuild is network-free with classifier None and writes no sync freshness. Controller recovered the truncated report's full gate/sign-off evidence before dispatching review.
 
 Task 5 review: `/root/review5_integration` reported spec noncompliance and quality needs fixes. Important: alias-to-survivor dictionary overwrites can replace human transfer rejection with LLM acceptance and misattribute method; a logical currency vote flip can mix old-currency series cents into new-currency power totals. Both are under a combined regression/fix wave. Public controls/rollout checks remain mapped to Tasks 6–7.
+
+Task 5 fix 1 implementation: 10 transfer/currency RED regressions plus stale legacy/modern price-request and forward-only cursor regressions observed before changes. Final focused GREEN 198 passed; full suite 614 passed with pristine output, lint/format check/strict mypy passed (82 files). Survivor-level choice reduction preserves human precedence/provenance and opens human-only equal-strength conflicts. Foreign series retain state while monetary consumers filter eligibility; price proposals now carry currency/transaction evidence and reject stale denomination. Raw observations and original resolved review records remain unchanged.
+
+Task 6 required handoffs: record future explicit financing PATCH choices through existing review history and settle related open questions; catch apply_resolution's stale-currency ValueError as a client validation response. Shared effective_transfer_choices now returns survivor-level choices/provenance/conflicts; human conflict review payload includes transfer_review_ids and resolutions adjudicate them without changing old records.
+
+Task 5: fix round 1/5 (2 addressed, 1 open; commits b0e41ee..03cd10d). Scoped review `/root/rereview5_currency` verified original fixes but found Important new breakage: removing named adjudicated rows before latest-per-observation selection resurrects older superseded answers and removes the accepted link. Original implementer resumed with a multiple-answer regression and repeated-rebuild check.
