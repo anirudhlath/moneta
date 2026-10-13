@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from moneta.logical import load_logical_data
 from moneta.models import Holding
 
 _EXPECTED = ["symbol", "vested_quantity", "unvested_quantity"]
@@ -37,6 +38,7 @@ def parse_vesting_csv(text: str) -> list[VestingRow]:
 
 
 async def apply_vesting(session: AsyncSession, rows: list[VestingRow]) -> int:
+    logical = await load_logical_data(session)
     updated = 0
     for row in rows:
         holdings = (
@@ -47,6 +49,6 @@ async def apply_vesting(session: AsyncSession, rows: list[VestingRow]) -> int:
         for h in holdings:
             h.vested_quantity = row.vested_quantity
             h.unvested_quantity = row.unvested_quantity
-            updated += 1
+        updated += len({logical.account_roots[h.account_id] for h in holdings})
     await session.commit()
     return updated

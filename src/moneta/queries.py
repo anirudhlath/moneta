@@ -8,6 +8,7 @@ re-scan TransferLink and rebuild their own txn->account/type/series maps.
 """
 
 import statistics
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -16,7 +17,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.cadence import match_cadence
-from moneta.models import Account, AccountType, Cadence, SyncRun, Transaction, TransferLink
+from moneta.logical import load_logical_data
+from moneta.models import AccountType, Cadence, SyncRun, TransferLink
 
 
 @dataclass(frozen=True)
@@ -36,13 +38,13 @@ class ClassifiedLink:
 async def primary_currency(session: AsyncSession) -> str:
     """Majority currency across accounts; ties prefer USD. Views aggregate only this —
     summing cents across currencies would silently produce a meaningless number."""
-    rows = (
-        await session.execute(select(Account.currency, func.count()).group_by(Account.currency))
-    ).all()
-    counts: list[tuple[str, int]] = [(currency, n) for currency, n in rows]
-    if not counts:
-        return "USD"
-    return max(counts, key=lambda r: (r[1], r[0] == "USD", r[0]))[0]
+    logical = await load_logical_data(session)
+    counts = Counter(account.currency for account in logical.accounts.values())
+    return (
+        max(counts, key=lambda currency: (counts[currency], currency == "USD", currency))
+        if counts
+        else "USD"
+    )
 
 
 async def latest_successful_sync_at(session: AsyncSession) -> datetime | None:
@@ -57,54 +59,39 @@ async def latest_successful_sync_at(session: AsyncSession) -> datetime | None:
 
 
 async def account_type_map(session: AsyncSession) -> dict[int, AccountType]:
-    rows = (await session.execute(select(Account.id, Account.type))).all()
-    return {aid: atype for aid, atype in rows}
+    logical = await load_logical_data(session)
+    return {aid: logical.accounts[root].type for aid, root in logical.account_roots.items()}
 
 
 async def classified_links(session: AsyncSession) -> list[ClassifiedLink]:
-    links = (await session.execute(select(TransferLink))).scalars().all()
-    if not links:
-        return []
-    txn_ids = {link.outflow_id for link in links} | {link.inflow_id for link in links}
-    rows = (
-        await session.execute(
-            select(
-                Transaction.id,
-                Transaction.account_id,
-                Transaction.series_id,
-                Transaction.posted_on,
-                Transaction.amount_cents,
-            ).where(Transaction.id.in_(txn_ids))
-        )
-    ).all()
-    txn_info = {tid: (aid, sid, posted, amt) for tid, aid, sid, posted, amt in rows}
-    acct_rows = (
-        await session.execute(select(Account.id, Account.type, Account.financing_mode))
-    ).all()
-    acct_info = {aid: (atype, financing) for aid, atype, financing in acct_rows}
-
+    logical = await load_logical_data(session)
+    transactions = {txn.id: txn for txn in logical.transactions}
+    links = list(await session.scalars(select(TransferLink).order_by(TransferLink.id)))
     result: list[ClassifiedLink] = []
+    used: set[int] = set()
     for link in links:
-        outflow_info = txn_info.get(link.outflow_id)
-        inflow_info = txn_info.get(link.inflow_id)
-        if outflow_info is None or inflow_info is None:
-            continue  # a leg's txn is missing (shouldn't happen, but don't blow up)
-        out_account_id, out_series_id, out_posted_on, out_amount_cents = outflow_info
-        in_account_id, _in_series_id, _in_posted_on, _in_amount_cents = inflow_info
-        out_type, _out_financing = acct_info.get(out_account_id, (AccountType.unknown, False))
-        in_type, in_financing = acct_info.get(in_account_id, (AccountType.unknown, False))
+        out = transactions.get(logical.transaction_roots.get(link.outflow_id, -1))
+        inn = transactions.get(logical.transaction_roots.get(link.inflow_id, -1))
+        if out is None or inn is None or out.id in used or inn.id in used:
+            continue
+        out_account = logical.accounts[logical.account_roots[out.account_id]]
+        in_account = logical.accounts[logical.account_roots[inn.account_id]]
+        if out_account.id == in_account.id or out_account.currency != in_account.currency:
+            continue
+        used.update((out.id, inn.id))
         result.append(
             ClassifiedLink(
-                outflow_id=link.outflow_id,
-                inflow_id=link.inflow_id,
-                outflow_account_id=out_account_id,
-                inflow_account_id=in_account_id,
-                outflow_account_type=out_type,
-                inflow_account_type=in_type,
-                outflow_series_id=out_series_id,
-                outflow_posted_on=out_posted_on,
-                outflow_amount_cents=out_amount_cents,
-                inflow_is_loan_like=(in_type == AccountType.loan or in_financing),
+                outflow_id=out.id,
+                inflow_id=inn.id,
+                outflow_account_id=out_account.id,
+                inflow_account_id=in_account.id,
+                outflow_account_type=out_account.type,
+                inflow_account_type=in_account.type,
+                outflow_series_id=out.series_id,
+                outflow_posted_on=out.posted_on,
+                outflow_amount_cents=out.amount_cents,
+                inflow_is_loan_like=in_account.type == AccountType.loan
+                or in_account.financing_mode,
             )
         )
     return result

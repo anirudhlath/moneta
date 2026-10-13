@@ -1871,3 +1871,41 @@ def test_digest_unset_topic_400_passthrough(tmp_path: Path, monkeypatch) -> None
     assert result.exit_code == 1
     assert "ntfy_topic" in result.output
     assert "Traceback" not in result.output
+
+
+def test_networth_renders_logical_vesting_warnings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from moneta.models import Holding
+
+    _isolate(monkeypatch, tmp_path)
+
+    async def populate(session: AsyncSession) -> None:
+        root = await make_account(session, source="simplefin", type=AccountType.brokerage)
+        alias = await make_account(
+            session, source="plaid", canonical_account_id=root.id, type=AccountType.brokerage
+        )
+        session.add_all(
+            [
+                Holding(
+                    account_id=root.id,
+                    symbol="TEST",
+                    quantity=10,
+                    market_value_cents=10000,
+                    vested_quantity=4,
+                ),
+                Holding(
+                    account_id=alias.id,
+                    symbol="TEST",
+                    quantity=10,
+                    market_value_cents=10000,
+                    vested_quantity=6,
+                ),
+            ]
+        )
+
+    _seed_db(tmp_path, populate)
+    result = runner.invoke(app, ["networth"])
+    assert result.exit_code == 0
+    assert "Conflicting vesting" in result.output
+    assert "requires review" in result.output

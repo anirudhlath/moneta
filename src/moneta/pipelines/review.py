@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.llm import CLASSIFICATION_TAXONOMY, Classifier
+from moneta.logical import load_logical_data
 from moneta.models import (
     Account,
     AliasSource,
@@ -80,36 +81,28 @@ def _prompt_txn(summary: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _recent_occurrences(session: AsyncSession, series_id: int) -> list[Transaction]:
-    return list(
-        (
-            await session.execute(
-                select(Transaction)
-                .where(Transaction.series_id == series_id)
-                .order_by(Transaction.posted_on.desc())
-                .limit(6)
-            )
-        ).scalars()
-    )
+    logical = await load_logical_data(session)
+    return sorted(
+        (t for t in logical.transactions if t.series_id == series_id),
+        key=lambda t: (t.posted_on, t.id),
+        reverse=True,
+    )[:6]
 
 
 async def txn_summaries(session: AsyncSession, txn_ids: list[int]) -> dict[int, dict[str, Any]]:
     if not txn_ids:
         return {}
-    rows = (
-        await session.execute(
-            select(Transaction, Account.name)
-            .join(Account, Transaction.account_id == Account.id)
-            .where(Transaction.id.in_(txn_ids))
-        )
-    ).all()
+    logical = await load_logical_data(session)
+    by_id = {t.id: t for t in logical.transactions}
     return {
-        txn.id: {
+        row_id: {
             "id": txn.id,
             **_sample(txn),
             "description": txn.description,
-            "account": account_name,
+            "account": logical.accounts[logical.account_roots[txn.account_id]].name,
         }
-        for txn, account_name in rows
+        for row_id in txn_ids
+        if (txn := by_id.get(logical.transaction_roots.get(row_id, -1))) is not None
     }
 
 
@@ -129,18 +122,12 @@ async def review_context(session: AsyncSession, item: ReviewItem) -> dict[str, A
         merchant = item.payload.get("merchant")
         if not isinstance(merchant, str):
             return {}
-        txns = (
-            (
-                await session.execute(
-                    select(Transaction)
-                    .where(Transaction.merchant == merchant)
-                    .order_by(Transaction.posted_on.desc())
-                    .limit(6)
-                )
-            )
-            .scalars()
-            .all()
-        )
+        logical = await load_logical_data(session)
+        txns = sorted(
+            (t for t in logical.transactions if t.merchant == merchant),
+            key=lambda t: (t.posted_on, t.id),
+            reverse=True,
+        )[:6]
         return {
             "samples": [_sample(t) for t in txns],
             "direction": item.payload.get("direction"),
@@ -191,15 +178,24 @@ async def apply_resolution(
             await session.execute(select(Transaction).where(Transaction.description == raw))
         ).scalars():
             txn.merchant = merchant
-    elif item.kind == ReviewKind.transfer_pair and isinstance(resolution.get("inflow_id"), int):
-        session.add(
-            TransferLink(
-                outflow_id=item.payload["outflow_id"],
-                inflow_id=resolution["inflow_id"],
-                confidence=1.0 if resolved_by == "manual" else 0.9,
-                method=LinkMethod.manual if resolved_by == "manual" else LinkMethod.llm,
+    elif item.kind == ReviewKind.transfer_pair and "inflow_id" in resolution:
+        logical = await load_logical_data(session)
+        out_id = logical.transaction_roots[item.payload["outflow_id"]]
+        target = resolution["inflow_id"]
+        in_id = logical.transaction_roots[target] if isinstance(target, int) else None
+        for link in await session.scalars(select(TransferLink)):
+            if logical.transaction_roots.get(link.outflow_id) == out_id:
+                await session.delete(link)
+        await session.flush()
+        if in_id is not None:
+            session.add(
+                TransferLink(
+                    outflow_id=out_id,
+                    inflow_id=in_id,
+                    confidence=1.0 if resolved_by == "manual" else 0.9,
+                    method=LinkMethod.manual if resolved_by == "manual" else LinkMethod.llm,
+                )
             )
-        )
     elif item.kind == ReviewKind.recurring_cluster and resolution.get("is_recurring") is False:
         # detection's force map suppresses future runs; end the live series now so
         # fixed costs stop counting it immediately instead of after the stale sweep
@@ -233,7 +229,9 @@ async def apply_resolution(
     elif item.kind == ReviewKind.financing_account and isinstance(
         resolution.get("financing"), bool
     ):
-        acct = await session.get(Account, item.payload["account_id"])
+        logical = await load_logical_data(session)
+        account_id = item.payload["account_id"]
+        acct = await session.get(Account, logical.account_roots.get(account_id, account_id))
         if acct is not None:
             acct.financing_mode = resolution["financing"]
     item.status = ReviewStatus.resolved

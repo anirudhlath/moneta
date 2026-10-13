@@ -6,14 +6,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.cadence import advance_expected_on, month_bounds, monthly_cents, monthlyize
+from moneta.logical import load_logical_data
 from moneta.models import (
-    Account,
     AccountType,
     Cadence,
     Direction,
     RecurringSeries,
     SeriesStatus,
-    Transaction,
 )
 from moneta.queries import (
     classified_links,
@@ -68,6 +67,7 @@ def _series_lines(series: Iterable[RecurringSeries]) -> tuple[list[SeriesLine], 
 
 async def power_report(session: AsyncSession, today: date) -> PowerReport:
     month_start, month_end = month_bounds(today)
+    logical = await load_logical_data(session)
     series = (
         (
             await session.execute(
@@ -120,14 +120,7 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
         if account_id not in covered_loan_accounts
     }
     if payments:
-        names = {
-            aid: name
-            for aid, name in (
-                await session.execute(
-                    select(Account.id, Account.name).where(Account.id.in_(payments))
-                )
-            ).all()
-        }
+        names = {aid: account.name for aid, account in logical.accounts.items()}
         for lp in payments.values():
             merchant = f"{names.get(lp.account_id, f'account {lp.account_id}')} — payment"
             line = SeriesLine(
@@ -156,17 +149,16 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
     # date-range-only fetch: spend_reason (same predicate transactions.py's trust view
     # uses) decides inclusion — including the inflow/link exclusions — so this can
     # never quietly diverge from what `moneta txns` counts (design 2026-07-16 §2/§3).
-    month_txns = (
-        await session.execute(
-            select(Transaction, Account, RecurringSeries)
-            .join(Account, Transaction.account_id == Account.id)
-            .outerjoin(RecurringSeries, Transaction.series_id == RecurringSeries.id)
-            .where(
-                Transaction.posted_on >= month_start,
-                Transaction.posted_on <= today,
-            )
+    series_by_id = {s.id: s for s in await session.scalars(select(RecurringSeries))}
+    month_txns = [
+        (
+            t,
+            logical.accounts[logical.account_roots[t.account_id]],
+            series_by_id.get(t.series_id) if t.series_id is not None else None,
         )
-    ).all()
+        for t in logical.transactions
+        if month_start <= t.posted_on <= today
+    ]
     spent_cents = sum(
         -txn.amount_cents
         for txn, account, series in month_txns

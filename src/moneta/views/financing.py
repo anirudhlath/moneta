@@ -2,11 +2,11 @@ import math
 from datetime import date, timedelta
 
 from pydantic import BaseModel
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.cadence import monthlyize
-from moneta.models import Account, AccountType
+from moneta.logical import load_logical_data
+from moneta.models import AccountType
 from moneta.queries import classified_links, loan_payment_stats
 
 
@@ -22,18 +22,12 @@ class Obligation(BaseModel):
 
 
 async def compute_obligations(session: AsyncSession, today: date) -> list[Obligation]:
-    loans = (
-        (
-            await session.execute(
-                select(Account).where(
-                    (Account.type == AccountType.loan) | (Account.financing_mode.is_(True)),
-                    Account.balance_cents != 0,
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
+    logical = await load_logical_data(session)
+    loans = [
+        a
+        for a in logical.accounts.values()
+        if (a.type == AccountType.loan or a.financing_mode) and a.balance_cents != 0
+    ]
     links = await classified_links(session)
     payments = loan_payment_stats(links)
     result: list[Obligation] = []

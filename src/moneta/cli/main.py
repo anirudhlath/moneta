@@ -307,6 +307,8 @@ def networth(json_output: JsonOption = False) -> None:
             f"[yellow]{r['foreign_accounts']} account(s) in a non-primary currency are "
             f"excluded from these totals[/yellow]"
         )
+    for warning in r.get("warnings", []):
+        console.print(f"[yellow]⚠ {warning}[/yellow]")
     if footer := _staleness_footer(r.get("data_as_of")):
         console.print(f"[dim]{footer}[/dim]")
 

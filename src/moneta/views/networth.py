@@ -1,20 +1,19 @@
 from datetime import datetime
 
-from pydantic import BaseModel
-from sqlalchemy import select
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from moneta.logical import load_logical_data
 from moneta.models import (
     LIABILITY_ACCOUNT_TYPES,
     LIQUID_ACCOUNT_TYPES,
-    Account,
     AccountType,
-    Holding,
 )
 from moneta.queries import latest_successful_sync_at, primary_currency
 
 
 class NetWorthReport(BaseModel):
+    warnings: list[str] = Field(default_factory=list)
     liquid_cents: int
     vested_holdings_cents: int
     liabilities_cents: int
@@ -27,7 +26,8 @@ class NetWorthReport(BaseModel):
 
 async def net_worth_report(session: AsyncSession) -> NetWorthReport:
     primary = await primary_currency(session)
-    accounts = (await session.execute(select(Account))).scalars().all()
+    logical = await load_logical_data(session)
+    accounts = list(logical.accounts.values())
     domestic = [a for a in accounts if a.currency == primary]
     liquid = sum(a.balance_cents for a in domestic if a.type in LIQUID_ACCOUNT_TYPES)
     liabilities = sum(abs(a.balance_cents) for a in domestic if a.type in LIABILITY_ACCOUNT_TYPES)
@@ -35,17 +35,7 @@ async def net_worth_report(session: AsyncSession) -> NetWorthReport:
 
     vested_cents = 0
     unvested_cents = 0
-    holdings = (
-        (
-            await session.execute(
-                select(Holding)
-                .join(Account, Holding.account_id == Account.id)
-                .where(Account.currency == primary)
-            )
-        )
-        .scalars()
-        .all()
-    )
+    holdings = [h for h in logical.holdings if logical.accounts[h.account_id].currency == primary]
     for h in holdings:
         if h.vested_quantity is None or h.quantity <= 0:
             vested_cents += h.market_value_cents
@@ -56,6 +46,7 @@ async def net_worth_report(session: AsyncSession) -> NetWorthReport:
         unvested_cents += round(h.market_value_cents * unvested_frac)
 
     return NetWorthReport(
+        warnings=logical.warnings,
         liquid_cents=liquid,
         vested_holdings_cents=vested_cents,
         liabilities_cents=liabilities,

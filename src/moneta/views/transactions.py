@@ -10,9 +10,9 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from moneta.logical import LogicalAccount, load_logical_data
 from moneta.models import (
     SPEND_ACCOUNT_TYPES,
-    Account,
     AccountType,
     RecurringSeries,
     SeriesStatus,
@@ -86,7 +86,7 @@ def spend_reason(
 
 def _excluded_because(
     txn: Transaction,
-    account: Account,
+    account: LogicalAccount,
     series: RecurringSeries | None,
     link: str | None,
     primary: str,
@@ -113,32 +113,45 @@ async def transactions_report(
     end: date,
     account_id: int | None = None,
     merchant: str | None = None,
+    include_sources: bool = False,
 ) -> list[TxnRow]:
     primary = await primary_currency(session)
     links = await classified_links(session)
     by_outflow = {link.outflow_id: link for link in links}
     inflow_ids = {link.inflow_id for link in links}
 
-    conditions = [Transaction.posted_on >= start, Transaction.posted_on <= end]
-    if account_id is not None:
-        conditions.append(Transaction.account_id == account_id)
-    if merchant is not None:
-        conditions.append(Transaction.merchant.contains(merchant, autoescape=True))
-
-    rows = (
-        await session.execute(
-            select(Transaction, Account, RecurringSeries)
-            .join(Account, Transaction.account_id == Account.id)
-            .outerjoin(RecurringSeries, Transaction.series_id == RecurringSeries.id)
-            .where(*conditions)
-            .order_by(Transaction.posted_on.desc(), Transaction.id.desc())
-        )
-    ).all()
-
+    logical = await load_logical_data(session)
+    series_by_id = {s.id: s for s in await session.scalars(select(RecurringSeries))}
+    txns = (
+        list(await session.scalars(select(Transaction)))
+        if include_sources
+        else logical.transactions
+    )
+    account_root = (
+        logical.account_roots.get(account_id, account_id) if account_id is not None else None
+    )
+    rows = sorted(
+        (
+            t
+            for t in txns
+            if start <= t.posted_on <= end
+            and (account_root is None or logical.account_roots[t.account_id] == account_root)
+            and (merchant is None or merchant.casefold() in (t.merchant or "").casefold())
+        ),
+        key=lambda t: (t.posted_on, t.id),
+        reverse=True,
+    )
     result: list[TxnRow] = []
-    for txn, account, series in rows:
-        link = link_field(txn.id, by_outflow, inflow_ids)
-        reason = _excluded_because(txn, account, series, link, primary)
+    for txn in rows:
+        account = logical.accounts[logical.account_roots[txn.account_id]]
+        series = series_by_id.get(txn.series_id) if txn.series_id is not None else None
+        duplicate = logical.transaction_roots[txn.id] != txn.id
+        link = None if duplicate else link_field(txn.id, by_outflow, inflow_ids)
+        reason = (
+            "provider_duplicate"
+            if duplicate
+            else _excluded_because(txn, account, series, link, primary)
+        )
         result.append(
             TxnRow(
                 id=txn.id,

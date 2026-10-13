@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from moneta.llm import Classifier
 from moneta.logical import LogicalData, load_logical_data
 from moneta.models import (
     LinkMethod,
@@ -188,3 +189,22 @@ async def reconcile_provider_overlap(session: AsyncSession, today: date) -> Over
             stats.reviews_superseded += 1
     await session.commit()
     return stats
+
+
+async def rebuild_logical_derived(
+    session: AsyncSession, llm: Classifier | None, today: date
+) -> None:
+    """Rebuild from reconciled observations; never fetch or advance sync freshness."""
+    from moneta.pipelines.events import emit_series_events
+    from moneta.pipelines.financing import detect_financing
+    from moneta.pipelines.recurring import detect_recurring
+    from moneta.pipelines.review import autoreview_items, verify_series
+    from moneta.pipelines.transfers import link_transfers
+
+    await link_transfers(session, llm)
+    await detect_financing(session)
+    if llm is not None:
+        await autoreview_items(session, llm)
+    await detect_recurring(session, llm, today)
+    await verify_series(session, llm)
+    await emit_series_events(session, llm, today)

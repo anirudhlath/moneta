@@ -10,7 +10,8 @@ import statistics
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.models import Account, AccountType, ReviewItem, ReviewKind, Transaction
+from moneta.logical import load_logical_data
+from moneta.models import AccountType, ReviewItem, ReviewKind, Transaction
 
 _AMOUNT_TOLERANCE = 0.20  # near-equal payments: within ±20% of the credit median
 _MINOR_FRACTION = 0.25  # debits under 25% of the median credit are fees, not purchases
@@ -19,6 +20,7 @@ _MIN_NEAR_MEDIAN = 2  # at least this many payments must cluster near the median
 
 
 async def detect_financing(session: AsyncSession) -> int:
+    logical = await load_logical_data(session)
     asked: set[int] = set()
     items = (
         await session.execute(
@@ -28,36 +30,16 @@ async def detect_financing(session: AsyncSession) -> int:
     for item in items:
         account_id = item.payload.get("account_id")
         if isinstance(account_id, int):
-            asked.add(account_id)
-    candidates = (
-        (
-            await session.execute(
-                select(Account).where(
-                    Account.type == AccountType.credit,
-                    Account.financing_mode.is_(False),
-                    Account.balance_cents < 0,
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
+            asked.add(logical.account_roots.get(account_id, account_id))
+    candidates = [
+        a
+        for a in logical.accounts.values()
+        if a.type == AccountType.credit and not a.financing_mode and a.balance_cents < 0
+    ]
     unasked = [acct for acct in candidates if acct.id not in asked]
     txns_by_account: dict[int, list[Transaction]] = {}
-    if unasked:
-        rows = (
-            (
-                await session.execute(
-                    select(Transaction).where(
-                        Transaction.account_id.in_([acct.id for acct in unasked])
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-        for t in rows:
-            txns_by_account.setdefault(t.account_id, []).append(t)
+    for t in logical.transactions:
+        txns_by_account.setdefault(logical.account_roots[t.account_id], []).append(t)
 
     opened = 0
     for acct in unasked:

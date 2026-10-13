@@ -1,14 +1,12 @@
 from datetime import date
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.cadence import month_bounds
+from moneta.logical import load_logical_data
 from moneta.models import (
     LIQUID_ACCOUNT_TYPES,
     SPEND_ACCOUNT_TYPES,
-    Account,
-    Transaction,
 )
 from moneta.queries import ClassifiedLink, classified_links, linked_txn_ids, primary_currency
 
@@ -30,23 +28,15 @@ async def _accrual(
     excluded = linked_txn_ids(links)
     if primary is None:
         primary = await primary_currency(session)
-    txns = (
-        (
-            await session.execute(
-                select(Transaction)
-                .join(Account, Transaction.account_id == Account.id)
-                .where(
-                    Transaction.amount_cents > 0 if inflows else Transaction.amount_cents < 0,
-                    Transaction.posted_on >= start,
-                    Transaction.posted_on <= end,
-                    Account.type.in_(SPEND_ACCOUNT_TYPES),
-                    Account.currency == primary,
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
+    logical = await load_logical_data(session)
+    txns = [
+        t
+        for t in logical.transactions
+        if start <= t.posted_on <= end
+        and logical.accounts[logical.account_roots[t.account_id]].type in SPEND_ACCOUNT_TYPES
+        and logical.accounts[logical.account_roots[t.account_id]].currency == primary
+        and (t.amount_cents > 0 if inflows else t.amount_cents < 0)
+    ]
     sign = 1 if inflows else -1
     return sum(sign * t.amount_cents for t in txns if t.id not in excluded)
 
@@ -101,22 +91,14 @@ async def accrual_by_month(
     oldest_start = bounds[-1][1]
     newest_end = bounds[0][2]
 
-    txns = (
-        (
-            await session.execute(
-                select(Transaction)
-                .join(Account, Transaction.account_id == Account.id)
-                .where(
-                    Transaction.posted_on >= oldest_start,
-                    Transaction.posted_on <= newest_end,
-                    Account.type.in_(SPEND_ACCOUNT_TYPES),
-                    Account.currency == primary,
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
+    logical = await load_logical_data(session)
+    txns = [
+        t
+        for t in logical.transactions
+        if oldest_start <= t.posted_on <= newest_end
+        and logical.accounts[logical.account_roots[t.account_id]].type in SPEND_ACCOUNT_TYPES
+        and logical.accounts[logical.account_roots[t.account_id]].currency == primary
+    ]
     label_by_ym = {(start.year, start.month): label for label, start, _ in bounds}
     income_by_month = dict.fromkeys(label_by_ym.values(), 0)
     spend_by_month = dict.fromkeys(label_by_ym.values(), 0)
@@ -146,23 +128,15 @@ async def cash_out(
     by_outflow = {link.outflow_id: link for link in links}
     if primary is None:
         primary = await primary_currency(session)
-    txns = (
-        (
-            await session.execute(
-                select(Transaction)
-                .join(Account, Transaction.account_id == Account.id)
-                .where(
-                    Transaction.amount_cents < 0,
-                    Transaction.posted_on >= start,
-                    Transaction.posted_on <= end,
-                    Account.type.in_(LIQUID_ACCOUNT_TYPES),
-                    Account.currency == primary,
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
+    logical = await load_logical_data(session)
+    txns = [
+        t
+        for t in logical.transactions
+        if start <= t.posted_on <= end
+        and logical.accounts[logical.account_roots[t.account_id]].type in LIQUID_ACCOUNT_TYPES
+        and logical.accounts[logical.account_roots[t.account_id]].currency == primary
+        and t.amount_cents < 0
+    ]
     total = 0
     for t in txns:
         link = by_outflow.get(t.id)

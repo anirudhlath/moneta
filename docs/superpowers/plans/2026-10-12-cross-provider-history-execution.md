@@ -17,7 +17,7 @@
 | 2 | Projection fields and preservation/invalid-graph tests | Consistent |
 | 3 | Conservative identity, explicit controls and durable decisions | Consistent |
 | 4 | Matching, reconciliation counts and review/link cleanup | Consistent |
-| 5 | Projection integration, physical sync windows and accounting tests | Consistent |
+| 5 | Projection integration, physical sync windows and accounting tests | CLI warning rendering is explicitly required; ownership includes cli/main.py despite its omitted file-list entry |
 | 6 | Shared controls, rebuild routes and CLI validation tests | Consistent |
 | 7 | File-database validation, docs, final review and private/live rollout | Consistent; final review precedes live application |
 | 1, 2 | Schema relationships feed read-only projection | Compatible |
@@ -47,8 +47,8 @@
 - Task 1: complete (commits 4426f46..3ba8128, review clean).
 - Task 2: complete (commits 3ba8128..dfe37e5, review clean).
 - Task 3: complete (commits dfe37e5..25785fd, review clean; two deferred minors).
-- Task 4: fix round 1 running — base `dcacc30`; original implementer `/root/task4_transactions` resumed for three Important findings.
-- Task 5: pending — logical record integration throughout accounting.
+- Task 4: complete (commits 25785fd..fae06d5, review clean).
+- Task 5: running — logical record integration throughout accounting; base `fae06d5`, implementer `/root/task5_integration`.
 - Task 6: pending — API, CLI and review operations.
 - Task 7: pending — documentation, whole-branch review and local rollout.
 
@@ -83,3 +83,9 @@ Task 4 implementation: initial RED 28 expected failures, GREEN 28 passed; three 
 Task 4 review: `/root/review4_transactions` reported spec noncompliance and quality needs fixes. Important findings: survivor ordering must be reviewed status → root provider → stable row ID; explicitly rejected duplicate inflows must preserve distinct reviewed transfer occurrences; derived alias links must not override a survivor's manual no-transfer decision. Regression/fix wave dispatched together to the original implementer. Cross-task integration/window/rollout items map to Tasks 5–7.
 
 Task 5 integration check: existing link_transfers' high-confidence path must honor resolved no-transfer choices after transaction IDs map to survivors; otherwise it can recreate a link removed by Task 4 cleanup. Add repeated-sync/rebuild regression for reviewed rejections on either provider observation. Account-filtered transaction drill-down must include alias-only historical survivors via account_roots.
+
+Task 4 fix 1 implementation: RED 9 failures, focused GREEN 46 passed; full suite 581 passed with pristine output, lint/format check/strict mypy passed (81 files). Survivor ranking corrected; reviewed transfer endpoint equivalence uses confirmed or mutually unique occurrence identity with durable rejections; latest human no-transfer decisions dominate derived links on either provider. Shared pure `reviewed_transfer_choices(list[ReviewItem]) -> dict[int, int | None]` exported for Task 5.
+
+Task 4: fix round 1/5 (3 addressed, 0 open; commits dcacc30..fae06d5). Scoped reviewer `/root/rereview4_decisions` found no new breakage, both gates pass. Existing transfer detection's no-transfer handling remains explicitly owned by Task 5.
+
+Task 5 diagnostic: confirmed that corrected alias currency can supply the selected balance under the root's currency label because existing group currency was validated only when linking. Minimal logical.py same-currency validation and a failing regression are included under the approved account-identity invariant; accounting must not implicitly convert money.

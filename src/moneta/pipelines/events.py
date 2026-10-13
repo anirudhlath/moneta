@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.cadence import GRACE_DAYS, advance_expected_on
 from moneta.llm import Classifier, confident_yes
+from moneta.logical import load_logical_data
 from moneta.models import (
     EventKind,
     RecurringSeries,
@@ -58,6 +59,7 @@ def apply_price_change(
 
 
 async def emit_series_events(session: AsyncSession, llm: Classifier | None, today: date) -> int:
+    logical = await load_logical_data(session)
     emitted = 0
     # price-change questions already in flight (open) or answered "no" (denied)
     open_series: set[int] = set()
@@ -87,34 +89,21 @@ async def emit_series_events(session: AsyncSession, llm: Classifier | None, toda
         grace = timedelta(days=GRACE_DAYS[s.cadence])
 
         while today > s.next_expected_on + grace:
-            window_hit = (
-                await session.execute(
-                    select(Transaction.id)
-                    .where(
-                        Transaction.series_id == s.id,
-                        Transaction.posted_on >= s.next_expected_on - grace,
-                        Transaction.posted_on <= s.next_expected_on + grace,
-                    )
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
-            if window_hit is None:
+            window_hit = any(
+                t.series_id == s.id
+                and s.next_expected_on - grace <= t.posted_on <= s.next_expected_on + grace
+                for t in logical.transactions
+            )
+            if not window_hit:
                 session.add(missed_event(s.id, s.next_expected_on))
                 emitted += 1
             s.next_expected_on = advance_expected_on(s.next_expected_on, s.cadence)
 
-        latest_two = (
-            (
-                await session.execute(
-                    select(Transaction)
-                    .where(Transaction.series_id == s.id)
-                    .order_by(Transaction.posted_on.desc(), Transaction.id.desc())
-                    .limit(2)
-                )
-            )
-            .scalars()
-            .all()
-        )
+        latest_two = sorted(
+            (t for t in logical.transactions if t.series_id == s.id),
+            key=lambda t: (t.posted_on, t.id),
+            reverse=True,
+        )[:2]
         if not latest_two or s.expected_cents == 0:
             continue
         latest = latest_two[0]

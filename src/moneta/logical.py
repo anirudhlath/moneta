@@ -123,6 +123,8 @@ async def load_logical_data(session: AsyncSession) -> LogicalData:
     logical_accounts: dict[int, LogicalAccount] = {}
     for root_id, group in sorted(groups.items()):
         root = physical_accounts[root_id]
+        if any(account.currency != root.currency for account in group):
+            raise ValueError(f"Conflicting currency in logical account {root_id}")
         latest = min(group, key=lambda account: _observation_order(account, root_id))
         logical_accounts[root_id] = LogicalAccount(
             id=root.id,

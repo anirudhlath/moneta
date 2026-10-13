@@ -3,13 +3,13 @@ from datetime import date
 from typing import NamedTuple
 
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.cadence import CADENCE_DAYS, GRACE_DAYS, TOLERANCE, advance_expected_on, match_cadence
 from moneta.llm import CLASSIFICATION_TAXONOMY, Classifier
+from moneta.logical import load_logical_data
 from moneta.models import (
-    Account,
     Cadence,
     Direction,
     EventKind,
@@ -141,17 +141,15 @@ async def detect_recurring(
     # series feed power's income/fixed-cost sums, so they must be single-currency:
     # only the primary currency's transactions can form or update a series
     primary = await primary_currency(session)
-    txns = (
+    logical = await load_logical_data(session)
+    txns = sorted(
         (
-            await session.execute(
-                select(Transaction)
-                .join(Account, Transaction.account_id == Account.id)
-                .where(Transaction.merchant.is_not(None), Account.currency == primary)
-                .order_by(Transaction.posted_on, Transaction.id)
-            )
-        )
-        .scalars()
-        .all()
+            t
+            for t in logical.transactions
+            if t.merchant is not None
+            and logical.accounts[logical.account_roots[t.account_id]].currency == primary
+        ),
+        key=lambda t: (t.posted_on, t.id),
     )
     # a description correction can re-derive a txn's merchant away from the series it
     # was tagged to — untag it so the old series doesn't keep stale occurrences and the
@@ -313,14 +311,12 @@ async def detect_recurring(
 
     # Groups that no longer match a cadence (trailing noise, shrunk by exclusions) never
     # reach the stale check above — sweep every still-active series by its own txns.
-    newest_rows = (
-        await session.execute(
-            select(Transaction.series_id, func.max(Transaction.posted_on))
-            .where(Transaction.series_id.is_not(None))
-            .group_by(Transaction.series_id)
-        )
-    ).all()
-    newest_by_series: dict[int | None, date] = {sid: newest for sid, newest in newest_rows}
+    newest_by_series: dict[int, date] = {}
+    for txn in logical.transactions:
+        if txn.series_id is not None:
+            newest_by_series[txn.series_id] = max(
+                newest_by_series.get(txn.series_id, txn.posted_on), txn.posted_on
+            )
     for series in existing.values():
         if series.status != SeriesStatus.active:
             continue

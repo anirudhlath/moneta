@@ -31,8 +31,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.llm import Classifier
+from moneta.logical import load_logical_data
 from moneta.models import AccountType, LinkMethod, ReviewItem, ReviewKind, Transaction, TransferLink
-from moneta.queries import account_type_map
+from moneta.pipelines.transaction_overlap import reviewed_transfer_choices
 
 _TRANSFER_PAT = re.compile(
     r"payment|pymt|transfer|xfer|ach|autopay|epay|billpay|deposit", re.IGNORECASE
@@ -74,11 +75,14 @@ def _confidence(out: Transaction, inn: Transaction, out_type: AccountType) -> fl
 
 async def link_transfers(session: AsyncSession, llm: Classifier | None) -> TransferStats:
     stats = TransferStats()
+    logical = await load_logical_data(session)
     linked_ids: set[int] = set()
     for link in (await session.execute(select(TransferLink))).scalars():
-        linked_ids.update((link.outflow_id, link.inflow_id))
+        linked_ids.update(
+            logical.transaction_roots.get(i, i) for i in (link.outflow_id, link.inflow_id)
+        )
     reviewed: set[int] = {
-        item.payload["outflow_id"]
+        logical.transaction_roots.get(item.payload["outflow_id"], item.payload["outflow_id"])
         for item in (
             await session.execute(
                 select(ReviewItem).where(ReviewItem.kind == ReviewKind.transfer_pair)
@@ -86,25 +90,56 @@ async def link_transfers(session: AsyncSession, llm: Classifier | None) -> Trans
         ).scalars()
         if "outflow_id" in item.payload
     }
-    acct_types = await account_type_map(session)
-    txns = (await session.execute(select(Transaction))).scalars().all()
-    outflows = [t for t in txns if t.amount_cents < 0 and t.id not in linked_ids]
+    items = list(await session.scalars(select(ReviewItem)))
+    choices = reviewed_transfer_choices(items)
+    selected = {
+        logical.transaction_roots[row]: logical.transaction_roots.get(target)
+        if target is not None
+        else None
+        for row, target in choices.items()
+        if row in logical.transaction_roots
+    }
+    manual_choices = {
+        logical.transaction_roots[row]
+        for item in items
+        if item.resolution
+        and item.resolution.get("resolved_by") not in ("llm", "reconciliation")
+        and "inflow_id" in item.resolution
+        and (row := item.payload.get("outflow_id")) in choices
+        and row in logical.transaction_roots
+        and choices[row] == item.resolution["inflow_id"]
+    }
+    txns = logical.transactions
+    outflows = [
+        t
+        for t in txns
+        if t.amount_cents < 0
+        and t.id not in linked_ids
+        and not (t.id in selected and selected[t.id] is None)
+    ]
     inflows = [t for t in txns if t.amount_cents > 0 and t.id not in linked_ids]
 
     by_outflow: dict[int, list[_Cand]] = {}
     for out in outflows:
         for inn in inflows:
             if (
-                inn.account_id == out.account_id
+                logical.account_roots[inn.account_id] == logical.account_roots[out.account_id]
+                or logical.accounts[logical.account_roots[inn.account_id]].currency
+                != logical.accounts[logical.account_roots[out.account_id]].currency
+                or (out.id in selected and selected[out.id] != inn.id)
                 or inn.amount_cents != -out.amount_cents
                 or abs((inn.posted_on - out.posted_on).days) > _MAX_DAYS
             ):
                 continue
-            conf = _confidence(out, inn, acct_types[out.account_id])
+            conf = _confidence(
+                out, inn, logical.accounts[logical.account_roots[out.account_id]].type
+            )
             by_outflow.setdefault(out.id, []).append(_Cand(out, inn, conf))
 
     ordered = sorted(
-        by_outflow.values(), key=lambda cands: max(c.confidence for c in cands), reverse=True
+        by_outflow.values(),
+        key=lambda cands: (cands[0].outflow.id in selected, max(c.confidence for c in cands)),
+        reverse=True,
     )
     used: set[int] = set()
     for original in ordered:
@@ -115,6 +150,12 @@ async def link_transfers(session: AsyncSession, llm: Classifier | None) -> Trans
             # group. Nothing to show from the (now-empty) filtered set, so the
             # review item carries the original candidates instead of vanishing.
             _open_review(session, out, [c.inflow.id for c in original], reviewed, stats)
+            continue
+        if out.id in selected:
+            manual = out.id in manual_choices
+            cands[0].confidence = 1.0 if manual else 0.9
+            _add_link(session, cands[0], LinkMethod.manual if manual else LinkMethod.llm, used)
+            stats.linked += 1
             continue
         if len(original) == 1 and cands[0].confidence >= _AUTO_LINK:
             _add_link(session, cands[0], LinkMethod.rule, used)

@@ -1,7 +1,7 @@
 from datetime import date, datetime, timedelta
 
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +12,7 @@ from moneta.pipelines.events import emit_series_events
 from moneta.pipelines.financing import detect_financing
 from moneta.pipelines.ingest import IngestStats, ingest_snapshot
 from moneta.pipelines.normalize import normalize_merchants
+from moneta.pipelines.reconcile import OverlapStats, reconcile_provider_overlap
 from moneta.pipelines.recurring import RecurringStats, detect_recurring
 from moneta.pipelines.review import VerifyStats, autoreview_items, verify_series
 from moneta.pipelines.transfers import TransferStats, link_transfers
@@ -58,6 +59,7 @@ async def _sync_since(session: AsyncSession, full: bool, source: str) -> date:
 
 
 class SyncReport(BaseModel):
+    overlap: OverlapStats = Field(default_factory=OverlapStats)
     ingest: IngestStats
     normalized: int
     transfers: TransferStats
@@ -113,6 +115,7 @@ async def run_sync(
         snap = await _fetch_all(session, adapters, full)
         ingest = await ingest_snapshot(session, snap)
         normalized = await normalize_merchants(session, llm)
+        overlap = await reconcile_provider_overlap(session, today)
         transfers = await link_transfers(session, llm)
         financing_questions = await detect_financing(session)
         # auto-review before detection so confident LLM answers (incl. last sync's
@@ -130,6 +133,7 @@ async def run_sync(
         logger.error("sync failed: {}", run.error)
         raise
     report = SyncReport(
+        overlap=overlap,
         ingest=ingest,
         normalized=normalized,
         transfers=transfers,
