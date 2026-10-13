@@ -1,6 +1,6 @@
 # Moneta — Product Requirements Document
 
-**Status:** living document — existing features plus the tested cross-provider implementation on `cross-provider-history`; whole-branch review and local rollout pending
+**Status:** living document — reflects locally integrated `main` plus the prioritized roadmap; cross-provider review, private rehearsal, live reconciliation, and full-history reporting completed on 2026-10-13
 **Owner:** Anirudh Lath
 **Last updated:** 2026-10-13
 **Deep-dive specs:** [design doc](superpowers/specs/2026-07-07-moneta-design.md) ·
@@ -129,7 +129,7 @@ Rich tables with stable IDs everywhere a follow-up action exists (`recurring --e
 
 | Date | Release | What shipped |
 |---|---|---|
-| 2026-10-13 | **Combined provider history — implementation ready, rollout pending** | Logical balances/holdings, retained union of provider history, conservative identity and one-to-one duplicates, reversible account controls, overlap reviews, source audit, local reconciliation, and correction revalidation. Synthetic rehearsal passed; whole-branch review and private/live rollout remain open. |
+| 2026-10-13 | **Combined provider history — locally applied** | Logical balances/holdings, retained union of provider history, conservative identity and one-to-one duplicates, reversible account controls, overlap reviews, source audit, local reconciliation, and correction revalidation. Whole-branch review, synthetic/private rehearsals, verified live reconciliation, and full-history report regeneration completed; no push or publishing. |
 | 2026-10-13 | **Final-review preservation fixes** | Keep human decisions effective through automatic review, inherit sole alias metadata without resurrecting explicit clears, combine compatible transaction classifications reversibly, and exclude conflict-unknown vesting value from asserted totals. Refresh identity questions and render both sides of overlap comparisons. |
 | 2026-07-07 | **v1 core** | Design doc; FastAPI + thin CLI; SimpleFIN; ingest/normalize/transfers/recurring/events pipelines; power, networth, financing views; review queue; LLM auto-review; vesting import. |
 | 2026-07-08 | **Full-history sync & stale series** | Epoch-based first sync/`--full`, SimpleFIN window-walking, series auto-end/reactivation rules. |

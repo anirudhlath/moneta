@@ -1,10 +1,11 @@
 # Cross-provider accounts and historical transaction overlap
 
-Status: approved by the user on 2026-10-12; implementation ready on
-`cross-provider-history`, with synthetic migration/reconciliation rehearsal and
-documentation complete. Final whole-branch review, private-copy validation, local
-integration, live reconciliation, and report regeneration remain pending. The live
-database is unchanged by implementation.
+Status: approved by the user on 2026-10-12; completed and locally applied on
+2026-10-13. Whole-branch review and its preservation/adjudication fixes passed;
+synthetic and private-copy validation, non-forced local integration, verified live
+reconciliation, and full logical-union report regeneration are complete. Both
+providers remain connected; original financial observations and resolved reviews
+are preserved. No push or publishing was performed.
 
 ## Intended outcome
 
@@ -17,12 +18,13 @@ This is an architectural change to existing ingestion, reconciliation, query,
 and review boundaries. It is not a change to transfer deduplication: two provider
 observations of one transaction are distinct from the two legs of a money transfer.
 
-## Current behavior and evidence
+## Before implementation: behavior and evidence
 
 `pipelines/ingest.py` identifies accounts by `aggregator_id`, and transactions by
 `(account_id, aggregator_id)`. The providers give the same account different IDs,
 so their observations enter separate account and transaction rows. Reports then
-sum both rows. The coexistence QA document explicitly describes this limitation.
+summed both rows. At planning time, coexistence QA described this limitation;
+it now requires logical single-counting and retained older history.
 
 Read-only inspection found matching provider accounts with equal currency, balance,
 and balance date. Account names and institutions corroborate the relationships.
@@ -60,6 +62,9 @@ only in the other provider. Neither approach meets the preservation requirement.
 - Prefer the existing root so saved classifications and operator-facing account
   IDs survive. Source aliases resolve to the root for type, financing, and promo
   metadata. Preserve explicit user decisions; surface conflicting decisions.
+  Final preservation ruling: an uninformed root may read through a sole explicit
+  alias financing/promotion choice without rewriting source metadata. An explicit
+  root choice, including financing false or a cleared promotion, remains authoritative.
 - A logical balance is one source observation, selected by newest balance date.
   On a date tie, prefer the root source. Never sum provider balances for the group.
 - Default account listings and status counts show logical accounts; a source-detail
@@ -116,6 +121,8 @@ Holdings must also be counted once per logical account. Choose one provider's
 reported holdings set; a provider that supplies no holdings must not erase the
 other provider's holdings. Preserve imported vesting data. This feature does not
 infer vesting, margin borrowing, interest rates, or missing account balances.
+Conflicting alias vesting without an authoritative root annotation remains unknown,
+with a warning and exclusion from both vested and unvested totals pending review.
 
 ## Operational rollout
 
