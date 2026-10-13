@@ -44,8 +44,8 @@
 
 ## Task status
 
-- Task 1: running — source identity metadata and additive schema; implementer `/root/task1_schema`, base `4426f46`.
-- Task 2: pending — shared logical projection.
+- Task 1: complete (commits 4426f46..3ba8128, review clean).
+- Task 2: running — shared logical projection; base `3ba8128`, implementer `/root/task2_logical`.
 - Task 3: pending — conservative account grouping and reversible controls.
 - Task 4: pending — transaction observations, links and stale reviews.
 - Task 5: pending — logical record integration throughout accounting.
@@ -55,3 +55,9 @@
 ## Verification
 
 Worktree baseline: 443 tests passed, Ruff lint and format checks passed, strict mypy passed (71 files), no warnings. No product implementation started.
+
+Task 1 implementation: focused RED 21 failed/58 passed, GREEN 79 passed; full suite 463 passed with pristine output, lint/format/strict typing passed (74 files). Controller additionally verified `uv run ruff format --check .` and signed-off commit `3ba8128`. No live data touched.
+
+Task 1 review: `/root/review1_schema` approved spec compliance and task quality, no findings. Its cannot-verify items map to Tasks 2/4/5/7 (logical reports, physical windows, reconciliation and rollout fingerprints); they are outside Task 1's deliverable and will be verified at those gates.
+
+Task 2 Ruling: if the root has no vesting annotation and multiple alias annotations conflict, effective vesting stays unknown and emits a requires-review warning; root annotations otherwise take precedence — preserves evidence without inventing an authoritative quantity — if wrong, reports understate vesting coverage until the conflict is reviewed.

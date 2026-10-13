@@ -64,11 +64,11 @@ Expected: all tests pass with no warnings; Ruff passes; strict mypy reports no i
 
 **Interfaces:** Produce `Account.mask: str | None`, `Account.canonical_account_id: int | None`, `Transaction.duplicate_of_id: int | None`, `AccountDTO.mask: str | None = None`, and ReviewKind values `account_overlap` / `transaction_overlap`. Produce `identity.infer_mask(name: str) -> str | None`. All new relationships default to `None`; migration revision is `0006`, down revision `0005`, and `db._HEAD == "0006"`.
 
-- [ ] Write `test_overlap_columns_preserve_existing_observations`: upgrade a frozen 0005 database; assert unchanged account balances and raw transaction fields, nullable relationships, and correct migration head. Add `test_mask_parsing_is_conservative` asserting `"Checking (1234)" -> "1234"` and generic/nondigit suffixes -> `None`. Add adapter/ingest tests proving masks round-trip and same-source corrections clear affected duplicate relationships as well as stale transfer links.
-- [ ] Run `uv run pytest -q tests/test_overlap_schema.py tests/test_migrations.py tests/test_ingest.py tests/test_simplefin.py tests/test_plaid.py`. Expected RED on missing fields/parser/migration.
-- [ ] Add the columns, chained migration, and review kinds, using SQLite-compatible batch alteration for self-referencing foreign keys. Parse Plaid's `mask` and unambiguous SimpleFIN trailing four-digit suffixes. Backfill only inferable masks from saved names with frozen migration-local parsing. Ingest stores mask metadata and invalidates duplicate relationships that depend on a corrected amount/date; retain all provider observations.
-- [ ] Run the same tests. Expected GREEN with migration/model parity and existing ingest behavior preserved.
-- [ ] Run the full gate and commit these files with `git commit -s -m "feat: retain provider identity and overlap metadata"`.
+- [x] Write `test_overlap_columns_preserve_existing_observations`: upgrade a frozen 0005 database; assert unchanged account balances and raw transaction fields, nullable relationships, and correct migration head. Add `test_mask_parsing_is_conservative` asserting `"Checking (1234)" -> "1234"` and generic/nondigit suffixes -> `None`. Add adapter/ingest tests proving masks round-trip and same-source corrections clear affected duplicate relationships as well as stale transfer links.
+- [x] Run `uv run pytest -q tests/test_overlap_schema.py tests/test_migrations.py tests/test_ingest.py tests/test_simplefin.py tests/test_plaid.py`. Expected RED on missing fields/parser/migration.
+- [x] Add the columns, chained migration, and review kinds, using SQLite-compatible batch alteration for self-referencing foreign keys. Parse Plaid's `mask` and unambiguous SimpleFIN trailing four-digit suffixes. Backfill only inferable masks from saved names with frozen migration-local parsing. Ingest stores mask metadata and invalidates duplicate relationships that depend on a corrected amount/date; retain all provider observations.
+- [x] Run the same tests. Expected GREEN with migration/model parity and existing ingest behavior preserved.
+- [x] Run the full gate and commit these files with `git commit -s -m "feat: retain provider identity and overlap metadata"`.
 
 ### Task 2: Shared logical projection
 
