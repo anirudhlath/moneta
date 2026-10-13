@@ -7,6 +7,7 @@
 - Original checkout and its untracked approved documents remain preserved.
 - One fresh implementer per task, sequential task reviews, one final whole-branch review. No push or publication.
 - Tests use isolated databases. No feature command targets the live database before private-copy validation.
+- Task 7 is implemented and reviewed before its operator continuation; final whole-branch review gates private rehearsal and local/live application.
 
 ## Preflight consistency scan
 
@@ -43,7 +44,7 @@
 
 ## Task status
 
-- Task 1: pending — source identity metadata and additive schema.
+- Task 1: running — source identity metadata and additive schema; implementer `/root/task1_schema`, base `4426f46`.
 - Task 2: pending — shared logical projection.
 - Task 3: pending — conservative account grouping and reversible controls.
 - Task 4: pending — transaction observations, links and stale reviews.

@@ -29,6 +29,8 @@ async def make_account(session: AsyncSession, **kw: Any) -> Account:
         "type": AccountType.checking,
         "balance_cents": 0,
         "balance_date": date(2026, 7, 1),
+        "mask": None,
+        "canonical_account_id": None,
     }
     acct = Account(**{**defaults, **kw})
     session.add(acct)
@@ -45,6 +47,7 @@ async def make_txn(session: AsyncSession, account: Account, **kw: Any) -> Transa
         "amount_cents": -1000,
         "description": "TEST",
         "raw": {},
+        "duplicate_of_id": None,
     }
     txn = Transaction(**{**defaults, **kw})
     session.add(txn)

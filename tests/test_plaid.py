@@ -251,6 +251,8 @@ async def test_fetch_parses_accounts() -> None:
     assert chk.balance == Decimal("110.94")
     assert chk.balance_date == date(2026, 7, 8)
     assert chk.type_hint == AccountType.checking
+    assert chk.mask == "0000"
+    assert card.mask is None and brok.mask is None
     assert chk.source == "plaid" and card.source == "plaid" and brok.source == "plaid"
     # liability balances negated: Plaid positive-owed -> moneta negative
     assert card.balance == Decimal("-410.00")

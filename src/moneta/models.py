@@ -106,6 +106,8 @@ class ReviewKind(StrEnum):
     recurring_cluster = "recurring_cluster"
     price_change = "price_change"
     financing_account = "financing_account"
+    account_overlap = "account_overlap"
+    transaction_overlap = "transaction_overlap"
 
 
 class Base(DeclarativeBase):
@@ -126,6 +128,10 @@ class Account(Base):
     promo_expires_on: Mapped[date | None] = mapped_column(Date, default=None)
     financing_mode: Mapped[bool] = mapped_column(default=False)
     source: Mapped[str] = mapped_column(default="")
+    mask: Mapped[str | None] = mapped_column(default=None)
+    canonical_account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("accounts.id"), default=None
+    )
 
 
 class Transaction(Base):
@@ -141,6 +147,7 @@ class Transaction(Base):
     merchant: Mapped[str | None] = mapped_column(default=None)
     series_id: Mapped[int | None] = mapped_column(ForeignKey("recurring_series.id"), default=None)
     raw: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    duplicate_of_id: Mapped[int | None] = mapped_column(ForeignKey("transactions.id"), default=None)
 
 
 class TransferLink(Base):

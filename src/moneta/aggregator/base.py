@@ -18,6 +18,7 @@ class AccountDTO(BaseModel):
     balance_date: date
     type_hint: AccountType | None = None
     source: str = ""
+    mask: str | None = None
 
 
 class TransactionDTO(BaseModel):

@@ -199,6 +199,7 @@ def _parse_account(acct: dict[str, Any], org_name: str) -> AccountDTO:
         balance_date=balance_date,
         type_hint=_map_type(acct.get("type", ""), acct.get("subtype")),
         source="plaid",
+        mask=acct.get("mask"),
     )
 
 

@@ -1,7 +1,7 @@
 from datetime import date
 
 from pydantic import BaseModel
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.aggregator.base import Snapshot
@@ -49,6 +49,7 @@ async def ingest_snapshot(session: AsyncSession, snap: Snapshot) -> IngestStats:
                 balance_cents=to_cents(dto.balance),
                 balance_date=dto.balance_date,
                 source=dto.source,
+                mask=dto.mask,
             )
             session.add(existing)
             await session.flush()
@@ -57,6 +58,7 @@ async def ingest_snapshot(session: AsyncSession, snap: Snapshot) -> IngestStats:
             existing.balance_cents = to_cents(dto.balance)
             existing.balance_date = dto.balance_date
             existing.source = dto.source  # natural backfill for pre-attribution accounts
+            existing.mask = dto.mask
         acct_ids[dto.id] = existing.id
 
     # comparison columns as plain tuples — ORM rows are only fetched for the rare correction
@@ -97,7 +99,7 @@ async def ingest_snapshot(session: AsyncSession, snap: Snapshot) -> IngestStats:
                 # and revive an ended series
                 row.merchant = None
             if fields[:2] != (old_cents, old_posted):
-                relinked_ids.add(tid)  # amount/date matches behind a TransferLink are void
+                relinked_ids.add(tid)  # amount/date matches behind overlap/transfer links are void
             row.amount_cents, row.posted_on, row.description = fields
             row.raw = txn.raw
             existing_txns[key] = (tid, *fields)
@@ -119,6 +121,16 @@ async def ingest_snapshot(session: AsyncSession, snap: Snapshot) -> IngestStats:
         stats.new_transactions += 1
 
     if relinked_ids:
+        await session.execute(
+            update(Transaction)
+            .where(
+                or_(
+                    Transaction.id.in_(relinked_ids),
+                    Transaction.duplicate_of_id.in_(relinked_ids),
+                )
+            )
+            .values(duplicate_of_id=None)
+        )
         stale_links = (
             (
                 await session.execute(

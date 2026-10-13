@@ -1,6 +1,7 @@
 from datetime import date
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -73,6 +74,23 @@ async def test_ingest_stamps_source_on_create_and_backfills_on_update(
     await ingest_snapshot(session, snap)  # re-sync naturally backfills it
     acct = (await session.execute(select(Account))).scalar_one()
     assert acct.source == "simplefin"
+
+
+async def test_ingest_roundtrips_mask_metadata(session: AsyncSession) -> None:
+    snap = _snap()
+    snap.accounts[0] = snap.accounts[0].model_copy(update={"mask": "0000"})
+    await ingest_snapshot(session, snap)
+    acct = (await session.scalars(select(Account))).one()
+    assert acct.mask == "0000"
+    assert acct.canonical_account_id is None
+    txn = (await session.scalars(select(Transaction))).one()
+    assert txn.duplicate_of_id is None
+
+    snap.accounts[0] = snap.accounts[0].model_copy(update={"mask": "1234"})
+    await ingest_snapshot(session, snap)
+    await session.refresh(acct)
+    assert acct.mask == "1234"
+    assert (await session.scalar(select(func.count()).select_from(Account))) == 1
 
 
 async def test_ingest_updates_balance_not_type(session: AsyncSession) -> None:
@@ -299,3 +317,58 @@ async def test_amount_correction_drops_transfer_link(session: AsyncSession) -> N
 
     await ingest_snapshot(session, snap("-480.00"))  # upstream correction: legs no longer equal
     assert (await session.execute(select(TransferLink))).scalars().all() == []
+
+
+@pytest.mark.parametrize("correction", ["amount", "date", "description"])
+async def test_correction_invalidates_affected_duplicate_relationships(
+    session: AsyncSession, correction: str
+) -> None:
+    from moneta.models import TransferLink
+    from tests.factories import make_account, make_txn
+
+    snap = _snap()
+    snap.accounts[0].source = "simplefin"
+    await ingest_snapshot(session, snap)
+    corrected = (await session.scalars(select(Transaction))).one()
+    plaid = await make_account(session, aggregator_id="plaid-overlap-account", source="plaid")
+    root = await make_txn(session, plaid, amount_cents=-4250)
+    corrected.duplicate_of_id = root.id
+    dependent = await make_txn(session, plaid, duplicate_of_id=corrected.id)
+    unrelated = await make_txn(session, plaid, duplicate_of_id=root.id)
+    payment = await make_txn(session, plaid, amount_cents=4250)
+    session.add(
+        TransferLink(outflow_id=corrected.id, inflow_id=payment.id, confidence=1.0, method="rule")
+    )
+    await session.commit()
+
+    if correction == "amount":
+        snap.transactions[0].amount = Decimal("-40.00")
+    elif correction == "date":
+        snap.transactions[0].posted_on = date(2026, 7, 3)
+    else:
+        snap.transactions[0].description = "NETFLIX UPDATED"
+    snap.transactions[0].raw = {"id": "TRN-1", "corrected": True}
+    stats = await ingest_snapshot(session, snap)
+
+    for txn in (corrected, dependent, unrelated, root, payment):
+        await session.refresh(txn)
+    if correction == "description":
+        assert corrected.duplicate_of_id == root.id
+        assert dependent.duplicate_of_id == corrected.id
+        assert len((await session.scalars(select(TransferLink))).all()) == 1
+    else:
+        assert corrected.duplicate_of_id is None
+        assert dependent.duplicate_of_id is None
+        assert (await session.scalars(select(TransferLink))).all() == []
+    assert unrelated.duplicate_of_id == root.id
+    assert root.duplicate_of_id is None
+    assert stats.updated_transactions == 1 and stats.new_transactions == 0
+    assert corrected.aggregator_id == "TRN-1"
+    assert corrected.raw == {"id": "TRN-1", "corrected": True}
+    assert (await session.scalar(select(func.count()).select_from(Transaction))) == 5
+    assert (root.amount_cents, root.posted_on, root.description, root.raw) == (
+        -4250,
+        date(2026, 7, 1),
+        "TEST",
+        {},
+    )

@@ -11,6 +11,7 @@ import httpx
 from loguru import logger
 
 from moneta.aggregator.base import AccountDTO, HoldingDTO, Snapshot, TransactionDTO
+from moneta.identity import infer_mask
 
 # The protocol has no range limit, but the beta bridge hard-caps any request to the
 # trailing 90 days of the range and recommends ≤45 ("in the future, this may be
@@ -136,6 +137,7 @@ def _parse_snapshot(data: dict[str, Any]) -> Snapshot:
                 balance=Decimal(acct["balance"]),
                 balance_date=_ts_to_date(acct["balance-date"]),
                 source="simplefin",
+                mask=infer_mask(acct["name"]),
             )
         )
         for txn in acct.get("transactions", []):

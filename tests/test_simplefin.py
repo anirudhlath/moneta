@@ -86,6 +86,24 @@ async def test_fetch_parses_snapshot() -> None:
     assert snap.holdings[0].quantity == 10.5
 
 
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [("Checking (1234)", "1234"), ("Checking", None), ("Savings (joint)", None)],
+)
+async def test_fetch_retains_inferable_account_mask(name: str, expected: str | None) -> None:
+    payload = json.loads(json.dumps(SIMPLEFIN_PAYLOAD))
+    payload["accounts"][0]["name"] = name
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    snap = await SimpleFINAdapter(
+        "https://u:p@bridge.example/simplefin",
+        client=_mock_client(httpx.MockTransport(handle)),
+    ).fetch()
+    assert snap.accounts[0].mask == expected
+
+
 async def test_bridge_errors_surface_as_warnings() -> None:
     payload = json.loads(json.dumps(SIMPLEFIN_PAYLOAD))
     payload["errors"] = ["ACT-1: re-authenticate at the institution"]
