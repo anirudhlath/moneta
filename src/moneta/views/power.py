@@ -16,6 +16,7 @@ from moneta.models import (
 )
 from moneta.queries import (
     classified_links,
+    foreign_series_ids,
     latest_successful_sync_at,
     loan_payment_stats,
     primary_currency,
@@ -68,6 +69,8 @@ def _series_lines(series: Iterable[RecurringSeries]) -> tuple[list[SeriesLine], 
 async def power_report(session: AsyncSession, today: date) -> PowerReport:
     month_start, month_end = month_bounds(today)
     logical = await load_logical_data(session)
+    primary = await primary_currency(session)
+    foreign_series = foreign_series_ids(logical, primary)
     series = (
         (
             await session.execute(
@@ -77,7 +80,12 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
         .scalars()
         .all()
     )
-    links = await classified_links(session)
+    series = [s for s in series if s.id not in foreign_series]
+    links = [
+        link
+        for link in await classified_links(session)
+        if logical.accounts[link.outflow_account_id].currency == primary
+    ]
     cc_series = {
         link.outflow_series_id
         for link in links
@@ -143,7 +151,6 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
         fixed.sort(key=lambda line: line.monthly_cents, reverse=True)
     upcoming.sort(key=lambda u: u.expected_on)
 
-    primary = await primary_currency(session)
     by_outflow = {link.outflow_id: link for link in links}
     inflow_ids = {link.inflow_id for link in links}
     # date-range-only fetch: spend_reason (same predicate transactions.py's trust view

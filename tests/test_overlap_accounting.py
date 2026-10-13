@@ -458,3 +458,338 @@ async def test_reviewed_transfer_keeps_priority_and_provenance(
     link = (await session.scalars(select(TransferLink))).one()
     assert (link.outflow_id, link.inflow_id, link.method) == (chosen.id, inn.id, method)
     assert competitor.id != link.outflow_id
+
+
+@pytest.mark.parametrize("human_source", ["simplefin", "plaid"])
+@pytest.mark.parametrize("human_accepts", [False, True])
+async def test_alias_transfer_decisions_reduce_human_precedence_after_mapping(
+    session: AsyncSession, human_source: str, human_accepts: bool
+) -> None:
+    from moneta.pipelines.reconcile import rebuild_logical_derived
+    from moneta.pipelines.transaction_overlap import set_transaction_duplicate
+
+    root = await make_account(session, source="simplefin")
+    alias = await make_account(session, source="plaid", canonical_account_id=root.id)
+    target = await make_account(session, source="simplefin")
+    out = await make_txn(session, root, amount_cents=-1000, description="Payment Store")
+    copy = await make_txn(session, alias, amount_cents=-1000, description="Payment Store")
+    inn = await make_txn(session, target, amount_cents=1000, description="Payment Store")
+    human, machine = (out, copy) if human_source == "simplefin" else (copy, out)
+    human_item = ReviewItem(
+        kind=ReviewKind.transfer_pair,
+        question="human",
+        payload={"outflow_id": human.id, "candidates": [inn.id]},
+        status=ReviewStatus.resolved,
+        resolution={"inflow_id": inn.id if human_accepts else None, "resolved_by": "manual"},
+    )
+    llm_item = ReviewItem(
+        kind=ReviewKind.transfer_pair,
+        question="machine",
+        payload={"outflow_id": machine.id, "candidates": [inn.id]},
+        status=ReviewStatus.resolved,
+        resolution={"inflow_id": None if human_accepts else inn.id, "resolved_by": "llm"},
+    )
+    session.add_all([human_item, llm_item])
+    await session.flush()
+    await set_transaction_duplicate(session, copy.id, out.id)
+    await session.commit()
+    history = [
+        (i.payload.copy(), i.resolution.copy() if i.resolution else None)
+        for i in [human_item, llm_item]
+    ]
+    for _ in range(3):
+        await reconcile_provider_overlap(session, TODAY)
+        await rebuild_logical_derived(session, None, TODAY)
+        links = list(await session.scalars(select(TransferLink)))
+        assert [(link.outflow_id, link.inflow_id, link.method) for link in links] == (
+            [(out.id, inn.id, "manual")] if human_accepts else []
+        )
+    assert [(i.payload, i.resolution) for i in [human_item, llm_item]] == history
+
+
+@pytest.mark.parametrize("pending_review", [False, True])
+@pytest.mark.parametrize("resolved_by", ["manual", "llm"])
+async def test_conflicting_alias_transfer_decisions_require_one_review(
+    session: AsyncSession, resolved_by: str, pending_review: bool
+) -> None:
+    from moneta.pipelines.reconcile import rebuild_logical_derived
+    from moneta.pipelines.review import apply_resolution
+    from moneta.pipelines.transaction_overlap import set_transaction_duplicate
+
+    root = await make_account(session, source="simplefin")
+    alias = await make_account(session, source="plaid", canonical_account_id=root.id)
+    target = await make_account(session, source="simplefin")
+    out = await make_txn(session, root, amount_cents=-1000, description="Payment Store")
+    copy = await make_txn(session, alias, amount_cents=-1000, description="Payment Store")
+    inn = await make_txn(session, target, amount_cents=1000, description="Payment Store")
+    if pending_review:
+        session.add(
+            ReviewItem(
+                kind=ReviewKind.transfer_pair,
+                question="earlier open question",
+                payload={"outflow_id": out.id, "candidates": [inn.id]},
+            )
+        )
+        await session.flush()
+    old = []
+    for txn, choice in [(out, None), (copy, inn.id)]:
+        item = ReviewItem(
+            kind=ReviewKind.transfer_pair,
+            question="old",
+            payload={"outflow_id": txn.id, "candidates": [inn.id]},
+            status=ReviewStatus.resolved,
+            resolution={"inflow_id": choice, "resolved_by": resolved_by},
+        )
+        session.add(item)
+        old.append(item)
+    await session.flush()
+    await set_transaction_duplicate(session, copy.id, out.id)
+    await session.commit()
+    history = [(i.payload.copy(), i.resolution.copy() if i.resolution else None) for i in old]
+    for _ in range(2):
+        await reconcile_provider_overlap(session, TODAY)
+        await rebuild_logical_derived(session, None, TODAY)
+        assert list(await session.scalars(select(TransferLink))) == []
+        pending = list(
+            await session.scalars(
+                select(ReviewItem).where(
+                    ReviewItem.kind == ReviewKind.transfer_pair,
+                    ReviewItem.status == ReviewStatus.open,
+                )
+            )
+        )
+        assert len(pending) == 1
+        assert pending[0].payload["outflow_id"] == out.id
+        assert pending[0].payload["candidates"] == [inn.id]
+        assert pending[0].payload["llm_flagged"] is True
+    await apply_resolution(session, pending[0], {"inflow_id": inn.id})
+    await session.commit()
+    for _ in range(2):
+        await reconcile_provider_overlap(session, TODAY)
+        await rebuild_logical_derived(session, None, TODAY)
+        links = list(await session.scalars(select(TransferLink)))
+        assert [(link.outflow_id, link.inflow_id, link.method) for link in links] == [
+            (out.id, inn.id, "manual")
+        ]
+    assert [(i.payload, i.resolution) for i in old] == history
+
+
+@pytest.mark.parametrize("shared_merchant", [False, True])
+async def test_currency_flip_filters_series_samples_and_restores_reviewed_history(
+    session: AsyncSession, shared_merchant: bool
+) -> None:
+    from moneta.models import RecurringSeries
+    from moneta.pipelines.reconcile import rebuild_logical_derived
+    from moneta.pipelines.review import review_context
+
+    usd = await make_account(session, source="simplefin", currency="USD")
+    alias = await make_account(session, source="plaid", currency="USD")
+    eur = await make_account(session, currency="EUR")
+    await make_account(session, currency="EUR")
+    eur_merchant = "Bill" if shared_merchant else "Euro Bill"
+    for month in [5, 6, 7]:
+        await make_txn(
+            session,
+            usd,
+            posted_on=date(2026, month, 1),
+            amount_cents=-1000,
+            merchant="Bill",
+            description="Bill",
+        )
+        await make_txn(
+            session,
+            eur,
+            posted_on=date(2026, month, 1),
+            amount_cents=-2000,
+            merchant=eur_merchant,
+            description=eur_merchant,
+        )
+    reviewed = ReviewItem(
+        kind=ReviewKind.recurring_cluster,
+        question="bill",
+        payload={"merchant": "Bill", "direction": "outflow"},
+        status=ReviewStatus.resolved,
+        resolution={"is_recurring": True, "resolved_by": "manual"},
+    )
+    session.add(reviewed)
+    await session.commit()
+    assert await primary_currency(session) == "USD"
+    await rebuild_logical_derived(session, None, TODAY)
+    assert (await power_report(session, TODAY)).total_fixed_cents == 1000
+    alias.canonical_account_id = usd.id
+    await session.commit()
+    assert await primary_currency(session) == "EUR"
+    for _ in range(2):
+        await rebuild_logical_derived(session, None, TODAY)
+        assert (await power_report(session, TODAY)).total_fixed_cents == 2000
+        context = await review_context(session, reviewed)
+        assert [s["amount_cents"] for s in context.get("samples", [])] == (
+            [-2000] * 3 if shared_merchant else []
+        )
+    alias.canonical_account_id = None
+    await session.commit()
+    for _ in range(2):
+        await rebuild_logical_derived(session, None, TODAY)
+        assert (await power_report(session, TODAY)).total_fixed_cents == 1000
+    assert reviewed.resolution == {"is_recurring": True, "resolved_by": "manual"}
+    assert len(list(await session.scalars(select(RecurringSeries)))) == (
+        1 if shared_merchant else 2
+    )
+
+
+async def test_foreign_series_events_and_verification_do_not_use_old_currency(
+    session: AsyncSession,
+) -> None:
+    from moneta.models import SeriesEvent
+    from moneta.pipelines.events import emit_series_events
+    from moneta.pipelines.review import review_context, verify_series
+    from tests.factories import make_price_change_item, make_series
+    from tests.test_autoreview import ScriptedLLM
+
+    usd = await make_account(session, currency="USD")
+    await make_account(session, currency="EUR")
+    await make_account(session, currency="EUR")
+    series = await make_series(
+        session, merchant="Foreign Bill", expected_cents=-1000, next_expected_on=date(2026, 6, 1)
+    )
+    for month in [6, 7]:
+        await make_txn(
+            session,
+            usd,
+            posted_on=date(2026, month, 1),
+            amount_cents=-2000,
+            merchant="Foreign Bill",
+            series_id=series.id,
+        )
+    llm = ScriptedLLM({"Foreign Bill": {"classification": "bill", "confident": True}})
+    assert (await verify_series(session, llm)).verified == 0
+    assert list(await session.scalars(select(ReviewItem))) == []
+    assert await emit_series_events(session, None, TODAY) == 0
+    assert series.expected_cents == -1000
+    assert series.next_expected_on == date(2026, 6, 1)
+    assert list(await session.scalars(select(SeriesEvent))) == []
+    item = make_price_change_item(
+        series.id,
+        payload={
+            "series_id": series.id,
+            "merchant": "Foreign Bill",
+            "old_cents": -1000,
+            "new_cents": -2000,
+        },
+    )
+    context = await review_context(session, item)
+    assert context == {}
+
+
+async def test_foreign_loan_payments_do_not_contribute_to_primary_power(
+    session: AsyncSession,
+) -> None:
+    bank = await make_account(session, currency="USD")
+    loan = await make_account(session, currency="USD", type=AccountType.loan, balance_cents=-10000)
+    for _ in range(3):
+        await make_account(session, currency="EUR")
+    await make_txn(session, bank, amount_cents=-1000, description="Loan Payment")
+    await make_txn(session, loan, amount_cents=1000, description="Loan Payment")
+    await link_transfers(session, None)
+    assert (await power_report(session, TODAY)).total_fixed_cents == 0
+    assert await compute_obligations(session, TODAY) == []
+
+
+@pytest.mark.parametrize("currency_evidence", [False, True])
+async def test_old_currency_price_review_cannot_reprice_rebuilt_series(
+    session: AsyncSession, currency_evidence: bool
+) -> None:
+    from moneta.models import SeriesEvent
+    from moneta.pipelines.review import apply_resolution
+    from tests.factories import make_series
+
+    usd = await make_account(session, currency="USD")
+    eur = await make_account(session, currency="EUR")
+    await make_account(session, currency="EUR")
+    series = await make_series(session, merchant="Bill", expected_cents=-2000)
+    old = await make_txn(
+        session, usd, merchant="Bill", amount_cents=-1200, posted_on=date(2026, 6, 1)
+    )
+    await make_txn(session, eur, merchant="Bill", amount_cents=-2000, series_id=series.id)
+    payload = {
+        "series_id": series.id,
+        "merchant": "Bill",
+        "old_cents": -1000,
+        "new_cents": -1200,
+        "occurred_on": "2026-06-01",
+    }
+    if currency_evidence:
+        payload.update({"currency": "USD", "transaction_id": old.id})
+    item = ReviewItem(kind=ReviewKind.price_change, question="Old USD price", payload=payload)
+    session.add(item)
+    await session.commit()
+    with pytest.raises(ValueError, match="currency"):
+        await apply_resolution(session, item, {"is_price_change": True})
+    assert series.expected_cents == -2000
+    assert item.status == ReviewStatus.open
+    assert list(await session.scalars(select(SeriesEvent))) == []
+
+
+async def test_currency_transition_preserves_legacy_price_review_denomination(
+    session: AsyncSession,
+) -> None:
+    from moneta.models import RecurringSeries
+    from moneta.pipelines.review import apply_resolution
+
+    usd = await make_account(session, currency="USD", source="simplefin")
+    alias = await make_account(session, currency="USD", source="plaid")
+    eur = await make_account(session, currency="EUR")
+    await make_account(session, currency="EUR")
+    for month in [5, 6, 7]:
+        await make_txn(
+            session, usd, posted_on=date(2026, month, 1), amount_cents=-1000, merchant="Bill"
+        )
+        await make_txn(
+            session, eur, posted_on=date(2026, month, 1), amount_cents=-2000, merchant="Bill"
+        )
+    await detect_recurring(session, None, TODAY)
+    series = (await session.scalars(select(RecurringSeries))).one()
+    # The provider corrected the old observation; the legacy request still carries
+    # its original proposal, without modern transaction/currency evidence.
+    request = ReviewItem(
+        kind=ReviewKind.price_change,
+        question="old price",
+        payload={
+            "series_id": series.id,
+            "merchant": "Bill",
+            "old_cents": -1000,
+            "new_cents": -1200,
+            "occurred_on": "2026-07-01",
+        },
+    )
+    session.add(request)
+    alias.canonical_account_id = usd.id
+    await session.commit()
+    await detect_recurring(session, None, TODAY)
+    assert series.expected_cents == -2000
+    with pytest.raises(ValueError, match="currency"):
+        await apply_resolution(session, request, {"is_price_change": True})
+    assert series.expected_cents == -2000
+
+
+async def test_currency_switch_never_rewinds_series_event_cursor(session: AsyncSession) -> None:
+    from moneta.models import RecurringSeries
+
+    usd = await make_account(session, currency="USD", source="simplefin")
+    alias = await make_account(session, currency="USD", source="plaid")
+    eur = await make_account(session, currency="EUR")
+    await make_account(session, currency="EUR")
+    for month in [5, 6, 7]:
+        await make_txn(
+            session, usd, posted_on=date(2026, month, 1), amount_cents=-1000, merchant="Bill"
+        )
+        await make_txn(
+            session, eur, posted_on=date(2026, month, 1), amount_cents=-2000, merchant="Bill"
+        )
+    await detect_recurring(session, None, TODAY)
+    series = (await session.scalars(select(RecurringSeries))).one()
+    series.next_expected_on = date(2026, 9, 1)
+    alias.canonical_account_id = usd.id
+    await session.commit()
+    await detect_recurring(session, None, TODAY)
+    assert series.next_expected_on == date(2026, 9, 1)

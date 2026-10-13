@@ -18,6 +18,7 @@ from moneta.models import (
     dollars,
 )
 from moneta.pipelines.recurring import missed_event
+from moneta.queries import foreign_series_ids, price_review_matches_currency, primary_currency
 
 _PRICE_CHANGE_THRESHOLD = 0.05
 
@@ -60,6 +61,13 @@ def apply_price_change(
 
 async def emit_series_events(session: AsyncSession, llm: Classifier | None, today: date) -> int:
     logical = await load_logical_data(session)
+    primary = await primary_currency(session)
+    foreign_series = foreign_series_ids(logical, primary)
+    txns = [
+        t
+        for t in logical.transactions
+        if logical.accounts[logical.account_roots[t.account_id]].currency == primary
+    ]
     emitted = 0
     # price-change questions already in flight (open) or answered "no" (denied)
     open_series: set[int] = set()
@@ -67,6 +75,8 @@ async def emit_series_events(session: AsyncSession, llm: Classifier | None, toda
     for item in (
         await session.execute(select(ReviewItem).where(ReviewItem.kind == ReviewKind.price_change))
     ).scalars():
+        if not price_review_matches_currency(item, logical, primary):
+            continue
         sid = item.payload.get("series_id")
         if not isinstance(sid, int):
             continue
@@ -86,13 +96,15 @@ async def emit_series_events(session: AsyncSession, llm: Classifier | None, toda
         .all()
     )
     for s in series_list:
+        if s.id in foreign_series:
+            continue
         grace = timedelta(days=GRACE_DAYS[s.cadence])
 
         while today > s.next_expected_on + grace:
             window_hit = any(
                 t.series_id == s.id
                 and s.next_expected_on - grace <= t.posted_on <= s.next_expected_on + grace
-                for t in logical.transactions
+                for t in txns
             )
             if not window_hit:
                 session.add(missed_event(s.id, s.next_expected_on))
@@ -100,7 +112,7 @@ async def emit_series_events(session: AsyncSession, llm: Classifier | None, toda
             s.next_expected_on = advance_expected_on(s.next_expected_on, s.cadence)
 
         latest_two = sorted(
-            (t for t in logical.transactions if t.series_id == s.id),
+            (t for t in txns if t.series_id == s.id),
             key=lambda t: (t.posted_on, t.id),
             reverse=True,
         )[:2]
@@ -137,6 +149,8 @@ async def emit_series_events(session: AsyncSession, llm: Classifier | None, toda
                     ),
                     payload={
                         "series_id": s.id,
+                        "currency": primary,
+                        "transaction_id": latest.id,
                         "merchant": s.merchant,
                         "old_cents": s.expected_cents,
                         "new_cents": latest.amount_cents,

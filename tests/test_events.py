@@ -183,7 +183,7 @@ async def test_price_change_confident_yes_applies(session: AsyncSession) -> None
 
 
 async def test_price_change_unconfident_queues_item_once(session: AsyncSession) -> None:
-    s, _ = await _drifted_series(session)
+    s, txn = await _drifted_series(session)
     llm = PriceLLM({"is_price_change": True, "confident": False})
     assert await emit_series_events(session, llm=llm, today=date(2026, 7, 16)) == 0
     assert s.expected_cents == -1599  # not applied
@@ -191,6 +191,8 @@ async def test_price_change_unconfident_queues_item_once(session: AsyncSession) 
     assert item.kind == ReviewKind.price_change and item.status == ReviewStatus.open
     assert item.payload == {
         "series_id": s.id,
+        "currency": "USD",
+        "transaction_id": txn.id,
         "merchant": "Netflix",
         "old_cents": -1599,
         "new_cents": -1899,

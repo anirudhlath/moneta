@@ -32,7 +32,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.llm import Classifier
 from moneta.logical import load_logical_data
-from moneta.models import AccountType, LinkMethod, ReviewItem, ReviewKind, Transaction, TransferLink
+from moneta.models import (
+    AccountType,
+    LinkMethod,
+    ReviewItem,
+    ReviewKind,
+    ReviewStatus,
+    Transaction,
+    TransferLink,
+)
 from moneta.pipelines.transaction_overlap import reviewed_transfer_choices
 
 _TRANSFER_PAT = re.compile(
@@ -73,6 +81,66 @@ def _confidence(out: Transaction, inn: Transaction, out_type: AccountType) -> fl
     return conf
 
 
+@dataclass(frozen=True)
+class EffectiveTransferChoice:
+    inflow_id: int | None
+    method: LinkMethod
+
+
+def effective_transfer_choices(
+    items: list[ReviewItem], roots: dict[int, int]
+) -> tuple[dict[int, EffectiveTransferChoice], dict[int, list[ReviewItem]]]:
+    """Reduce review provenance after mapping observations to the same occurrence.
+
+    Latest human answers beat machine answers for each observation. Equal-strength
+    answers on different observations must agree, or need a new human decision.
+    A conflict resolution names the prior review IDs it adjudicated; old ledger
+    rows remain untouched and a later, unrelated review can still raise a conflict.
+    """
+    valid = [item for item in items if reviewed_transfer_choices([item])]
+    superseded = {
+        review_id
+        for item in valid
+        if item.resolution and item.resolution.get("resolved_by") != "llm"
+        for review_id in item.payload.get("transfer_review_ids", [])
+        if type(review_id) is int and review_id < item.id
+    }
+    latest: dict[int, ReviewItem] = {}
+
+    def priority(item: ReviewItem) -> tuple[bool, int]:
+        assert item.resolution is not None
+        return item.resolution.get("resolved_by") != "llm", item.id
+
+    for item in valid:
+        row = item.payload["outflow_id"]
+        if row not in roots or item.id in superseded:
+            continue
+        if row not in latest or priority(item) > priority(latest[row]):
+            latest[row] = item
+    groups: dict[int, list[ReviewItem]] = {}
+    for row, item in latest.items():
+        groups.setdefault(roots[row], []).append(item)
+    selected: dict[int, EffectiveTransferChoice] = {}
+    conflicts: dict[int, list[ReviewItem]] = {}
+    for row, group in groups.items():
+        strength = max(priority(item)[0] for item in group)
+        strongest = [item for item in group if priority(item)[0] == strength]
+        targets = {
+            roots.get(item.resolution["inflow_id"], item.resolution["inflow_id"])
+            if item.resolution["inflow_id"] is not None
+            else None
+            for item in strongest
+            if item.resolution is not None
+        }
+        if len(targets) > 1:
+            conflicts[row] = strongest
+        else:
+            selected[row] = EffectiveTransferChoice(
+                next(iter(targets)), LinkMethod.manual if strength else LinkMethod.llm
+            )
+    return selected, conflicts
+
+
 async def link_transfers(session: AsyncSession, llm: Classifier | None) -> TransferStats:
     stats = TransferStats()
     logical = await load_logical_data(session)
@@ -91,30 +159,52 @@ async def link_transfers(session: AsyncSession, llm: Classifier | None) -> Trans
         if "outflow_id" in item.payload
     }
     items = list(await session.scalars(select(ReviewItem)))
-    choices = reviewed_transfer_choices(items)
-    selected = {
-        logical.transaction_roots[row]: logical.transaction_roots.get(target)
-        if target is not None
-        else None
-        for row, target in choices.items()
-        if row in logical.transaction_roots
-    }
-    manual_choices = {
-        logical.transaction_roots[row]
-        for item in items
-        if item.resolution
-        and item.resolution.get("resolved_by") not in ("llm", "reconciliation")
-        and "inflow_id" in item.resolution
-        and (row := item.payload.get("outflow_id")) in choices
-        and row in logical.transaction_roots
-        and choices[row] == item.resolution["inflow_id"]
-    }
+    choices, conflicts = effective_transfer_choices(items, logical.transaction_roots)
+    selected = {row: choice.inflow_id for row, choice in choices.items()}
+    for row, conflicting in conflicts.items():
+        evidence = sorted(item.id for item in conflicting)
+        if any(
+            item.status == ReviewStatus.open and item.payload.get("transfer_review_ids") == evidence
+            for item in items
+        ):
+            continue
+        candidates = sorted(
+            {
+                logical.transaction_roots.get(
+                    item.resolution["inflow_id"], item.resolution["inflow_id"]
+                )
+                for item in conflicting
+                if item.resolution and item.resolution["inflow_id"] is not None
+            }
+        )
+        for pending in items:
+            if (
+                pending.kind == ReviewKind.transfer_pair
+                and pending.status == ReviewStatus.open
+                and logical.transaction_roots.get(pending.payload.get("outflow_id", -1)) == row
+            ):
+                pending.status = ReviewStatus.resolved
+                pending.resolution = {
+                    "resolved_by": "reconciliation",
+                    "superseded_reason": "Replaced by a review of the current conflicting choices",
+                }
+        pending = ReviewItem(kind=ReviewKind.transfer_pair, question="")
+        session.add(pending)
+        stats.review += 1
+        pending.question = "Conflicting reviewed transfer choices; which is correct?"
+        pending.payload = {
+            "outflow_id": row,
+            "candidates": candidates,
+            "transfer_review_ids": evidence,
+            "llm_flagged": True,
+        }
     txns = logical.transactions
     outflows = [
         t
         for t in txns
         if t.amount_cents < 0
         and t.id not in linked_ids
+        and t.id not in conflicts
         and not (t.id in selected and selected[t.id] is None)
     ]
     inflows = [t for t in txns if t.amount_cents > 0 and t.id not in linked_ids]
@@ -152,7 +242,7 @@ async def link_transfers(session: AsyncSession, llm: Classifier | None) -> Trans
             _open_review(session, out, [c.inflow.id for c in original], reviewed, stats)
             continue
         if out.id in selected:
-            manual = out.id in manual_choices
+            manual = choices[out.id].method == LinkMethod.manual
             cands[0].confidence = 1.0 if manual else 0.9
             _add_link(session, cands[0], LinkMethod.manual if manual else LinkMethod.llm, used)
             stats.linked += 1

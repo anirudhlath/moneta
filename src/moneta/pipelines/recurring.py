@@ -23,7 +23,7 @@ from moneta.models import (
     recurring_cluster_item,
     series_key,
 )
-from moneta.queries import classified_links, primary_currency
+from moneta.queries import classified_links, foreign_series_ids, primary_currency
 
 _MIN_OCCURRENCES = 3
 _AMOUNT_TOLERANCE = 0.20
@@ -142,6 +142,7 @@ async def detect_recurring(
     # only the primary currency's transactions can form or update a series
     primary = await primary_currency(session)
     logical = await load_logical_data(session)
+    foreign_series = foreign_series_ids(logical, primary)
     txns = sorted(
         (
             t
@@ -272,10 +273,51 @@ async def detect_recurring(
             )
             stats.new_series += 1
         else:
+            changing_currency = series.id in foreign_series
+            if changing_currency:
+                # Merchant/direction is the existing series identity. Rebuild its
+                # monetary state from this currency and retire only derived tags;
+                # source observations and classification history stay untouched.
+                previous_currencies = {
+                    logical.accounts[logical.account_roots[txn.account_id]].currency
+                    for txn in logical.transactions
+                    if txn.series_id == series.id
+                }
+                for item in await session.scalars(
+                    select(ReviewItem).where(
+                        ReviewItem.kind == ReviewKind.price_change,
+                        ReviewItem.status == ReviewStatus.open,
+                    )
+                ):
+                    if (
+                        item.payload.get("series_id") == series.id
+                        and "currency" not in item.payload
+                    ):
+                        item.payload = {
+                            **item.payload,
+                            "currency": (
+                                next(iter(previous_currencies))
+                                if len(previous_currencies) == 1
+                                else "ambiguous"
+                            ),
+                        }
+                for txn in logical.transactions:
+                    if (
+                        txn.series_id == series.id
+                        and logical.accounts[logical.account_roots[txn.account_id]].currency
+                        != primary
+                    ):
+                        txn.series_id = None
+                series.expected_cents = expected
+                foreign_series.discard(series.id)
             advanced_on = max(series.next_expected_on, next_on)
             if stale:
                 status = SeriesStatus.ended
-            elif series.status == SeriesStatus.ended and significant[-1].series_id is None:
+            elif (
+                series.status == SeriesStatus.ended
+                and significant[-1].series_id is None
+                and not changing_currency
+            ):
                 # the newest occurrence is untagged ⇒ genuinely new since the last run: an
                 # ended series (auto- or manually) that charges again at cadence revives
                 # (minor adjustments are never tagged, so they can't trigger this)
@@ -295,7 +337,8 @@ async def detect_recurring(
                         session.add(missed_event(series.id, window))
                     window = advance_expected_on(window, cadence)
             changed = (
-                series.next_expected_on != advanced_on
+                changing_currency
+                or series.next_expected_on != advanced_on
                 or series.cadence != cadence
                 or series.status != status
                 or series.discretionary != discretionary
@@ -318,7 +361,7 @@ async def detect_recurring(
                 newest_by_series.get(txn.series_id, txn.posted_on), txn.posted_on
             )
     for series in existing.values():
-        if series.status != SeriesStatus.active:
+        if series.status != SeriesStatus.active or series.id in foreign_series:
             continue
         # detect_recurring tags every occurrence it matches, so an active series
         # normally always has tagged txns. Zero tagged txns means either there's no

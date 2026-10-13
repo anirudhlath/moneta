@@ -32,6 +32,7 @@ from moneta.models import (
     series_key,
 )
 from moneta.pipelines.events import apply_price_change
+from moneta.queries import foreign_series_ids, price_review_matches_currency, primary_currency
 
 _MERCHANT_PROMPT = """You are auto-resolving a personal-finance review question.
 Name the merchant behind this bank descriptor.
@@ -82,8 +83,14 @@ def _prompt_txn(summary: dict[str, Any]) -> dict[str, Any]:
 
 async def _recent_occurrences(session: AsyncSession, series_id: int) -> list[Transaction]:
     logical = await load_logical_data(session)
+    primary = await primary_currency(session)
     return sorted(
-        (t for t in logical.transactions if t.series_id == series_id),
+        (
+            t
+            for t in logical.transactions
+            if t.series_id == series_id
+            and logical.accounts[logical.account_roots[t.account_id]].currency == primary
+        ),
         key=lambda t: (t.posted_on, t.id),
         reverse=True,
     )[:6]
@@ -123,8 +130,17 @@ async def review_context(session: AsyncSession, item: ReviewItem) -> dict[str, A
         if not isinstance(merchant, str):
             return {}
         logical = await load_logical_data(session)
+        primary = await primary_currency(session)
+        matching = [t for t in logical.transactions if t.merchant == merchant]
+        domestic = [
+            t
+            for t in matching
+            if logical.accounts[logical.account_roots[t.account_id]].currency == primary
+        ]
+        if matching and not domestic:
+            return {}
         txns = sorted(
-            (t for t in logical.transactions if t.merchant == merchant),
+            domestic,
             key=lambda t: (t.posted_on, t.id),
             reverse=True,
         )[:6]
@@ -138,6 +154,9 @@ async def review_context(session: AsyncSession, item: ReviewItem) -> dict[str, A
             "suggested": item.payload.get("fallback"),
         }
     if item.kind == ReviewKind.price_change:
+        logical = await load_logical_data(session)
+        if not price_review_matches_currency(item, logical, await primary_currency(session)):
+            return {}
         old, new = item.payload.get("old_cents"), item.payload.get("new_cents")
         series_id = item.payload.get("series_id")
         samples = (
@@ -218,6 +237,9 @@ async def apply_resolution(
         for series in (await session.execute(stmt)).scalars():
             series.discretionary = bool(resolution.get("discretionary"))
     elif item.kind == ReviewKind.price_change and resolution.get("is_price_change") is True:
+        logical = await load_logical_data(session)
+        if not price_review_matches_currency(item, logical, await primary_currency(session)):
+            raise ValueError("Price review currency does not match the current primary currency")
         series_row = await session.get(RecurringSeries, item.payload["series_id"])
         if series_row is not None:
             apply_price_change(
@@ -289,6 +311,8 @@ async def autoreview_items(session: AsyncSession, llm: Classifier) -> int:
                 candidates=[_prompt_txn(c) for c in context["candidates"]],
             )
         elif item.kind == ReviewKind.recurring_cluster:
+            if not context:
+                continue
             prompt = _RECURRING_PROMPT.format(
                 merchant=item.payload.get("merchant"),
                 direction=context.get("direction"),
@@ -343,7 +367,11 @@ async def verify_series(session: AsyncSession, llm: Classifier | None) -> Verify
         .scalars()
         .all()
     )
+    logical = await load_logical_data(session)
+    foreign_series = foreign_series_ids(logical, await primary_currency(session))
     for series in series_list:
+        if series.id in foreign_series:
+            continue
         if series_key(series.merchant, series.direction) in seen:
             continue
         occurrences = await _recent_occurrences(session, series.id)

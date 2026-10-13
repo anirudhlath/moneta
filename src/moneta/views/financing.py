@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from moneta.cadence import monthlyize
 from moneta.logical import load_logical_data
 from moneta.models import AccountType
-from moneta.queries import classified_links, loan_payment_stats
+from moneta.queries import classified_links, loan_payment_stats, primary_currency
 
 
 class Obligation(BaseModel):
@@ -23,10 +23,13 @@ class Obligation(BaseModel):
 
 async def compute_obligations(session: AsyncSession, today: date) -> list[Obligation]:
     logical = await load_logical_data(session)
+    primary = await primary_currency(session)
     loans = [
         a
         for a in logical.accounts.values()
-        if (a.type == AccountType.loan or a.financing_mode) and a.balance_cents != 0
+        if (a.type == AccountType.loan or a.financing_mode)
+        and a.balance_cents != 0
+        and a.currency == primary
     ]
     links = await classified_links(session)
     payments = loan_payment_stats(links)

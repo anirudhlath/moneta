@@ -17,8 +17,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.cadence import match_cadence
-from moneta.logical import load_logical_data
-from moneta.models import AccountType, Cadence, SyncRun, TransferLink
+from moneta.logical import LogicalData, load_logical_data
+from moneta.models import AccountType, Cadence, ReviewItem, SyncRun, TransferLink
 
 
 @dataclass(frozen=True)
@@ -45,6 +45,48 @@ async def primary_currency(session: AsyncSession) -> str:
         if counts
         else "USD"
     )
+
+
+def foreign_series_ids(logical: LogicalData, primary: str) -> set[int]:
+    """Tagged survivors identify the denomination of derived series amounts.
+
+    Untagged legacy/manual series retain their established behavior. Mixed tagged
+    currencies are ineligible until detection rebuilds the series for one currency.
+    """
+    currencies: dict[int, set[str]] = {}
+    for txn in logical.transactions:
+        if txn.series_id is not None:
+            currencies.setdefault(txn.series_id, set()).add(
+                logical.accounts[logical.account_roots[txn.account_id]].currency
+            )
+    return {sid for sid, values in currencies.items() if values != {primary}}
+
+
+def price_review_matches_currency(item: ReviewItem, logical: LogicalData, primary: str) -> bool:
+    """Validate new evidence and infer legacy requests from their original occurrence."""
+    currency = item.payload.get("currency")
+    if currency is not None and currency != primary:
+        return False
+    if item.payload.get("series_id") in foreign_series_ids(logical, primary):
+        return False
+    transaction_id = item.payload.get("transaction_id")
+    if type(transaction_id) is int:
+        survivor = logical.transaction_roots.get(transaction_id)
+        matching = [t for t in logical.transactions if t.id == survivor]
+        if not matching:
+            return False
+    else:
+        matching = [
+            t
+            for t in logical.transactions
+            if t.merchant == item.payload.get("merchant")
+            and t.amount_cents == item.payload.get("new_cents")
+            and t.posted_on.isoformat() == item.payload.get("occurred_on")
+        ]
+    currencies = {logical.accounts[logical.account_roots[t.account_id]].currency for t in matching}
+    # A legacy request without surviving evidence keeps its prior behavior, but
+    # contradictory or ambiguous surviving currency evidence must never reprice it.
+    return not currencies or currencies == {primary}
 
 
 async def latest_successful_sync_at(session: AsyncSession) -> datetime | None:

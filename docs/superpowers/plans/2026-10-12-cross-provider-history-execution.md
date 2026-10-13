@@ -48,7 +48,7 @@
 - Task 2: complete (commits 3ba8128..dfe37e5, review clean).
 - Task 3: complete (commits dfe37e5..25785fd, review clean; two deferred minors).
 - Task 4: complete (commits 25785fd..fae06d5, review clean).
-- Task 5: running — logical record integration throughout accounting; base `fae06d5`, implementer `/root/task5_integration`.
+- Task 5: fix round 1 running — base `b0e41ee`, original implementer `/root/task5_integration` resumed for two Important integration findings.
 - Task 6: pending — API, CLI and review operations.
 - Task 7: pending — documentation, whole-branch review and local rollout.
 
@@ -89,3 +89,7 @@ Task 4 fix 1 implementation: RED 9 failures, focused GREEN 46 passed; full suite
 Task 4: fix round 1/5 (3 addressed, 0 open; commits dcacc30..fae06d5). Scoped reviewer `/root/rereview4_decisions` found no new breakage, both gates pass. Existing transfer detection's no-transfer handling remains explicitly owned by Task 5.
 
 Task 5 diagnostic: confirmed that corrected alias currency can supply the selected balance under the root's currency label because existing group currency was validated only when linking. Minimal logical.py same-currency validation and a failing regression are included under the approved account-identity invariant; accounting must not implicitly convert money.
+
+Task 5 implementation: initial RED 8 failures/78 passes; subsequent integration and manual transfer-priority regressions observed RED before their changes. Final focused GREEN 194 passed; full suite 598 passed with pristine output, lint/format check/strict mypy passed (82 files). Shared accounting, recurrence/events/review/financing consumers now use logical data; source fetch/ingest/normalization and physical _sync_since unchanged. Rebuild is network-free with classifier None and writes no sync freshness. Controller recovered the truncated report's full gate/sign-off evidence before dispatching review.
+
+Task 5 review: `/root/review5_integration` reported spec noncompliance and quality needs fixes. Important: alias-to-survivor dictionary overwrites can replace human transfer rejection with LLM acceptance and misattribute method; a logical currency vote flip can mix old-currency series cents into new-currency power totals. Both are under a combined regression/fix wave. Public controls/rollout checks remain mapped to Tasks 6–7.
