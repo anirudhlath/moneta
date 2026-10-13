@@ -165,10 +165,16 @@ class _TransferChoice:
         )
 
 
-def reviewed_transfer_choices(items: list[ReviewItem]) -> dict[int, int | None]:
-    """Latest human choice wins over derived choices; keep original ledger rows intact."""
-    choices: dict[int, int | None] = {}
+def effective_transfer_reviews(items: list[ReviewItem]) -> dict[int, ReviewItem]:
+    """Select latest physical choices, then remove those explicitly adjudicated.
+
+    Matching and transfer linking must use the same provenance reduction. Removing
+    adjudicated rows before latest-per-observation selection would resurrect older
+    answers that the adjudicated answer had itself replaced.
+    """
+    latest: dict[int, ReviewItem] = {}
     priority: dict[int, tuple[bool, int]] = {}
+    superseded: set[int] = set()
     for item in items:
         resolution = item.resolution
         out_id = item.payload.get("outflow_id")
@@ -184,11 +190,26 @@ def reviewed_transfer_choices(items: list[ReviewItem]) -> dict[int, int | None]:
         inflow_id = resolution["inflow_id"]
         if inflow_id is not None and type(inflow_id) is not int:
             continue
+        if resolution.get("resolved_by") != "llm":
+            superseded.update(
+                review_id
+                for review_id in item.payload.get("transfer_review_ids", [])
+                if type(review_id) is int and review_id < item.id
+            )
         rank = (resolution.get("resolved_by") != "llm", item.id)
         if rank > priority.get(out_id, (False, -1)):
-            choices[out_id] = inflow_id
+            latest[out_id] = item
             priority[out_id] = rank
-    return choices
+    return {row: item for row, item in latest.items() if item.id not in superseded}
+
+
+def reviewed_transfer_choices(items: list[ReviewItem]) -> dict[int, int | None]:
+    """Effective physical choices; preserve human authority and immutable history."""
+    return {
+        row: item.resolution["inflow_id"]
+        for row, item in effective_transfer_reviews(items).items()
+        if item.resolution is not None
+    }
 
 
 def _decisions(

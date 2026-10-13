@@ -41,7 +41,7 @@ from moneta.models import (
     Transaction,
     TransferLink,
 )
-from moneta.pipelines.transaction_overlap import reviewed_transfer_choices
+from moneta.pipelines.transaction_overlap import effective_transfer_reviews
 
 _TRANSFER_PAT = re.compile(
     r"payment|pymt|transfer|xfer|ach|autopay|epay|billpay|deposit", re.IGNORECASE
@@ -97,32 +97,15 @@ def effective_transfer_choices(
     A conflict resolution names the prior review IDs it adjudicated; old ledger
     rows remain untouched and a later, unrelated review can still raise a conflict.
     """
-    valid = [item for item in items if reviewed_transfer_choices([item])]
-    superseded = {
-        review_id
-        for item in valid
-        if item.resolution and item.resolution.get("resolved_by") != "llm"
-        for review_id in item.payload.get("transfer_review_ids", [])
-        if type(review_id) is int and review_id < item.id
-    }
-    latest: dict[int, ReviewItem] = {}
 
     def priority(item: ReviewItem) -> tuple[bool, int]:
         assert item.resolution is not None
         return item.resolution.get("resolved_by") != "llm", item.id
 
-    for item in valid:
-        row = item.payload["outflow_id"]
-        if row not in roots:
-            continue
-        if row not in latest or priority(item) > priority(latest[row]):
-            latest[row] = item
     groups: dict[int, list[ReviewItem]] = {}
-    for row, item in latest.items():
-        # Adjudicate effective answers, never expose the history they replaced.
-        if item.id in superseded:
-            continue
-        groups.setdefault(roots[row], []).append(item)
+    for row, item in effective_transfer_reviews(items).items():
+        if row in roots:
+            groups.setdefault(roots[row], []).append(item)
     selected: dict[int, EffectiveTransferChoice] = {}
     conflicts: dict[int, list[ReviewItem]] = {}
     for row, group in groups.items():

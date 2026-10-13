@@ -22,7 +22,7 @@ from moneta.pipelines.account_overlap import set_account_link
 from moneta.pipelines.reconcile import rebuild_logical_derived, reconcile_provider_overlap
 from moneta.pipelines.review import apply_resolution
 from moneta.pipelines.run import run_sync
-from moneta.views.cashflow import accrual_spend
+from moneta.views.cashflow import accrual_income, accrual_spend
 from moneta.views.financing import compute_obligations
 from moneta.views.networth import net_worth_report
 from tests.conftest import RecordingAdapter
@@ -79,11 +79,17 @@ async def test_full_sync_pending_machine_question_cannot_overrule_human(
 
 
 @pytest.mark.parametrize("accepts", [False, True])
+@pytest.mark.parametrize("root_source", ["simplefin", "plaid"])
+@pytest.mark.parametrize("through_sync", [False, True])
 async def test_automatic_resolution_boundary_preserves_human_but_allows_new_human(
-    session: AsyncSession, accepts: bool
+    session: AsyncSession, accepts: bool, root_source: str, through_sync: bool
 ) -> None:
-    root = await make_account(session, source="simplefin")
-    alias = await make_account(session, source="plaid", canonical_account_id=root.id)
+    root = await make_account(session, source=root_source)
+    alias = await make_account(
+        session,
+        source="plaid" if root_source == "simplefin" else "simplefin",
+        canonical_account_id=root.id,
+    )
     target = await make_account(session, org_name="Other Bank")
     out = await make_txn(session, root)
     copy = await make_txn(session, alias, duplicate_of_id=out.id)
@@ -109,11 +115,116 @@ async def test_automatic_resolution_boundary_preserves_human_but_allows_new_huma
         )
     await apply_resolution(session, second, {"inflow_id": None if accepts else inn.id})
     await session.commit()
+    originals = [(i.payload.copy(), dict(i.resolution or {})) for i in [first, second]]
+    raw = [
+        (
+            t.id,
+            t.account_id,
+            t.aggregator_id,
+            t.posted_on,
+            t.amount_cents,
+            t.description,
+            t.raw.copy(),
+        )
+        for t in [out, copy, inn]
+    ]
+    assert second.payload["transfer_review_ids"] == [first.id]
+    for _ in range(2):
+        if through_sync:
+            await run_sync(
+                session, [RecordingAdapter("plaid"), RecordingAdapter("simplefin")], None, TODAY
+            )
+        else:
+            await reconcile_provider_overlap(session, TODAY)
+            await rebuild_logical_derived(session, None, TODAY)
+        logical = await load_logical_data(session)
+        assert [t.id for t in logical.transactions if t.amount_cents < 0] == [out.id]
+        assert [t.id for t in logical.transactions if t.amount_cents > 0] == [inn.id]
+        assert logical.transaction_roots[copy.id] == out.id
+        assert [
+            (link.outflow_id, link.inflow_id, link.method)
+            for link in await session.scalars(select(TransferLink))
+        ] == ([] if accepts else [(out.id, inn.id, "manual")])
+        assert await accrual_spend(session, date(2026, 7, 1), TODAY) == (1000 if accepts else 0)
+        assert await accrual_income(session, date(2026, 7, 1), TODAY) == (1000 if accepts else 0)
+        assert [(i.payload, i.resolution) for i in [first, second]] == originals
+        assert [
+            (t.id, t.account_id, t.aggregator_id, t.posted_on, t.amount_cents, t.description, t.raw)
+            for t in [out, copy, inn]
+        ] == raw
+    assert first.resolution == {"inflow_id": inn.id if accepts else None, "resolved_by": "manual"}
+
+
+@pytest.mark.parametrize("root_source", ["simplefin", "plaid"])
+async def test_adjudication_does_not_resurrect_older_physical_answer_during_matching(
+    session: AsyncSession, root_source: str
+) -> None:
+    from moneta.pipelines.transfers import effective_transfer_choices
+
+    root = await make_account(session, source=root_source)
+    alias = await make_account(
+        session,
+        source="plaid" if root_source == "simplefin" else "simplefin",
+        canonical_account_id=root.id,
+    )
+    target = await make_account(session, org_name="Other Bank")
+    out = await make_txn(session, root, description="Coffee House")
+    copy = await make_txn(session, alias, description="SQ *Coffee House", duplicate_of_id=out.id)
+    inn = await make_txn(session, target, amount_cents=1000)
+    history = []
+    for answer in (inn.id, None):
+        item = ReviewItem(
+            kind=ReviewKind.transfer_pair,
+            question="Earlier answer",
+            payload={"outflow_id": copy.id, "candidates": [inn.id]},
+            status=ReviewStatus.resolved,
+            resolution={"inflow_id": answer, "resolved_by": "manual"},
+        )
+        session.add(item)
+        await session.flush()
+        history.append(item)
+    # Existing adjudications can name just the effective latest physical answer.
+    # Choose no transfer: resurrecting the older acceptance would split the match.
+    adjudication = ReviewItem(
+        kind=ReviewKind.transfer_pair,
+        question="Adjudicated",
+        payload={
+            "outflow_id": out.id,
+            "candidates": [inn.id],
+            "transfer_review_ids": [history[-1].id],
+        },
+        status=ReviewStatus.resolved,
+        resolution={"inflow_id": None, "resolved_by": "manual"},
+    )
+    session.add(adjudication)
+    history.append(adjudication)
+    await session.commit()
+    original = [(i.payload.copy(), dict(i.resolution or {})) for i in history]
+    raw = [
+        (t.id, t.account_id, t.posted_on, t.amount_cents, t.description, t.raw.copy())
+        for t in [out, copy, inn]
+    ]
     for _ in range(2):
         await reconcile_provider_overlap(session, TODAY)
         await rebuild_logical_derived(session, None, TODAY)
-        assert len(list(await session.scalars(select(TransferLink)))) == (0 if accepts else 1)
-    assert first.resolution == {"inflow_id": inn.id if accepts else None, "resolved_by": "manual"}
+        await run_sync(
+            session, [RecordingAdapter("plaid"), RecordingAdapter("simplefin")], None, TODAY
+        )
+        logical = await load_logical_data(session)
+        assert [t.id for t in logical.transactions] == [out.id, inn.id]
+        assert logical.transaction_roots[copy.id] == out.id
+        assert await accrual_spend(session, date(2026, 7, 1), TODAY) == 1000
+        assert await accrual_income(session, date(2026, 7, 1), TODAY) == 1000
+        assert list(await session.scalars(select(TransferLink))) == []
+        selected, conflicts = effective_transfer_choices(
+            list(reversed(history)), logical.transaction_roots
+        )
+        assert not conflicts and selected[out.id].inflow_id is None
+        assert [(i.payload, i.resolution) for i in history] == original
+        assert [
+            (t.id, t.account_id, t.posted_on, t.amount_cents, t.description, t.raw)
+            for t in [out, copy, inn]
+        ] == raw
 
 
 @pytest.mark.parametrize("root_source", ["plaid", "simplefin"])
