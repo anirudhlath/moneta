@@ -88,11 +88,11 @@ Expected: all tests pass with no warnings; Ruff passes; strict mypy reports no i
 
 **Interfaces:** Consume `resolve_account_roots`. Produce `identity.normalize_institution(name: str) -> str`, `propose_account_links(session: AsyncSession) -> int`, and `set_account_link(session: AsyncSession, source_account_id: int, canonical_account_id: int | None) -> None`. Proposals flush changes but leave the commit to the coordinator. Explicit decisions use review payload `{"account_id": ID, "candidates": [ROOT_ID, ...]}` and resolution `{"canonical_account_id": ROOT_ID | null}`.
 
-- [ ] Write `test_same_suffix_distinct_sources_form_one_group` using matching institution, currency, compatible type, and mask across SimpleFIN/Plaid; assert one root and both original balances retained. Add `test_equal_balances_do_not_establish_identity`, `test_ambiguous_or_missing_mask_needs_review`, `test_same_mask_conflicting_products_needs_review`, and explicit-control tests rejecting cycles/currency conflicts and preserving existing user decisions. Write `test_manual_unlink_survives_next_reconciliation`: the last unlink decision prevents automatic relinking.
-- [ ] Run `uv run pytest -q tests/test_account_overlap.py`. Expected RED for missing linking/proposal behavior.
-- [ ] Implement conservative institution normalization (case/spacing and corroborated bank aliases), suffix/type/product checks, and unique cross-provider candidates. Record automatic links with their evidence; open review for ambiguous candidates. Explicit link/unlink validates the root graph and records durable decisions in chronological review history; preserve root metadata and retain source rows. Matching balances alone never trigger a link.
-- [ ] Run the focused tests. Expected GREEN, including rejected links leaving the original relationships unchanged.
-- [ ] Run the full gate and commit with `git commit -s -m "feat: reconcile shared provider account identities"`.
+- [x] Write `test_same_suffix_distinct_sources_form_one_group` using matching institution, currency, compatible type, and mask across SimpleFIN/Plaid; assert one root and both original balances retained. Add `test_equal_balances_do_not_establish_identity`, `test_ambiguous_or_missing_mask_needs_review`, `test_same_mask_conflicting_products_needs_review`, and explicit-control tests rejecting cycles/currency conflicts and preserving existing user decisions. Write `test_manual_unlink_survives_next_reconciliation`: the last unlink decision prevents automatic relinking.
+- [x] Run `uv run pytest -q tests/test_account_overlap.py`. Expected RED for missing linking/proposal behavior.
+- [x] Implement conservative institution normalization (case/spacing and corroborated bank aliases), suffix/type/product checks, and unique cross-provider candidates. Record automatic links with their evidence; open review for ambiguous candidates. Explicit link/unlink validates the root graph and records durable decisions in chronological review history; preserve root metadata and retain source rows. Matching balances alone never trigger a link.
+- [x] Run the focused tests. Expected GREEN, including rejected links leaving the original relationships unchanged.
+- [x] Run the full gate and commit with `git commit -s -m "feat: reconcile shared provider account identities"`.
 
 ### Task 4: Transaction observations, links, and stale reviews
 

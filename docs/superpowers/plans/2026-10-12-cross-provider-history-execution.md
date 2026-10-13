@@ -46,8 +46,8 @@
 
 - Task 1: complete (commits 4426f46..3ba8128, review clean).
 - Task 2: complete (commits 3ba8128..dfe37e5, review clean).
-- Task 3: fix round 1 running — metadata validation gap; fix base `aae93ef`, original implementer `/root/task3_accounts` resumed.
-- Task 4: pending — transaction observations, links and stale reviews.
+- Task 3: complete (commits dfe37e5..25785fd, review clean; two deferred minors).
+- Task 4: running — transaction observations, links and stale reviews; base `25785fd`, implementer `/root/task4_transactions`.
 - Task 5: pending — logical record integration throughout accounting.
 - Task 6: pending — API, CLI and review operations.
 - Task 7: pending — documentation, whole-branch review and local rollout.
@@ -71,3 +71,9 @@ Task 3 implementation: initial RED 26 failures, GREEN 26 passed, self-review reg
 Task 3 review: compliance failed and quality needs fixes. Important: explicit/automatic links accept conflicting saved types, promotion dates and financing metadata; original implementer is adding pre-mutation group validation and regressions. API/CLI and transaction rebuilding checks remain mapped to Tasks 4–6.
 
 Task 3: minor (deferred): account_overlap.py:245 retains open questions after all identity candidates disappear (e.g. corrected distinct masks). Carry to subsequent reconciliation work and final whole-branch review.
+
+Task 3 fix 1 implementation: metadata RED 13 failures; focused GREEN 51 passed; full suite 535 passed with pristine output, lint/format check/strict mypy passed (78 files). Group-wide types/promotion/recorded-financing decisions validated before mutation. Current historical PATCH defaults have no provenance; Task 6 must record future explicit financing PATCH decisions via existing financing review history. No schema expansion or inference of historical intent.
+
+Task 3: fix round 1/5 (1 addressed, 0 open; metadata guard verified, commits aae93ef..25785fd). Scoped reviewer `/root/rereview3_metadata` found no Critical/Important breakage; spec and task-quality gates now pass.
+
+Task 3: minor (deferred): account_overlap.py:295–296 can show metadata_conflicts from alternatives later excluded by manual protection; refresh conflict context from retained candidates. Carry to final review.
