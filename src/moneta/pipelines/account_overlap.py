@@ -62,6 +62,38 @@ async def _history(session: AsyncSession) -> list[ReviewItem]:
     )
 
 
+async def _financing_decisions(session: AsyncSession) -> dict[int, bool]:
+    """Recover explicit negatives, which otherwise look like the default False."""
+    decisions: dict[int, bool] = {}
+    items = await session.scalars(
+        select(ReviewItem)
+        .where(
+            ReviewItem.kind == ReviewKind.financing_account,
+            ReviewItem.status == ReviewStatus.resolved,
+        )
+        .order_by(ReviewItem.id)
+    )
+    for item in items:
+        account_id = item.payload.get("account_id")
+        financing = (item.resolution or {}).get("financing")
+        if type(account_id) is int and isinstance(financing, bool):
+            decisions[account_id] = financing
+    return decisions
+
+
+def _metadata_conflicts(accounts: list[Account], financing: dict[int, bool]) -> list[str]:
+    """Compare saved values across every member, without treating defaults as decisions."""
+    conflicts: list[str] = []
+    if len({a.type for a in accounts if a.type != AccountType.unknown}) > 1:
+        conflicts.append("type")
+    if len({a.promo_expires_on for a in accounts if a.promo_expires_on is not None}) > 1:
+        conflicts.append("promo_expires_on")
+    modes = {a.financing_mode for a in accounts if a.financing_mode or financing.get(a.id) is False}
+    if len(modes) > 1:
+        conflicts.append("financing_mode")
+    return conflicts
+
+
 async def set_account_link(
     session: AsyncSession,
     source_account_id: int,
@@ -108,6 +140,12 @@ async def set_account_link(
     }
     if len(currencies) != 1:
         raise ValueError("Cannot group accounts with conflicting currencies")
+    affected_accounts = [
+        account for account in accounts if proposed_roots[account.id] == affected_root
+    ]
+    conflicts = _metadata_conflicts(affected_accounts, await _financing_decisions(session))
+    if conflicts:
+        raise ValueError(f"Cannot group accounts with conflicting metadata: {', '.join(conflicts)}")
 
     history = await _history(session)
     for item in history:
@@ -163,6 +201,7 @@ async def propose_account_links(session: AsyncSession) -> int:
     for account in accounts:
         groups.setdefault(roots[account.id], []).append(account)
     history = await _history(session)
+    financing = await _financing_decisions(session)
     protected: set[int] = set()
     open_items: dict[int, ReviewItem] = {}
     for item in history:
@@ -179,6 +218,7 @@ async def propose_account_links(session: AsyncSession) -> int:
             protected.add(roots[account_id])
 
     candidates: dict[int, set[int]] = {root: set() for root in groups}
+    metadata_conflicts: dict[int, set[str]] = {root: set() for root in groups}
     strong: set[tuple[int, int]] = set()
     for left_id, right_id in combinations(groups, 2):
         left, right = groups[left_id], groups[right_id]
@@ -187,8 +227,15 @@ async def propose_account_links(session: AsyncSession) -> int:
             continue
         candidates[left_id].add(right_id)
         candidates[right_id].add(left_id)
+        conflicts = _metadata_conflicts(left + right, financing)
+        metadata_conflicts[left_id].update(conflicts)
+        metadata_conflicts[right_id].update(conflicts)
         sources = [account.source for account in left + right]
-        if len(set(sources)) == len(sources) and all(_corroborated(a, b) for a, b in pairs):
+        if (
+            not conflicts
+            and len(set(sources)) == len(sources)
+            and all(_corroborated(a, b) for a, b in pairs)
+        ):
             strong.add((left_id, right_id))
 
     linked: set[int] = set()
@@ -245,6 +292,8 @@ async def propose_account_links(session: AsyncSession) -> int:
         if not alternatives or account_id in linked or account_id in protected:
             continue
         payload = {"account_id": account_id, "candidates": sorted(alternatives)}
+        if metadata_conflicts[account_id]:
+            payload["metadata_conflicts"] = sorted(metadata_conflicts[account_id])
         if account_id in open_items:
             open_items[account_id].payload = payload
         else:

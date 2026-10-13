@@ -46,7 +46,7 @@
 
 - Task 1: complete (commits 4426f46..3ba8128, review clean).
 - Task 2: complete (commits 3ba8128..dfe37e5, review clean).
-- Task 3: running — conservative account grouping and reversible controls; base `dfe37e5`, implementer `/root/task3_accounts`.
+- Task 3: fix round 1 running — metadata validation gap; fix base `aae93ef`, original implementer `/root/task3_accounts` resumed.
 - Task 4: pending — transaction observations, links and stale reviews.
 - Task 5: pending — logical record integration throughout accounting.
 - Task 6: pending — API, CLI and review operations.
@@ -65,3 +65,9 @@ Task 2 Ruling: if the root has no vesting annotation and multiple alias annotati
 Task 2 implementation: focused RED missing projection, GREEN 21 passed; full suite 484 passed with pristine output, lint/format check/strict mypy passed (76 files). Immutable logical account/holding records select observations without writes; transaction survivors retain physical account IDs and consumers must translate `account_roots`.
 
 Task 2 review: `/root/review2_logical` approved compliance and quality, no findings. Downstream integration/matching/rollout checks are mapped to Tasks 3–7; controller confirmed the full gate and signed-off commit from the implementation report and git history.
+
+Task 3 implementation: initial RED 26 failures, GREEN 26 passed, self-review regressions fixed and final GREEN 32 passed. Full suite 516 passed with pristine output, lint/format check/strict mypy passed (78 files). Automatic evidence reviews and explicit chronological decisions flush without commit; caller rollback preserves atomicity. Source observations remain untouched.
+
+Task 3 review: compliance failed and quality needs fixes. Important: explicit/automatic links accept conflicting saved types, promotion dates and financing metadata; original implementer is adding pre-mutation group validation and regressions. API/CLI and transaction rebuilding checks remain mapped to Tasks 4–6.
+
+Task 3: minor (deferred): account_overlap.py:245 retains open questions after all identity candidates disappear (e.g. corrected distinct masks). Carry to subsequent reconciliation work and final whole-branch review.

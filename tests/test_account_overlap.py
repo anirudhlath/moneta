@@ -219,7 +219,7 @@ async def test_explicit_target_is_stored_as_root(session: AsyncSession) -> None:
 
     root, alias = await pair(session)
     alias.canonical_account_id = root.id
-    third = await make_account(session)
+    third = await make_account(session, type=AccountType.credit)
     await set_account_link(session, third.id, alias.id)
     assert third.canonical_account_id == root.id
     item = (await reviews(session))[0]
@@ -343,3 +343,182 @@ async def test_explicit_decision_is_rolled_back_with_callers_transaction(
     fresh = await session.get(Account, alias_id)
     assert fresh is not None and fresh.canonical_account_id is None
     assert await reviews(session) == []
+
+
+async def conflicting_metadata(session: AsyncSession, account: Account, field: str) -> None:
+    if field == "type":
+        account.type = AccountType.savings
+    elif field == "promotion":
+        account.promo_expires_on = date(2028, 1, 1)
+    else:
+        account.financing_mode = False
+        session.add(
+            ReviewItem(
+                kind=ReviewKind.financing_account,
+                question="Treat as financing?",
+                payload={"account_id": account.id},
+                status=ReviewStatus.resolved,
+                resolution={"financing": False, "resolved_by": "manual"},
+            )
+        )
+    await session.flush()
+
+
+@pytest.mark.parametrize("field", ["type", "promotion", "financing"])
+@pytest.mark.parametrize("location", ["source", "source_descendant", "target_descendant"])
+async def test_manual_metadata_conflict_rejects_atomically(
+    session: AsyncSession,
+    field: str,
+    location: str,
+) -> None:
+    from copy import deepcopy
+
+    from moneta.pipelines.account_overlap import set_account_link
+
+    root, alias = await pair(session)
+    conflicting = alias
+    if location != "source":
+        conflicting = await make_account(
+            session,
+            source="third",
+            name="Freedom",
+            org_name="Chase",
+            mask="1234",
+            type=AccountType.credit,
+            canonical_account_id=alias.id if location == "source_descendant" else root.id,
+        )
+    await conflicting_metadata(session, conflicting, field)
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.account_overlap,
+            question="Same account?",
+            payload={"account_id": alias.id, "candidates": [root.id]},
+        )
+    )
+    await session.flush()
+    before_accounts = [
+        (a.id, a.canonical_account_id, a.type, a.promo_expires_on, a.financing_mode)
+        for a in await session.scalars(select(Account).order_by(Account.id))
+    ]
+    before_reviews = deepcopy(
+        [
+            (r.id, r.payload, r.status, r.resolution)
+            for r in await session.scalars(select(ReviewItem).order_by(ReviewItem.id))
+        ]
+    )
+    with pytest.raises(ValueError):
+        await set_account_link(session, alias.id, root.id)
+    await session.flush()
+    assert [
+        (a.id, a.canonical_account_id, a.type, a.promo_expires_on, a.financing_mode)
+        for a in await session.scalars(select(Account).order_by(Account.id))
+    ] == before_accounts
+    assert [
+        (r.id, r.payload, r.status, r.resolution)
+        for r in await session.scalars(select(ReviewItem).order_by(ReviewItem.id))
+    ] == before_reviews
+
+
+@pytest.mark.parametrize("field", ["type", "promotion", "financing"])
+@pytest.mark.parametrize("descendant", [False, True])
+async def test_automatic_metadata_conflict_needs_review(
+    session: AsyncSession,
+    field: str,
+    descendant: bool,
+) -> None:
+    from moneta.pipelines.account_overlap import propose_account_links
+
+    root, alias = await pair(session)
+    conflicting = alias
+    if descendant:
+        conflicting = await make_account(
+            session,
+            source="third",
+            name="Freedom",
+            org_name="Chase",
+            mask="1234",
+            type=AccountType.credit,
+            canonical_account_id=alias.id,
+        )
+    await conflicting_metadata(session, conflicting, field)
+    assert await propose_account_links(session) == 0
+    assert root.canonical_account_id is None and alias.canonical_account_id is None
+    assert root.type == AccountType.credit
+    assert root.promo_expires_on == date(2027, 1, 1) and root.financing_mode
+    items = await reviews(session)
+    assert items and all(item.status == ReviewStatus.open for item in items)
+    expected_conflict = {
+        "type": "type",
+        "promotion": "promo_expires_on",
+        "financing": "financing_mode",
+    }[field]
+    assert all(expected_conflict in item.payload["metadata_conflicts"] for item in items)
+    assert any(
+        item.payload["account_id"] == alias.id and root.id in item.payload["candidates"]
+        for item in items
+    )
+
+
+async def test_unknown_and_default_metadata_do_not_override_root_decisions(
+    session: AsyncSession,
+) -> None:
+    from moneta.pipelines.account_overlap import set_account_link
+
+    root, alias = await pair(session)
+    alias.type = AccountType.unknown
+    await set_account_link(session, alias.id, root.id)
+    assert alias.canonical_account_id == root.id
+    assert root.type == AccountType.credit
+    assert root.promo_expires_on == date(2027, 1, 1) and root.financing_mode
+    assert alias.type == AccountType.unknown
+    assert alias.promo_expires_on is None and not alias.financing_mode
+
+
+async def test_latest_financing_decision_supersedes_older_conflict(session: AsyncSession) -> None:
+    from moneta.pipelines.account_overlap import propose_account_links
+
+    root, alias = await pair(session)
+    await conflicting_metadata(session, alias, "financing")
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.financing_account,
+            question="Treat as financing?",
+            payload={"account_id": alias.id},
+            status=ReviewStatus.resolved,
+            resolution={"financing": True, "resolved_by": "manual"},
+        )
+    )
+    alias.financing_mode = True
+    assert await propose_account_links(session) == 1
+    assert alias.canonical_account_id == root.id and root.financing_mode
+
+
+async def test_latest_negative_financing_decision_blocks_link(session: AsyncSession) -> None:
+    from moneta.pipelines.account_overlap import propose_account_links
+
+    root, alias = await pair(session)
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.financing_account,
+            question="Treat as financing?",
+            payload={"account_id": alias.id},
+            status=ReviewStatus.resolved,
+            resolution={"financing": True, "resolved_by": "manual"},
+        )
+    )
+    await session.flush()
+    await conflicting_metadata(session, alias, "financing")
+    assert await propose_account_links(session) == 0
+    assert root.canonical_account_id is None and alias.canonical_account_id is None
+
+
+async def test_unlink_can_separate_conflicting_metadata(session: AsyncSession) -> None:
+    from moneta.pipelines.account_overlap import set_account_link
+
+    root, alias = await pair(session)
+    alias.canonical_account_id = root.id
+    alias.promo_expires_on = date(2028, 1, 1)
+    await set_account_link(session, alias.id, None)
+    assert root.canonical_account_id is None and alias.canonical_account_id is None
+    assert root.promo_expires_on == date(2027, 1, 1)
+    assert alias.promo_expires_on == date(2028, 1, 1)
