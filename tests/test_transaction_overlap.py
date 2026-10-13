@@ -174,17 +174,15 @@ async def test_competing_offsets_open_one_durable_question_per_observation(
 
 
 @pytest.mark.parametrize("reverse", [False, True])
-async def test_survivor_is_stable_across_arrival_order(
+async def test_survivor_prefers_root_provider_across_arrival_order(
     session: AsyncSession, reverse: bool
 ) -> None:
     a, b = await accounts(session, reverse)
-    if reverse:
-        await make_txn(session, b, description="Coffee House")
+    simplefin = await make_txn(session, b, description="Coffee House")
     plaid = await make_txn(session, a, description="Coffee House")
-    if not reverse:
-        await make_txn(session, b, description="Coffee House")
     await reconcile(session)
-    assert [t.id for t in (await load_logical_data(session)).transactions] == [plaid.id]
+    expected = simplefin if reverse else plaid
+    assert [t.id for t in (await load_logical_data(session)).transactions] == [expected.id]
 
 
 async def test_reviewed_merchant_observation_survives(session: AsyncSession) -> None:
@@ -581,3 +579,144 @@ async def test_generic_merchant_label_does_not_merge_distinct_named_descriptors(
     await make_txn(session, b, description="Book Shop", merchant="Payment")
     await reconcile(session)
     assert len((await load_logical_data(session)).transactions) == 2
+
+
+@pytest.mark.parametrize("root_source", ["plaid", "simplefin"])
+async def test_both_reviewed_root_wins_regardless_of_classification_count(
+    session: AsyncSession,
+    root_source: str,
+) -> None:
+    root = await make_account(session, source=root_source)
+    alias = await make_account(
+        session,
+        source="simplefin" if root_source == "plaid" else "plaid",
+        canonical_account_id=root.id,
+    )
+    root_txn = await make_txn(session, root, description="Coffee House", merchant="Coffee House")
+    alias_txn = await make_txn(
+        session, alias, description="SQ *Coffee House", merchant="Coffee House"
+    )
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.recurring_cluster,
+            question="Recurring?",
+            payload={"merchant": "Coffee House", "direction": "outflow"},
+            status=ReviewStatus.resolved,
+            resolution={"is_recurring": True, "resolved_by": "manual"},
+        )
+    )
+    session.add(
+        MerchantAlias(
+            raw_descriptor=alias_txn.description, merchant="Coffee House", source=AliasSource.manual
+        )
+    )
+    await reconcile(session)
+    assert alias_txn.duplicate_of_id == root_txn.id
+    assert root_txn.duplicate_of_id is None
+
+
+async def test_row_id_precedes_provider_transaction_id_for_repeated_matches(
+    session: AsyncSession,
+) -> None:
+    root, alias = await accounts(session)
+    first = await make_txn(
+        session, root, description="Coffee House", aggregator_id="z-last-lexically"
+    )
+    second = await make_txn(
+        session, root, description="Coffee House", aggregator_id="a-first-lexically"
+    )
+    duplicate = await make_txn(session, alias, description="Coffee House")
+    await reconcile(session)
+    assert duplicate.duplicate_of_id == first.id
+    assert second.duplicate_of_id is None
+
+
+async def test_row_id_breaks_tie_when_neither_observation_uses_root_provider(
+    session: AsyncSession,
+) -> None:
+    root = await make_account(session, source="root-provider")
+    sf = await make_account(session, source="simplefin", canonical_account_id=root.id)
+    plaid = await make_account(session, source="plaid", canonical_account_id=root.id)
+    first = await make_txn(session, sf, description="Coffee House", aggregator_id="z")
+    second = await make_txn(session, plaid, description="Coffee House", aggregator_id="a")
+    await reconcile(session)
+    assert second.duplicate_of_id == first.id
+
+
+@pytest.mark.parametrize("ambiguity", ["rejected", "competing"])
+async def test_reviewed_transfers_require_same_endpoint_occurrence(
+    session: AsyncSession,
+    ambiguity: str,
+) -> None:
+    from moneta.pipelines.transaction_overlap import set_transaction_duplicate
+
+    a, b = await accounts(session)
+    c = await make_account(session, source="plaid", org_name="Other Bank")
+    d = await make_account(
+        session, source="simplefin", org_name="Other Bank", canonical_account_id=c.id
+    )
+    outs = [await make_txn(session, account, description="Card payment") for account in (a, b)]
+    inns = [
+        await make_txn(session, account, amount_cents=1000, description="Card payment")
+        for account in (c, d)
+    ]
+    if ambiguity == "rejected":
+        await set_transaction_duplicate(session, inns[1].id, None)
+    else:
+        await make_txn(session, d, amount_cents=1000, description="Card payment")
+    links = [
+        TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1, method=LinkMethod.manual)
+        for out, inn in zip(outs, inns, strict=True)
+    ]
+    session.add_all(links)
+    before = await fingerprint(session)
+    await reconcile(session)
+    assert outs[0].duplicate_of_id is outs[1].duplicate_of_id is None
+    assert set(await session.scalars(select(TransferLink))) == set(links)
+    assert [(link.outflow_id, link.inflow_id) for link in links] == [
+        (outs[0].id, inns[0].id),
+        (outs[1].id, inns[1].id),
+    ]
+    assert await questions(session)
+    assert await fingerprint(session) == before
+    if ambiguity == "rejected":
+        assert inns[0].duplicate_of_id is inns[1].duplicate_of_id is None
+    again = await reconcile(session)
+    assert again.transactions_suppressed == again.transactions_restored == 0
+    assert set(await session.scalars(select(TransferLink))) == set(links)
+
+
+@pytest.mark.parametrize("rejected_source", ["plaid", "simplefin"])
+async def test_manual_no_transfer_survives_alias_rule_link(
+    session: AsyncSession,
+    rejected_source: str,
+) -> None:
+    a, b = await accounts(session)
+    outs = [await make_txn(session, account, description="Card payment") for account in (a, b)]
+    rejected, alias = outs if rejected_source == "plaid" else list(reversed(outs))
+    other = await make_account(session, source="plaid", org_name="Other Bank")
+    inn = await make_txn(session, other, description="Card payment", amount_cents=1000)
+    decision = ReviewItem(
+        kind=ReviewKind.transfer_pair,
+        question="Transfer?",
+        payload={"outflow_id": rejected.id, "candidates": [inn.id]},
+        status=ReviewStatus.resolved,
+        resolution={"inflow_id": None, "resolved_by": "manual"},
+    )
+    session.add_all(
+        [
+            decision,
+            TransferLink(
+                outflow_id=alias.id, inflow_id=inn.id, confidence=0.9, method=LinkMethod.rule
+            ),
+        ]
+    )
+    before = await fingerprint(session)
+    await reconcile(session)
+    assert alias.duplicate_of_id == rejected.id
+    assert list(await session.scalars(select(TransferLink))) == []
+    assert decision.resolution == {"inflow_id": None, "resolved_by": "manual"}
+    assert await fingerprint(session) == before
+    again = await reconcile(session)
+    assert again.transactions_suppressed == again.transactions_restored == 0
+    assert list(await session.scalars(select(TransferLink))) == []

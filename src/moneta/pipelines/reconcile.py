@@ -18,7 +18,7 @@ from moneta.models import (
     TransferLink,
 )
 from moneta.pipelines.account_overlap import propose_account_links
-from moneta.pipelines.transaction_overlap import reconcile_transactions
+from moneta.pipelines.transaction_overlap import reconcile_transactions, reviewed_transfer_choices
 
 
 class OverlapStats(BaseModel):
@@ -41,6 +41,12 @@ def _supersede(item: ReviewItem, reason: str, today: date) -> None:
 async def _reconcile_links(session: AsyncSession, logical: LogicalData) -> set[int]:
     by_id = {t.id: t for t in logical.transactions}
     links = list(await session.scalars(select(TransferLink)))
+    choices = reviewed_transfer_choices(list(await session.scalars(select(ReviewItem))))
+    rejected = {
+        logical.transaction_roots[row_id]
+        for row_id, target in choices.items()
+        if target is None and row_id in logical.transaction_roots
+    }
     rank = {LinkMethod.manual: 0, LinkMethod.llm: 1, LinkMethod.rule: 2}
     used: set[int] = set()
     keep: list[tuple[TransferLink, int, int]] = []
@@ -52,6 +58,7 @@ async def _reconcile_links(session: AsyncSession, logical: LogicalData) -> set[i
         valid = bool(
             out is not None
             and inn is not None
+            and out_id not in rejected
             and out.amount_cents < 0
             and inn.amount_cents == -out.amount_cents
             and abs((out.posted_on - inn.posted_on).days) <= 6

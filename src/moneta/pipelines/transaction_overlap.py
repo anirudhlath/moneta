@@ -5,7 +5,6 @@ restore observations. Explicit decisions live in the immutable review ledger.
 """
 
 from dataclasses import dataclass
-from datetime import date
 from itertools import combinations
 from typing import Any
 
@@ -154,22 +153,42 @@ async def set_transaction_duplicate(
 @dataclass(frozen=True)
 class _TransferChoice:
     transaction_id: int
-    physical_account_id: int
-    logical_account_id: int
-    amount_cents: int
-    posted_on: date
-    descriptor: str
 
-    def equivalent(self, other: "_TransferChoice") -> bool:
-        if self.transaction_id == other.transaction_id:
-            return True
+    def equivalent(
+        self,
+        other: "_TransferChoice",
+        occurrences: set[frozenset[int]],
+    ) -> bool:
         return (
-            self.physical_account_id != other.physical_account_id
-            and self.logical_account_id == other.logical_account_id
-            and self.amount_cents == other.amount_cents
-            and self.posted_on == other.posted_on
-            and self.descriptor == other.descriptor
+            self.transaction_id == other.transaction_id
+            or frozenset((self.transaction_id, other.transaction_id)) in occurrences
         )
+
+
+def reviewed_transfer_choices(items: list[ReviewItem]) -> dict[int, int | None]:
+    """Latest human choice wins over derived choices; keep original ledger rows intact."""
+    choices: dict[int, int | None] = {}
+    priority: dict[int, tuple[bool, int]] = {}
+    for item in items:
+        resolution = item.resolution
+        out_id = item.payload.get("outflow_id")
+        if (
+            item.kind != ReviewKind.transfer_pair
+            or item.status != ReviewStatus.resolved
+            or not resolution
+            or "inflow_id" not in resolution
+            or resolution.get("resolved_by") == "reconciliation"
+            or type(out_id) is not int
+        ):
+            continue
+        inflow_id = resolution["inflow_id"]
+        if inflow_id is not None and type(inflow_id) is not int:
+            continue
+        rank = (resolution.get("resolved_by") != "llm", item.id)
+        if rank > priority.get(out_id, (False, -1)):
+            choices[out_id] = inflow_id
+            priority[out_id] = rank
+    return choices
 
 
 def _decisions(
@@ -177,7 +196,6 @@ def _decisions(
     aliases: list[MerchantAlias],
     items: list[ReviewItem],
     links: list[TransferLink],
-    account_roots: dict[int, int],
 ) -> dict[int, dict[str, object]]:
     """Only persisted provenance counts as reviewed; tags alone are derived."""
     decisions: dict[int, dict[str, object]] = {t.id: {} for t in txns}
@@ -188,14 +206,9 @@ def _decisions(
         row = by_id.get(txn_id)
         if row is None:
             return ("missing", txn_id)
-        return _TransferChoice(
-            row.id,
-            row.account_id,
-            account_roots[row.account_id],
-            row.amount_cents,
-            row.posted_on,
-            rule_normalize(row.description).casefold(),
-        )
+        return _TransferChoice(row.id)
+
+    transfer_choices = reviewed_transfer_choices(items)
 
     for txn in txns:
         if txn.description in manual:
@@ -216,27 +229,27 @@ def _decisions(
                     item.resolution["is_recurring"],
                     bool(item.resolution.get("discretionary")),
                 )
-            if (
-                item.kind == ReviewKind.transfer_pair
-                and item.payload.get("outflow_id") == txn.id
-                and "inflow_id" in item.resolution
-            ):
-                inflow = item.resolution["inflow_id"]
-                decisions[txn.id]["transfer"] = endpoint(inflow) if type(inflow) is int else None
+        if txn.id in transfer_choices:
+            inflow = transfer_choices[txn.id]
+            decisions[txn.id]["transfer"] = endpoint(inflow) if inflow is not None else None
     for link in links:
         if link.method != LinkMethod.rule:
             if link.outflow_id in decisions:
-                decisions[link.outflow_id]["transfer"] = endpoint(link.inflow_id)
+                decisions[link.outflow_id].setdefault("transfer", endpoint(link.inflow_id))
             if link.inflow_id in decisions:
                 decisions[link.inflow_id]["transfer"] = endpoint(link.outflow_id)
     return decisions
 
 
-def _conflicts(left: dict[str, object], right: dict[str, object]) -> bool:
+def _conflicts(
+    left: dict[str, object],
+    right: dict[str, object],
+    occurrences: set[frozenset[int]],
+) -> bool:
     for key in left.keys() & right.keys():
         a, b = left[key], right[key]
         if isinstance(a, _TransferChoice) and isinstance(b, _TransferChoice):
-            if not a.equivalent(b):
+            if not a.equivalent(b, occurrences):
                 return True
         elif a != b:
             return True
@@ -254,7 +267,7 @@ async def reconcile_transactions(session: AsyncSession) -> tuple[int, int]:
     items = list(await session.scalars(select(ReviewItem).order_by(ReviewItem.id)))
     aliases = list(await session.scalars(select(MerchantAlias)))
     links = list(await session.scalars(select(TransferLink)))
-    decisions = _decisions(txns, aliases, items, links, account_roots)
+    decisions = _decisions(txns, aliases, items, links)
     rejected: set[frozenset[int]] = set()
     chosen: dict[int, int] = {}
     for item in items:
@@ -290,40 +303,6 @@ async def reconcile_transactions(session: AsyncSession) -> tuple[int, int]:
             if valid:
                 chosen[row_id] = target
 
-    groups = {t.id: {t.id} for t in txns}
-    roots = {t.id: t.id for t in txns}
-
-    def order(row_id: int) -> tuple[int, str, str, int]:
-        row = by_id[row_id]
-        return (
-            -len(decisions[row_id]),
-            by_account[row.account_id].source,
-            row.aggregator_id,
-            row.id,
-        )
-
-    def merge(left_id: int, right_id: int, manual: bool = False) -> bool:
-        left_root, right_root = roots[left_id], roots[right_id]
-        if left_root == right_root:
-            return True
-        members = groups[left_root] | groups[right_root]
-        for x, y in combinations(sorted(members), 2):
-            if not _physical_match(by_id[x], by_id[y], by_account, account_roots):
-                return False
-            if frozenset((x, y)) in rejected:
-                return False
-            if not manual and _conflicts(decisions[x], decisions[y]):
-                return False
-        survivor = right_root if manual else min(members, key=order)
-        for member in members:
-            roots[member] = survivor
-        groups.pop(left_root)
-        groups.pop(right_root)
-        groups[survivor] = members
-        return True
-
-    for row_id, target in chosen.items():
-        merge(row_id, target, manual=True)
     # Bucket on immutable monetary/account identity before comparing descriptors.
     buckets: dict[tuple[int, int], list[Transaction]] = {}
     for txn in txns:
@@ -337,6 +316,69 @@ async def reconcile_transactions(session: AsyncSession) -> tuple[int, int]:
                 and frozenset((left.id, right.id)) not in rejected
             ):
                 edges.append((left.id, right.id))
+
+    # Metadata similarity is not occurrence identity. A reviewed transfer may
+    # refer to the same endpoint only when its duplicate choice is explicit or
+    # mutually unique, and all reviewed classifications agree. Propagate a
+    # conflict through reciprocal transfer choices until the set is stable.
+    explicit_occurrences = {
+        frozenset((row_id, target))
+        for row_id, target in chosen.items()
+        if _physical_match(by_id[row_id], by_id[target], by_account, account_roots)
+        and frozenset((row_id, target)) not in rejected
+    }
+    endpoint_candidates: dict[int, set[int]] = {t.id: set() for t in txns}
+    for a, b in edges:
+        endpoint_candidates[a].add(b)
+        endpoint_candidates[b].add(a)
+    occurrences = explicit_occurrences | {
+        frozenset((a, b))
+        for a, b in edges
+        if endpoint_candidates[a] == {b}
+        and endpoint_candidates[b] == {a}
+        and (by_id[a].posted_on == by_id[b].posted_on or (_named(by_id[a]) and _named(by_id[b])))
+    }
+    while True:
+        conflicts = {
+            pair
+            for pair in occurrences - explicit_occurrences
+            if _conflicts(decisions[min(pair)], decisions[max(pair)], occurrences)
+        }
+        if not conflicts:
+            break
+        occurrences -= conflicts
+
+    groups = {t.id: {t.id} for t in txns}
+    roots = {t.id: t.id for t in txns}
+
+    def order(row_id: int) -> tuple[bool, bool, int]:
+        row = by_id[row_id]
+        account = by_account[row.account_id]
+        root = by_account[account_roots[account.id]]
+        return (not bool(decisions[row_id]), account.source != root.source, row.id)
+
+    def merge(left_id: int, right_id: int, manual: bool = False) -> bool:
+        left_root, right_root = roots[left_id], roots[right_id]
+        if left_root == right_root:
+            return True
+        members = groups[left_root] | groups[right_root]
+        for x, y in combinations(sorted(members), 2):
+            if not _physical_match(by_id[x], by_id[y], by_account, account_roots):
+                return False
+            if frozenset((x, y)) in rejected:
+                return False
+            if not manual and _conflicts(decisions[x], decisions[y], occurrences):
+                return False
+        survivor = right_root if manual else min(members, key=order)
+        for member in members:
+            roots[member] = survivor
+        groups.pop(left_root)
+        groups.pop(right_root)
+        groups[survivor] = members
+        return True
+
+    for row_id, target in chosen.items():
+        merge(row_id, target, manual=True)
 
     exact = [(a, b) for a, b in edges if by_id[a].posted_on == by_id[b].posted_on]
     neighbors: dict[int, set[int]] = {t.id: set() for t in txns}

@@ -47,7 +47,7 @@
 - Task 1: complete (commits 4426f46..3ba8128, review clean).
 - Task 2: complete (commits 3ba8128..dfe37e5, review clean).
 - Task 3: complete (commits dfe37e5..25785fd, review clean; two deferred minors).
-- Task 4: running — transaction observations, links and stale reviews; base `25785fd`, implementer `/root/task4_transactions`.
+- Task 4: fix round 1 running — base `dcacc30`; original implementer `/root/task4_transactions` resumed for three Important findings.
 - Task 5: pending — logical record integration throughout accounting.
 - Task 6: pending — API, CLI and review operations.
 - Task 7: pending — documentation, whole-branch review and local rollout.
@@ -77,3 +77,9 @@ Task 3 fix 1 implementation: metadata RED 13 failures; focused GREEN 51 passed; 
 Task 3: fix round 1/5 (1 addressed, 0 open; metadata guard verified, commits aae93ef..25785fd). Scoped reviewer `/root/rereview3_metadata` found no Critical/Important breakage; spec and task-quality gates now pass.
 
 Task 3: minor (deferred): account_overlap.py:295–296 can show metadata_conflicts from alternatives later excluded by manual protection; refresh conflict context from retained candidates. Carry to final review.
+
+Task 4 implementation: initial RED 28 expected failures, GREEN 28 passed; three self-review regressions fixed with RED/GREEN evidence, final focused GREEN 38 passed. Full suite 573 passed with pristine output, lint/format check/strict mypy passed (81 files). Raw account/transaction/holding fingerprints, FK checks, replay/idempotence and caller rollback tests pass. Manual duplicate resolution appends observation evidence; historical resolved items stay unchanged.
+
+Task 4 review: `/root/review4_transactions` reported spec noncompliance and quality needs fixes. Important findings: survivor ordering must be reviewed status → root provider → stable row ID; explicitly rejected duplicate inflows must preserve distinct reviewed transfer occurrences; derived alias links must not override a survivor's manual no-transfer decision. Regression/fix wave dispatched together to the original implementer. Cross-task integration/window/rollout items map to Tasks 5–7.
+
+Task 5 integration check: existing link_transfers' high-confidence path must honor resolved no-transfer choices after transaction IDs map to survivors; otherwise it can recreate a link removed by Task 4 cleanup. Add repeated-sync/rebuild regression for reviewed rejections on either provider observation. Account-filtered transaction drill-down must include alias-only historical survivors via account_roots.
