@@ -12,6 +12,7 @@ from rich.table import Table
 
 from moneta.cadence import month_bounds
 from moneta.cli.client import request
+from moneta.models import AccountType
 
 if TYPE_CHECKING:
     from loguru import Message
@@ -427,6 +428,19 @@ def cashflow(
 
 
 @app.command()
+def reconcile(json_output: JsonOption = False) -> None:
+    """Reconcile provider history and rebuild estimates from stored observations."""
+    result = request("POST", "/reconcile")
+    if emit_json(result, json_output):
+        return
+    console.print(
+        f"Linked {result['accounts_linked']} accounts; "
+        f"suppressed {result['transactions_suppressed']} provider duplicates; "
+        f"restored {result['transactions_restored']} observations."
+    )
+
+
+@app.command()
 def txns(
     month: Annotated[
         str | None, typer.Option("--month", help="YYYY-MM (expands to the full month).")
@@ -442,6 +456,9 @@ def txns(
         str | None, typer.Option("--merchant", help="Case-insensitive substring match.")
     ] = None,
     json_output: JsonOption = False,
+    sources: Annotated[
+        bool, typer.Option("--sources", help="Include suppressed provider observations.")
+    ] = False,
 ) -> None:
     """List transactions with why each is or isn't counted as spend (the trust view).
 
@@ -472,6 +489,8 @@ def txns(
         params["account_id"] = account
     if merchant is not None:
         params["merchant"] = merchant
+    if sources:
+        params["sources"] = True
 
     r = request("GET", "/transactions", params=params or None)
     if emit_json(r, json_output):
@@ -480,6 +499,8 @@ def txns(
     for row in r["transactions"]:
         counted = row["counted_in_spend"]
         cell = "✓" if counted else (row["excluded_because"] or "")
+        if cell == "provider_duplicate":
+            cell = "superseded provider observation"
         table.add_row(
             row["posted_on"],
             escape(row["account"]),
@@ -536,38 +557,88 @@ def accounts(
     set_promo: Annotated[tuple[int, str] | None, typer.Option("--set-promo")] = None,
     set_financing: Annotated[tuple[int, str] | None, typer.Option("--set-financing")] = None,
     json_output: JsonOption = False,
+    sources: Annotated[
+        bool, typer.Option("--sources", help="List physical provider accounts.")
+    ] = False,
+    link_source: Annotated[int | None, typer.Option("--link-source")] = None,
+    to: Annotated[int | None, typer.Option("--to")] = None,
+    unlink_source: Annotated[int | None, typer.Option("--unlink-source")] = None,
 ) -> None:
     """List accounts. Flags: --set-type ID TYPE, --set-promo ID YYYY-MM-DD,
     --set-financing ID true|false."""
-    reject_json_with_writes(json_output, set_type, set_promo, set_financing)
+    reject_json_with_writes(
+        json_output, set_type, set_promo, set_financing, link_source, to, unlink_source
+    )
+    if (link_source is None) != (to is None):
+        console.print("[red]Error:[/red] --link-source and --to are required together.")
+        raise typer.Exit(1)
+    identity_write = link_source is not None or unlink_source is not None
+    if identity_write and (
+        (link_source is not None and unlink_source is not None)
+        or any((set_type, set_promo, set_financing))
+    ):
+        console.print("[red]Error:[/red] link/unlink cannot combine with other account writes.")
+        raise typer.Exit(1)
+    ids = [value for value in (link_source, to, unlink_source) if value is not None]
+    ids.extend(flag[0] for flag in (set_type, set_promo, set_financing) if flag is not None)
+    if any(value <= 0 for value in ids):
+        console.print("[red]Error:[/red] account IDs must be positive integers.")
+        raise typer.Exit(1)
+    if set_type and set_type[1] not in AccountType:
+        console.print("[red]Error:[/red] invalid account type.")
+        raise typer.Exit(1)
     # Validate --set-promo's date BEFORE firing any PATCH: an invalid date must
     # leave --set-type unapplied too, not partially mutate the account server-side.
     promo = _parse_iso_date(set_promo[1]) if set_promo else None
+    financing_mode = _parse_bool_flag(set_financing[1]) if set_financing else None
+    if link_source is not None:
+        request("POST", f"/accounts/{link_source}/link", {"canonical_account_id": to})
+    if unlink_source is not None:
+        request("POST", f"/accounts/{unlink_source}/unlink")
     if set_type:
         request("PATCH", f"/accounts/{set_type[0]}", {"type": set_type[1]})
     if set_promo:
         request("PATCH", f"/accounts/{set_promo[0]}", {"promo_expires_on": promo})
     if set_financing:
-        financing_mode = _parse_bool_flag(set_financing[1])
         request("PATCH", f"/accounts/{set_financing[0]}", {"financing_mode": financing_mode})
-    rows = request("GET", "/accounts")
+    rows = (
+        request("GET", "/accounts", params={"sources": True})
+        if sources
+        else request("GET", "/accounts")
+    )
     if emit_json(rows, json_output):
         return
     table = Table("ID", "Name", "Org", "Type", "Balance", "Promo ends")
+    if sources:
+        for label in ("Source", "Mask", "Canonical ID"):
+            table.add_column(label)
     for a in rows:
         type_cell = f"{a['type']} (financing)" if a.get("financing_mode") else a["type"]
-        table.add_row(
+        cells = [
             str(a["id"]),
             escape(a["name"]),
             escape(a["org_name"]),
             type_cell,
             fmt_money(a["balance_cents"]),
             str(a["promo_expires_on"] or "—"),
-        )
+        ]
+        if sources:
+            cells.extend(
+                [escape(a["source"]), a["mask"] or "—", str(a["canonical_account_id"] or "—")]
+            )
+        table.add_row(*cells)
     console.print(table)
 
 
 _REVIEW_KINDS = {
+    "account_overlap": (
+        "provider account identity",
+        "groups source observations into one logical account",
+    ),
+    "transaction_overlap": (
+        "provider transaction identity",
+        "superseded observations remain available in txns --sources",
+    ),
     "recurring_cluster": (
         "bill or habit question",
         "bills become fixed costs; habits stay discretionary spending in moneta power",
@@ -608,6 +679,44 @@ def _review_one(item: dict[str, object]) -> dict[str, object] | None:
     """Prompt for one item; return the resolution, or None to skip."""
     ctx = item.get("context") or {}
     assert isinstance(ctx, dict)
+    if item["kind"] in ("account_overlap", "transaction_overlap"):
+        account_kind = item["kind"] == "account_overlap"
+        source = ctx.get("account" if account_kind else "transaction")
+        if source:
+            console.print(
+                f"    source: {source['source']} — "
+                f"{source.get('name') or source.get('description')}"
+            )
+        if ctx.get("metadata_conflicts"):
+            console.print(f"    Conflicting metadata: {', '.join(ctx['metadata_conflicts'])}")
+        candidates = ctx.get("candidates") or []
+        for n, candidate in enumerate(candidates, 1):
+            if account_kind:
+                detail = (
+                    f"{candidate['name']} ({candidate['source']}, "
+                    f"mask {candidate.get('mask') or '?'})"
+                )
+            else:
+                detail = (
+                    f"{candidate['source']}: {fmt_money(candidate['amount_cents'])} "
+                    f"on {candidate['posted_on']} — {candidate['description']}"
+                )
+            console.print(f"    {n}. {escape(detail)}")
+        console.print("    Provider identity decisions preserve every original observation.")
+        answer = typer.prompt(
+            "Match number (Enter to skip, 0 = none of these)", default="", show_default=False
+        )
+        if not answer:
+            return None
+        try:
+            pick = int(answer)
+        except ValueError:
+            pick = -1
+        if not 0 <= pick <= len(candidates):
+            console.print("[red]invalid input, skipping[/red]")
+            return None
+        key = "canonical_account_id" if account_kind else "duplicate_of_id"
+        return {key: None if pick == 0 else candidates[pick - 1]["id"]}
     if item["kind"] == "recurring_cluster":
         for s in ctx.get("samples", []):
             console.print(f"    {s['posted_on']}  {fmt_money(abs(s['amount_cents']))}")

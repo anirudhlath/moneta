@@ -31,7 +31,9 @@ from moneta.models import (
     recurring_cluster_item,
     series_key,
 )
+from moneta.pipelines.account_overlap import set_account_link
 from moneta.pipelines.events import apply_price_change
+from moneta.pipelines.transaction_overlap import set_transaction_duplicate
 from moneta.queries import foreign_series_ids, price_review_matches_currency, primary_currency
 
 _MERCHANT_PROMPT = """You are auto-resolving a personal-finance review question.
@@ -114,6 +116,61 @@ async def txn_summaries(session: AsyncSession, txn_ids: list[int]) -> dict[int, 
 
 
 async def review_context(session: AsyncSession, item: ReviewItem) -> dict[str, Any]:
+    if item.kind == ReviewKind.account_overlap:
+        accounts = {a.id: a for a in await session.scalars(select(Account))}
+
+        def account_summary(row_id: int) -> dict[str, Any]:
+            a = accounts[row_id]
+            return {
+                "id": a.id,
+                "name": a.name,
+                "org_name": a.org_name,
+                "source": a.source,
+                "mask": a.mask,
+                "currency": a.currency,
+                "type": a.type,
+                "canonical_account_id": a.canonical_account_id,
+            }
+
+        source = item.payload.get("account_id")
+        return {
+            "account": account_summary(source)
+            if type(source) is int and source in accounts
+            else None,
+            "candidates": [
+                account_summary(c)
+                for c in item.payload.get("candidates", [])
+                if type(c) is int and c in accounts
+            ],
+            "metadata_conflicts": item.payload.get("metadata_conflicts", []),
+        }
+    if item.kind == ReviewKind.transaction_overlap:
+        accounts = {a.id: a for a in await session.scalars(select(Account))}
+        physical_txns = {t.id: t for t in await session.scalars(select(Transaction))}
+
+        def observation(row_id: int) -> dict[str, Any]:
+            t = physical_txns[row_id]
+            a = accounts[t.account_id]
+            return {
+                "id": t.id,
+                **_sample(t),
+                "description": t.description,
+                "account": a.name,
+                "source": a.source,
+                "duplicate_of_id": t.duplicate_of_id,
+            }
+
+        source = item.payload.get("transaction_id")
+        return {
+            "transaction": observation(source)
+            if type(source) is int and source in physical_txns
+            else None,
+            "candidates": [
+                observation(c)
+                for c in item.payload.get("candidates", [])
+                if type(c) is int and c in physical_txns
+            ],
+        }
     if item.kind == ReviewKind.transfer_pair:
         outflow_id = item.payload.get("outflow_id")
         candidate_ids = [c for c in item.payload.get("candidates", []) if isinstance(c, int)]
@@ -181,7 +238,28 @@ async def apply_resolution(
     resolved_by: str = "manual",
 ) -> None:
     """Apply a resolution's effects and mark the item resolved. Caller commits."""
-    if item.kind == ReviewKind.merchant and isinstance(resolution.get("merchant"), str):
+    if item.kind in (ReviewKind.account_overlap, ReviewKind.transaction_overlap):
+        key = (
+            "canonical_account_id" if item.kind == ReviewKind.account_overlap else "duplicate_of_id"
+        )
+        if key not in resolution:
+            raise ValueError(f"resolution.{key} is required (integer candidate ID or null)")
+        target = resolution[key]
+        candidates = item.payload.get("candidates", [])
+        if target is not None and (type(target) is not int or target not in candidates):
+            raise ValueError(f"resolution.{key} must be a candidate integer ID or null")
+        if resolved_by != "manual":
+            raise ValueError("Provider overlap decisions require human review")
+        source_id = item.payload.get(
+            "account_id" if item.kind == ReviewKind.account_overlap else "transaction_id"
+        )
+        if type(source_id) is not int:
+            raise ValueError("Provider observation ID must be an integer")
+        if item.kind == ReviewKind.account_overlap:
+            await set_account_link(session, source_id, target)
+        else:
+            await set_transaction_duplicate(session, source_id, target)
+    elif item.kind == ReviewKind.merchant and isinstance(resolution.get("merchant"), str):
         merchant = resolution["merchant"]
         raw = item.payload["descriptor"]
         source = AliasSource.llm if resolved_by == "llm" else AliasSource.manual
@@ -199,9 +277,35 @@ async def apply_resolution(
             txn.merchant = merchant
     elif item.kind == ReviewKind.transfer_pair and "inflow_id" in resolution:
         logical = await load_logical_data(session)
-        out_id = logical.transaction_roots[item.payload["outflow_id"]]
+        raw_out = item.payload.get("outflow_id")
         target = resolution["inflow_id"]
-        in_id = logical.transaction_roots[target] if isinstance(target, int) else None
+        if type(raw_out) is not int or raw_out not in logical.transaction_roots:
+            raise ValueError("Unknown transfer outflow")
+        candidates = item.payload.get("candidates", [])
+        if target is not None and (
+            type(target) is not int
+            or target not in candidates
+            or target not in logical.transaction_roots
+        ):
+            raise ValueError("resolution.inflow_id must be a candidate integer ID or null")
+        out_id = logical.transaction_roots[raw_out]
+        in_id = logical.transaction_roots[target] if target is not None else None
+        if in_id is not None:
+            by_id = {t.id: t for t in logical.transactions}
+            out, inn = by_id[out_id], by_id[in_id]
+            out_root = logical.account_roots[out.account_id]
+            in_root = logical.account_roots[inn.account_id]
+            if (
+                out.amount_cents >= 0
+                or inn.amount_cents != -out.amount_cents
+                or abs((out.posted_on - inn.posted_on).days) > 6
+                or out_root == in_root
+                or logical.accounts[out_root].currency != logical.accounts[in_root].currency
+            ):
+                raise ValueError(
+                    "Transfer requires distinct accounts, one currency, opposite cents "
+                    "and dates within six days"
+                )
         for link in await session.scalars(select(TransferLink)):
             if logical.transaction_roots.get(link.outflow_id) == out_id:
                 await session.delete(link)
@@ -215,6 +319,8 @@ async def apply_resolution(
                     method=LinkMethod.manual if resolved_by == "manual" else LinkMethod.llm,
                 )
             )
+    elif item.kind == ReviewKind.transfer_pair:
+        raise ValueError("resolution.inflow_id is required (integer candidate ID or null)")
     elif item.kind == ReviewKind.recurring_cluster and resolution.get("is_recurring") is False:
         # detection's force map suppresses future runs; end the live series now so
         # fixed costs stop counting it immediately instead of after the stale sweep
@@ -273,7 +379,7 @@ def _validated(item: ReviewItem, answer: dict[str, Any]) -> dict[str, Any] | Non
         candidates = [c for c in item.payload.get("candidates", []) if isinstance(c, int)]
         if inflow_id is None:
             return {"inflow_id": None}  # confident no-match: resolve without a link
-        if isinstance(inflow_id, int) and inflow_id in candidates:
+        if type(inflow_id) is int and inflow_id in candidates:
             return {"inflow_id": inflow_id}
         return None
     if item.kind == ReviewKind.recurring_cluster:

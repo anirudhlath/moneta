@@ -48,8 +48,8 @@
 - Task 2: complete (commits 3ba8128..dfe37e5, review clean).
 - Task 3: complete (commits dfe37e5..25785fd, review clean; two deferred minors).
 - Task 4: complete (commits 25785fd..fae06d5, review clean).
-- Task 5: fix round 2 running — base `03cd10d`, original implementer `/root/task5_integration` resumed for adjudication-history regression.
-- Task 6: pending — API, CLI and review operations.
+- Task 5: complete (commits fae06d5..b1d5e63, review clean).
+- Task 6: running — API, CLI and review operations; base `b1d5e63`, implementer `/root/task6_interfaces`.
 - Task 7: pending — documentation, whole-branch review and local rollout.
 
 ## Verification
@@ -99,3 +99,7 @@ Task 5 fix 1 implementation: 10 transfer/currency RED regressions plus stale leg
 Task 6 required handoffs: record future explicit financing PATCH choices through existing review history and settle related open questions; catch apply_resolution's stale-currency ValueError as a client validation response. Shared effective_transfer_choices now returns survivor-level choices/provenance/conflicts; human conflict review payload includes transfer_review_ids and resolutions adjudicate them without changing old records.
 
 Task 5: fix round 1/5 (2 addressed, 1 open; commits b0e41ee..03cd10d). Scoped review `/root/rereview5_currency` verified original fixes but found Important new breakage: removing named adjudicated rows before latest-per-observation selection resurrects older superseded answers and removes the accepted link. Original implementer resumed with a multiple-answer regression and repeated-rebuild check.
+
+Task 5 fix 2 implementation: RED 2 failures; GREEN 2 passed, final covering set 170 passed; full suite 616 passed with pristine output, lint/format check/strict mypy passed (82 files). Supersession filter now follows latest-per-observation reduction, preventing resurrection. Real tests cover multiple prior human/LLM answers, reversed iteration, accepted-link stability, future new human choices and unchanged source facts/history.
+
+Task 5: fix round 2/5 (1 addressed, 0 open; commits 03cd10d..b1d5e63). Scoped reviewer `/root/rereview5_adjudication` found no new breakage; compliance and quality gates pass. All public API handoffs remain assigned to Task 6.

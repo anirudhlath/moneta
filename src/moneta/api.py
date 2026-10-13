@@ -8,7 +8,7 @@ from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -19,6 +19,7 @@ from moneta.cadence import month_bounds
 from moneta.config import Settings, load_settings, make_private
 from moneta.db import init_db, make_sessionmaker
 from moneta.llm import Classifier, build_classifier
+from moneta.logical import load_logical_data
 from moneta.logs import configure_logging
 from moneta.models import (
     Account,
@@ -35,6 +36,11 @@ from moneta.models import (
 )
 from moneta.pipelines.digest import DigestResult, run_digest
 from moneta.pipelines.normalize import renormalize_merchants
+from moneta.pipelines.reconcile import (
+    OverlapStats,
+    rebuild_logical_derived,
+    reconcile_provider_overlap,
+)
 from moneta.pipelines.recurring import reactivate_series
 from moneta.pipelines.review import apply_resolution, review_context
 from moneta.pipelines.run import SyncReport, run_sync
@@ -61,6 +67,16 @@ class AccountPatch(BaseModel):
     type: AccountType | None = None
     promo_expires_on: date | None = None
     financing_mode: bool | None = None
+
+
+class SourceAccountOut(AccountOut):
+    source: str
+    mask: str | None
+    canonical_account_id: int | None
+
+
+class AccountLinkIn(BaseModel):
+    canonical_account_id: StrictInt
 
 
 class SeriesOut(BaseModel):
@@ -206,6 +222,28 @@ def create_app(
 
     Session = Annotated[AsyncSession, Depends(get_session)]
 
+    async def apply_manual(
+        session: AsyncSession, item: ReviewItem, resolution: dict[str, Any]
+    ) -> None:
+        try:
+            await apply_resolution(session, item, resolution, resolved_by="manual")
+        except ValueError as exc:
+            await session.rollback()
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    async def rebuild_overlap(session: AsyncSession) -> OverlapStats:
+        try:
+            stats = await reconcile_provider_overlap(session, date.today())
+            await rebuild_logical_derived(session, None, date.today())
+        except ValueError as exc:
+            await session.rollback()
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return stats
+
+    @app.post("/reconcile")
+    async def reconcile(session: Session) -> OverlapStats:
+        return await rebuild_overlap(session)
+
     @app.post("/sync")
     async def sync(session: Session, full: bool = False) -> SyncReport:
         if not adapters:
@@ -260,9 +298,7 @@ def create_app(
         last_sync_ok = (
             last_run.success if last_run is not None and last_run.finished_at is not None else None
         )
-        accounts_count = (
-            await session.execute(select(func.count()).select_from(Account))
-        ).scalar_one()
+        accounts_count = len((await load_logical_data(session)).accounts)
         open_reviews_count = (
             await session.execute(
                 select(func.count())
@@ -339,6 +375,7 @@ def create_app(
         end: date | None = None,
         account_id: int | None = None,
         merchant: str | None = None,
+        sources: bool = False,
     ) -> TransactionsReport:
         """Trust/audit view: every transaction in range, with why it is or isn't
         counted as spend, plus server-computed totals. Defaults to the current
@@ -348,7 +385,12 @@ def create_app(
         range_start = start or default_start
         range_end = end or default_end
         rows = await transactions_report(
-            session, range_start, range_end, account_id=account_id, merchant=merchant
+            session,
+            range_start,
+            range_end,
+            account_id=account_id,
+            merchant=merchant,
+            include_sources=sources,
         )
         counted_total, through_today = spend_totals(rows, range_start, range_end, today)
         return TransactionsReport(
@@ -467,8 +509,27 @@ def create_app(
         ]
 
     @app.get("/accounts")
-    async def accounts(session: Session) -> list[AccountOut]:
-        rows = (await session.execute(select(Account))).scalars().all()
+    async def accounts(
+        session: Session, sources: bool = False
+    ) -> list[AccountOut | SourceAccountOut]:
+        if sources:
+            physical = list(await session.scalars(select(Account).order_by(Account.id)))
+            return [
+                SourceAccountOut(
+                    id=a.id,
+                    name=a.name,
+                    org_name=a.org_name,
+                    type=a.type,
+                    balance_cents=a.balance_cents,
+                    promo_expires_on=a.promo_expires_on,
+                    financing_mode=a.financing_mode,
+                    source=a.source,
+                    mask=a.mask,
+                    canonical_account_id=a.canonical_account_id,
+                )
+                for a in physical
+            ]
+        rows = (await load_logical_data(session)).accounts.values()
         return [
             AccountOut(
                 id=a.id,
@@ -482,13 +543,37 @@ def create_app(
             for a in rows
         ]
 
+    async def account_identity(
+        account_id: int, target: int | None, session: AsyncSession
+    ) -> dict[str, bool]:
+        if await session.get(Account, account_id) is None:
+            raise HTTPException(status_code=404, detail="account not found")
+        item = ReviewItem(
+            kind=ReviewKind.account_overlap,
+            question="Explicit account identity decision",
+            payload={"account_id": account_id, "candidates": [] if target is None else [target]},
+        )
+        await apply_manual(session, item, {"canonical_account_id": target})
+        await session.commit()
+        await rebuild_overlap(session)
+        return {"ok": True}
+
+    @app.post("/accounts/{account_id}/link")
+    async def link_account(
+        account_id: int, body: AccountLinkIn, session: Session
+    ) -> dict[str, bool]:
+        return await account_identity(account_id, body.canonical_account_id, session)
+
+    @app.post("/accounts/{account_id}/unlink")
+    async def unlink_account(account_id: int, session: Session) -> dict[str, bool]:
+        return await account_identity(account_id, None, session)
+
     @app.patch("/accounts/{account_id}")
     async def patch_account(
         account_id: int, body: AccountPatch, session: Session
     ) -> dict[str, bool]:
-        acct = (
-            await session.execute(select(Account).where(Account.id == account_id))
-        ).scalar_one_or_none()
+        logical = await load_logical_data(session)
+        acct = await session.get(Account, logical.account_roots.get(account_id, account_id))
         if acct is None:
             raise HTTPException(status_code=404, detail="account not found")
         if body.type is not None:
@@ -496,7 +581,26 @@ def create_app(
         if "promo_expires_on" in body.model_fields_set:
             acct.promo_expires_on = body.promo_expires_on
         if "financing_mode" in body.model_fields_set and body.financing_mode is not None:
-            acct.financing_mode = body.financing_mode
+            resolution = {"financing": body.financing_mode}
+            for item in await session.scalars(
+                select(ReviewItem).where(
+                    ReviewItem.kind == ReviewKind.financing_account,
+                    ReviewItem.status == ReviewStatus.open,
+                )
+            ):
+                review_account_id = item.payload.get("account_id")
+                if (
+                    type(review_account_id) is int
+                    and logical.account_roots.get(review_account_id) == acct.id
+                ):
+                    await apply_manual(session, item, resolution)
+            item = ReviewItem(
+                kind=ReviewKind.financing_account,
+                question="Explicit financing decision",
+                payload={"account_id": acct.id},
+            )
+            session.add(item)
+            await apply_manual(session, item, resolution)
         await session.commit()
         return {"ok": True}
 
@@ -535,11 +639,20 @@ def create_app(
         if item.kind == ReviewKind.transfer_pair:
             outflow_id = item.payload.get("outflow_id")
             inflow_id = body.resolution.get("inflow_id")
+            roots = (await load_logical_data(session)).transaction_roots
             legs = []
-            if isinstance(outflow_id, int):
-                legs.append(TransferLink.outflow_id == outflow_id)
-            if isinstance(inflow_id, int):
-                legs.append(TransferLink.inflow_id == inflow_id)
+            if type(outflow_id) is int and outflow_id in roots:
+                legs.append(
+                    TransferLink.outflow_id.in_(
+                        [row_id for row_id, root in roots.items() if root == roots[outflow_id]]
+                    )
+                )
+            if type(inflow_id) is int and inflow_id in roots:
+                legs.append(
+                    TransferLink.inflow_id.in_(
+                        [row_id for row_id, root in roots.items() if root == roots[inflow_id]]
+                    )
+                )
             # .first(), not scalar_one_or_none(): each leg can already be linked in a
             # SEPARATE row (e.g. a greedy-loser item resolved after both legs were
             # linked elsewhere) — two matches must still 409, not MultipleResultsFound.
@@ -550,8 +663,10 @@ def create_app(
             )
             if existing_link is not None:
                 raise HTTPException(status_code=409, detail="transaction already linked")
-        await apply_resolution(session, item, body.resolution, resolved_by="manual")
+        await apply_manual(session, item, body.resolution)
         await session.commit()
+        if item.kind in (ReviewKind.account_overlap, ReviewKind.transaction_overlap):
+            await rebuild_overlap(session)
         return {"ok": True}
 
     @app.post("/backup")
