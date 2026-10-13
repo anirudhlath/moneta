@@ -45,8 +45,8 @@
 ## Task status
 
 - Task 1: complete (commits 4426f46..3ba8128, review clean).
-- Task 2: running — shared logical projection; base `3ba8128`, implementer `/root/task2_logical`.
-- Task 3: pending — conservative account grouping and reversible controls.
+- Task 2: complete (commits 3ba8128..dfe37e5, review clean).
+- Task 3: running — conservative account grouping and reversible controls; base `dfe37e5`, implementer `/root/task3_accounts`.
 - Task 4: pending — transaction observations, links and stale reviews.
 - Task 5: pending — logical record integration throughout accounting.
 - Task 6: pending — API, CLI and review operations.
@@ -61,3 +61,7 @@ Task 1 implementation: focused RED 21 failed/58 passed, GREEN 79 passed; full su
 Task 1 review: `/root/review1_schema` approved spec compliance and task quality, no findings. Its cannot-verify items map to Tasks 2/4/5/7 (logical reports, physical windows, reconciliation and rollout fingerprints); they are outside Task 1's deliverable and will be verified at those gates.
 
 Task 2 Ruling: if the root has no vesting annotation and multiple alias annotations conflict, effective vesting stays unknown and emits a requires-review warning; root annotations otherwise take precedence — preserves evidence without inventing an authoritative quantity — if wrong, reports understate vesting coverage until the conflict is reviewed.
+
+Task 2 implementation: focused RED missing projection, GREEN 21 passed; full suite 484 passed with pristine output, lint/format check/strict mypy passed (76 files). Immutable logical account/holding records select observations without writes; transaction survivors retain physical account IDs and consumers must translate `account_roots`.
+
+Task 2 review: `/root/review2_logical` approved compliance and quality, no findings. Downstream integration/matching/rollout checks are mapped to Tasks 3–7; controller confirmed the full gate and signed-off commit from the implementation report and git history.
