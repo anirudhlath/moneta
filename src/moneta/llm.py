@@ -39,18 +39,23 @@ def confident_yes(answer: dict[str, Any] | None, key: str) -> bool:
 
 
 class LiteLLMClassifier:
-    def __init__(self, model: str) -> None:
+    def __init__(self, model: str, api_base: str | None = None) -> None:
         self.model = model
+        self.api_base = api_base
 
     async def classify_json(self, prompt: str) -> dict[str, Any] | None:
         import litellm
 
+        # Self-hosted OpenAI-compatible servers (e.g. vLLM) need an explicit endpoint;
+        # hosted providers resolve their own, so omit the key rather than send None.
+        endpoint = {"api_base": self.api_base} if self.api_base else {}
         try:
             resp = await litellm.acompletion(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},
                 temperature=0,
+                **endpoint,
             )
             content = resp.choices[0].message.content
             return _extract_json_object(content)
@@ -59,5 +64,5 @@ class LiteLLMClassifier:
             return None
 
 
-def build_classifier(llm_model: str | None) -> Classifier | None:
-    return LiteLLMClassifier(llm_model) if llm_model else None
+def build_classifier(llm_model: str | None, api_base: str | None = None) -> Classifier | None:
+    return LiteLLMClassifier(llm_model, api_base) if llm_model else None

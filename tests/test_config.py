@@ -13,6 +13,7 @@ def test_defaults(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyp
     assert s.db_path == tmp_path / "moneta.db"
     assert s.simplefin_access_url is None
     assert s.llm_model is None
+    assert s.llm_api_base is None
     assert s.api_url is None
 
 
@@ -83,3 +84,9 @@ def test_env_wins_when_file_and_env_both_set_same_key(tmp_path: Path, monkeypatc
     assert load_settings().llm_model == "file-value"  # file value applies with no env var yet
     monkeypatch.setenv("MONETA_LLM_MODEL", "env-value")
     assert load_settings().llm_model == "env-value"  # env now wins over the same file key
+
+
+def test_llm_api_base_from_config_file(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("MONETA_CONFIG_DIR", str(tmp_path))
+    save_config_value("llm_api_base", "http://localhost:8000/v1")
+    assert load_settings().llm_api_base == "http://localhost:8000/v1"

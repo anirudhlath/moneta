@@ -3,7 +3,7 @@ from typing import Any
 import litellm
 import pytest
 
-from moneta.llm import LiteLLMClassifier
+from moneta.llm import LiteLLMClassifier, build_classifier
 
 
 class _Msg:
@@ -82,3 +82,20 @@ async def test_leading_prose_before_json_parsed(monkeypatch: pytest.MonkeyPatch)
     )
     result = await LiteLLMClassifier("openrouter/x").classify_json("prompt")
     assert result == {"merchant": "Acme"}
+
+
+async def test_api_base_reaches_litellm_only_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def fake(**kwargs: Any) -> _Resp:
+        calls.append(kwargs)
+        return _Resp('{"ok": true}')
+
+    monkeypatch.setattr(litellm, "acompletion", fake)
+    await build_classifier("hosted_vllm/m", "http://localhost:8000/v1").classify_json("p")  # type: ignore[union-attr]
+    await build_classifier("openrouter/x", None).classify_json("p")  # type: ignore[union-attr]
+    assert calls[0]["api_base"] == "http://localhost:8000/v1"
+    assert "api_base" not in calls[1]
+    assert build_classifier(None, "http://localhost:8000/v1") is None

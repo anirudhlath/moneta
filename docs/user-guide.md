@@ -571,6 +571,15 @@ export MONETA_LLM_MODEL="anthropic/claude-sonnet-4-5"
 export ANTHROPIC_API_KEY=…
 ```
 
+For a self-hosted OpenAI-compatible server such as vLLM, also set its endpoint. No API key
+is needed, and nothing leaves your machine:
+
+```toml
+# ~/.config/moneta/config.toml
+llm_model = "hosted_vllm/<served-model-id>"   # the id from GET /v1/models
+llm_api_base = "http://localhost:8000/v1"
+```
+
 With an LLM configured, sync auto-resolves review items it's confident about, double-checks
 newly detected recurring series, and gates price changes — anything it isn't sure of still
 comes to you. **The LLM only ever classifies; it never computes a money value.** Unset the
@@ -681,6 +690,7 @@ file values. The `setup` commands write the file for you.
 | `MONETA_PLAID_SECRET` / `plaid_secret` | Plaid secret |
 | `MONETA_PLAID_ENV` / `plaid_env` | `production` (default) or `sandbox` |
 | `MONETA_LLM_MODEL` / `llm_model` | LiteLLM model string; unset = no LLM |
+| `MONETA_LLM_API_BASE` / `llm_api_base` | Endpoint for a self-hosted OpenAI-compatible server (e.g. `http://localhost:8000/v1` for vLLM); unset = the provider's default |
 | `MONETA_API_URL` / `api_url` | Point the CLI at a remote server |
 | `MONETA_API_TOKEN` / `api_token` | Bearer token (server enforcement + client header) |
 | `MONETA_NTFY_TOPIC` / `ntfy_topic` | ntfy.sh topic URL for `moneta digest` (e.g. `https://ntfy.sh/moneta-xyz123`); unset = `/digest` 400s |

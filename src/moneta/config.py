@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     plaid_secret: str | None = None
     plaid_env: str = "production"
     llm_model: str | None = None
+    llm_api_base: str | None = None
     api_url: str | None = None
     api_token: str | None = None
     ntfy_topic: str | None = None

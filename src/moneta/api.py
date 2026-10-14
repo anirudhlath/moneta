@@ -752,7 +752,7 @@ def build_app() -> FastAPI:
     return create_app(
         sessionmaker,
         _build_adapters(settings),
-        build_classifier(settings.llm_model),
+        build_classifier(settings.llm_model, settings.llm_api_base),
         engine=engine,
         api_token=settings.api_token,
         ntfy_topic=settings.ntfy_topic,
