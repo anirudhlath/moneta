@@ -404,3 +404,28 @@ def test_ts_to_date_uses_local_timezone() -> None:
 
 def test_ts_to_date_utc() -> None:  # TZ pinned to UTC by the autouse fixture
     assert _ts_to_date(1782963000) == date(2026, 7, 2)
+
+
+async def test_owned_clients_allow_a_slow_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The bridge refreshes institutions live and routinely answers after httpx's 5 s
+    # default; every client the module creates itself must wait long enough.
+    timeouts: list[dict[str, float | None]] = []
+    real_client = httpx.AsyncClient
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        timeouts.append(request.extensions["timeout"])
+        if request.method == "POST":
+            return httpx.Response(200, text="https://user:pass@bridge.example/simplefin")
+        return httpx.Response(200, json=SIMPLEFIN_PAYLOAD)
+
+    def client_factory(**kwargs: Any) -> httpx.AsyncClient:
+        return real_client(transport=httpx.MockTransport(handle), **kwargs)
+
+    monkeypatch.setattr("moneta.aggregator.simplefin.httpx.AsyncClient", client_factory)
+    adapter = SimpleFINAdapter("https://user:pass@bridge.example/simplefin")
+    await adapter.fetch()
+    await adapter.fetch(since=date.today() - timedelta(days=3))
+    token = base64.b64encode(b"https://bridge.example/claim/abc").decode()
+    await claim_setup_token(token)
+    assert len(timeouts) == 3
+    assert all(t["read"] is not None and t["read"] >= 60 for t in timeouts)

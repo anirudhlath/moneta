@@ -197,6 +197,10 @@ Synced: 12 new transactions, 1 transfers linked, 0 new series, 0 events.
 ⚠ simplefin: ConnectError: [Errno 61] Connection refused
 ```
 
+SimpleFIN requests wait up to 60 seconds for the bridge, which refreshes your
+institutions live. A `⚠ simplefin: ReadTimeout` therefore means the bridge was stalled,
+not just slow; the next sync retries from SimpleFIN's own newest transaction.
+
 (A real example: a Plaid item losing its login shows `⚠ Plaid item Apple Card skipped
 (ITEM_LOGIN_REQUIRED) — repair with: moneta setup plaid-relink <item-id>` — previously this
 only reached the log file; now it's visible in the sync summary the moment it happens, and

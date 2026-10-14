@@ -21,6 +21,9 @@ _WINDOW_DAYS = 45
 # new txns, rather than walking to `since` (which may be 1970): institutions hand the
 # bridge a bounded history. >365 so an annual-only cadence can't terminate the walk.
 _MAX_EMPTY_WINDOWS = 9
+# The bridge refreshes institutions live, so a single request routinely outlasts
+# httpx's 5 s default; a sync is a background pull, so wait rather than fail it.
+_TIMEOUT = httpx.Timeout(60.0)
 
 
 def _split_auth(access_url: str) -> tuple[str, tuple[str, str]]:
@@ -47,7 +50,7 @@ def _default_today() -> date:
 
 async def claim_setup_token(token: str, client: httpx.AsyncClient | None = None) -> str:
     claim_url = base64.b64decode(token).decode()
-    own = client or httpx.AsyncClient()
+    own = client or httpx.AsyncClient(timeout=_TIMEOUT)
     try:
         resp = await own.post(claim_url)
         resp.raise_for_status()
@@ -73,7 +76,7 @@ class SimpleFINAdapter:
         return "simplefin"
 
     async def fetch(self, since: date | None = None) -> Snapshot:
-        own = self._client or httpx.AsyncClient()
+        own = self._client or httpx.AsyncClient(timeout=_TIMEOUT)
         try:
             if since is None:
                 return _parse_snapshot(await self._get(own, {"pending": 1}))
