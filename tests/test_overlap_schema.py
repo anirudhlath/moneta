@@ -60,7 +60,7 @@ async def test_overlap_columns_preserve_existing_observations() -> None:
         async with engine.connect() as conn:
             assert (
                 await conn.exec_driver_sql("SELECT version_num FROM alembic_version")
-            ).scalar() == ("0006")
+            ).scalar() == ("0007")
             account_rows = (await conn.exec_driver_sql("SELECT * FROM accounts ORDER BY id")).all()
             txn_rows = (await conn.exec_driver_sql("SELECT * FROM transactions ORDER BY id")).all()
             assert [

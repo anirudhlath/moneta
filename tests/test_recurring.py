@@ -19,6 +19,7 @@ from moneta.models import (
     SeriesStatus,
     Transaction,
     TransferLink,
+    recurring_cluster_item,
 )
 from moneta.pipelines.events import emit_series_events
 from moneta.pipelines.recurring import detect_recurring
@@ -889,3 +890,261 @@ async def test_same_merchant_tagged_txn_never_revives_ended_series(session: Asyn
     await detect_recurring(session, llm=None, today=date(2026, 7, 1))
     await session.refresh(s)
     assert s.status == SeriesStatus.ended
+
+
+async def _seed_sub_and_orders(session: AsyncSession) -> tuple[Account, list[Transaction]]:
+    acct = await _seed_monthly(session, (3, 4, 5, 6), merchant="Streamco", cents=-999)
+    orders = [
+        await make_txn(session, acct, amount_cents=c, merchant="Streamco", posted_on=d)
+        for d, c in (
+            (date(2026, 3, 3), -2350),
+            (date(2026, 4, 9), -1720),
+            (date(2026, 5, 20), -3100),
+            (date(2026, 6, 2), -2640),
+        )
+    ]
+    return acct, orders
+
+
+async def test_subscription_with_orders_forms_one_series(session: AsyncSession) -> None:
+    _, orders = await _seed_sub_and_orders(session)
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.new_series == 1 and stats.review == 0
+    s = (await _series(session))[0]
+    assert s.expected_cents == -999 and s.cadence == Cadence.monthly
+    assert all(o.series_id is None for o in orders)
+
+
+async def test_subscription_keeps_its_series_beside_many_small_purchases(
+    session: AsyncSession,
+) -> None:
+    acct = await _seed_monthly(session, (1, 2, 3, 4, 5, 6), merchant="Streamco", cents=-1999)
+    small = [
+        await make_txn(session, acct, amount_cents=c, merchant="Streamco", posted_on=d)
+        for d, c in (
+            (date(2026, 1, 17), -299),
+            (date(2026, 1, 20), -499),
+            (date(2026, 2, 14), -349),
+            (date(2026, 2, 17), -450),
+            (date(2026, 3, 20), -299),
+            (date(2026, 3, 22), -399),
+            (date(2026, 4, 25), -499),
+            (date(2026, 5, 28), -320),
+            (date(2026, 6, 1), -380),
+        )
+    ]
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.new_series == 1
+    [s] = await _series(session)
+    assert s.status == SeriesStatus.active
+    assert s.expected_cents == -1999 and s.cadence == Cadence.monthly
+    subs = (
+        (await session.execute(select(Transaction).where(Transaction.amount_cents == -1999)))
+        .scalars()
+        .all()
+    )
+    assert len(subs) == 6 and all(t.series_id == s.id for t in subs)
+    assert all(t.series_id is None for t in small)
+
+
+async def test_top_ups_are_untagged_from_an_existing_series(session: AsyncSession) -> None:
+    _, orders = await _seed_sub_and_orders(session)
+    old = await make_series(session, merchant="Streamco", expected_cents=-999)
+    for t in (await session.execute(select(Transaction))).scalars():
+        t.series_id = old.id  # pre-split state: one series swallowed everything
+    await session.commit()
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.new_series == 0
+    s = (await _series(session))[0]
+    assert s.id == old.id
+    assert all(o.series_id is None for o in orders)
+
+
+async def test_variable_bill_still_goes_to_review(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    for month, cents in ((3, -8000), (4, -17000), (5, -9500), (6, -12000)):
+        await make_txn(
+            session, acct, amount_cents=cents, merchant="Util Co", posted_on=date(2026, month, 10)
+        )
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.new_series == 0 and stats.review == 1
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert "amount_cents" not in item.payload  # one bill: merchant-level question
+
+
+async def test_concurrent_subscriptions_are_stable_across_runs(session: AsyncSession) -> None:
+    acct = await _seed_monthly(session, (1, 2, 3, 4, 5, 6), merchant="Chatco", day=11, cents=-2000)
+    await _seed_monthly(session, (4, 5, 6), acct=acct, merchant="Chatco", day=15, cents=-2000)
+    first = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert first.new_series == 2
+    assert {s.next_expected_on for s in await _series(session)} == {
+        date(2026, 7, 11),
+        date(2026, 7, 15),
+    }
+    second = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert second.new_series == 0 and second.merged == 0
+    assert len(await _series(session)) == 2
+
+
+async def test_payer_streams_at_different_amounts_form_two_series(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    start = date(2026, 5, 1)
+    for i in range(5):
+        await make_txn(
+            session,
+            acct,
+            amount_cents=150000,
+            merchant="Acme Corp",
+            posted_on=start + timedelta(days=14 * i),
+        )
+        await make_txn(
+            session,
+            acct,
+            amount_cents=200000,
+            merchant="Acme Corp",
+            posted_on=start + timedelta(days=7 + 14 * i),
+        )
+    await detect_recurring(session, llm=None, today=date(2026, 7, 9))
+    series = await _series(session)
+    assert sorted(s.expected_cents for s in series) == [150000, 200000]
+    assert {s.cadence for s in series} == {Cadence.biweekly}
+
+
+async def test_pre_merge_series_fold_into_one(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    older = await make_series(
+        session, merchant="Acme Fitness", expected_cents=-4999, status=SeriesStatus.ended
+    )
+    newer = await make_series(session, merchant="Acme Fitness", expected_cents=-4999)
+    for month in (1, 2, 3, 4, 5, 6):
+        await make_txn(
+            session,
+            acct,
+            amount_cents=-4999,
+            merchant="Acme Fitness",
+            posted_on=date(2026, month, 3),
+            series_id=older.id if month <= 3 else newer.id,
+        )
+    session.add(
+        SeriesEvent(
+            series_id=older.id, kind=EventKind.missed, occurred_on=date(2026, 4, 3), details={}
+        )
+    )
+    session.add(
+        ReviewItem(kind=ReviewKind.price_change, question="?", payload={"series_id": older.id})
+    )
+    await session.commit()
+
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+
+    assert stats.merged == 1
+    (survivor,) = await _series(session)
+    assert survivor.id == newer.id  # it tags the newest charge
+    assert survivor.status == SeriesStatus.active
+    txns = (await session.execute(select(Transaction))).scalars().all()
+    assert {t.series_id for t in txns} == {newer.id}
+    events = (await session.execute(select(SeriesEvent))).scalars().all()
+    assert {e.series_id for e in events} <= {newer.id}
+    price = (
+        await session.execute(select(ReviewItem).where(ReviewItem.kind == ReviewKind.price_change))
+    ).scalar_one()
+    assert price.payload["series_id"] == newer.id
+
+
+async def test_per_bill_decision_only_forces_its_bill(session: AsyncSession) -> None:
+    await _seed_sub_and_orders(session)
+    orders_item = recurring_cluster_item("Streamco", "outflow", 2600)
+    orders_item.status = ReviewStatus.resolved
+    orders_item.resolution = {"is_recurring": False, "resolved_by": "manual"}
+    session.add(orders_item)
+    await session.commit()
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert [s.expected_cents for s in await _series(session)] == [-999]
+
+
+async def test_merchant_level_decision_covers_every_bill(session: AsyncSession) -> None:
+    await _seed_sub_and_orders(session)
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.recurring_cluster,
+            question="?",
+            payload={"merchant": "Streamco", "direction": "outflow"},
+            status=ReviewStatus.resolved,
+            resolution={"is_recurring": False, "resolved_by": "manual"},
+        )
+    )
+    await session.commit()
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert await _series(session) == []
+
+
+async def test_specific_decision_beats_newer_merchant_level(session: AsyncSession) -> None:
+    await _seed_sub_and_orders(session)
+    specific = recurring_cluster_item("Streamco", "outflow", 999)
+    specific.status = ReviewStatus.resolved
+    specific.resolution = {"is_recurring": True, "discretionary": True, "resolved_by": "manual"}
+    session.add(specific)
+    await session.flush()
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.recurring_cluster,
+            question="?",
+            payload={"merchant": "Streamco", "direction": "outflow"},
+            status=ReviewStatus.resolved,
+            resolution={"is_recurring": False, "resolved_by": "manual"},
+        )
+    )
+    await session.commit()
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    (s,) = await _series(session)
+    assert s.expected_cents == -999 and s.discretionary is True
+
+
+async def test_split_bill_question_names_its_amount(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    for month, cents in ((3, -1000), (4, -1150), (5, -1320), (6, -1500)):
+        await make_txn(
+            session, acct, amount_cents=cents, merchant="Gymco", posted_on=date(2026, month, 15)
+        )
+    for d in (date(2026, 3, 2), date(2026, 4, 25), date(2026, 6, 1)):
+        await make_txn(session, acct, amount_cents=-6000, merchant="Gymco", posted_on=d)
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.review == 1
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.payload["amount_cents"] == 1235
+    assert item.question == "Is 'Gymco' ($12.35) a recurring bill?"
+
+
+async def test_series_whose_txns_all_moved_ends(session: AsyncSession) -> None:
+    await _seed_monthly(session, (4, 5, 6))
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    for t in (await session.execute(select(Transaction))).scalars():
+        t.merchant = "Netflix Streaming"  # a rename this series wasn't carried through
+    await session.commit()
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    old = next(s for s in await _series(session) if s.merchant == "Netflix")
+    assert old.status == SeriesStatus.ended
+
+
+async def test_split_supersedes_an_open_merchant_level_question(session: AsyncSession) -> None:
+    await _seed_sub_and_orders(session)
+    pending = recurring_cluster_item("Streamco", "outflow")  # asked before the split
+    answered = recurring_cluster_item("Streamco", "outflow")
+    answered.status = ReviewStatus.resolved
+    answered.resolution = {"is_recurring": True, "resolved_by": "manual"}
+    per_bill = recurring_cluster_item("Streamco", "outflow", 2600)
+    session.add_all([pending, answered, per_bill])
+    await session.commit()
+
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+
+    await session.refresh(pending)
+    await session.refresh(answered)
+    await session.refresh(per_bill)
+    assert pending.status == ReviewStatus.resolved
+    assert pending.resolution is not None
+    assert pending.resolution["resolved_by"] == "reconciliation"
+    assert "superseded_reason" in pending.resolution
+    assert answered.resolution == {"is_recurring": True, "resolved_by": "manual"}
+    assert per_bill.status == ReviewStatus.open  # only merchant-level questions retire
+    assert [s.expected_cents for s in await _series(session)] == [-999]

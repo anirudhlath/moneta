@@ -18,7 +18,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.cadence import match_cadence
 from moneta.logical import LogicalData, load_logical_data
-from moneta.models import AccountType, Cadence, ReviewItem, SyncRun, TransferLink
+from moneta.models import (
+    AccountType,
+    Cadence,
+    RecurringSeries,
+    ReviewItem,
+    ReviewKind,
+    SyncRun,
+    TransferLink,
+    bill_ref,
+)
 
 
 @dataclass(frozen=True)
@@ -181,3 +190,32 @@ def loan_payment_stats(links: list[ClassifiedLink]) -> dict[int, LoanPayment]:
             last_paid_on=dates[-1],
         )
     return result
+
+
+async def bill_amount(session: AsyncSession, series: RecurringSeries) -> int | None:
+    """The amount a decision about this series names — only when its merchant has
+    several bills (design 2026-10-13 §4): more than one series, or an existing
+    recurring_cluster question already naming an amount for that merchant and direction
+    (a split merchant can have one series plus a question about its other bill).
+    Otherwise decisions stay merchant-level."""
+    count = await session.scalar(
+        select(func.count())
+        .select_from(RecurringSeries)
+        .where(
+            RecurringSeries.merchant == series.merchant,
+            RecurringSeries.direction == series.direction,
+        )
+    )
+    if (count or 0) > 1:
+        return abs(series.expected_cents)
+    for item in await session.scalars(
+        select(ReviewItem).where(
+            ReviewItem.kind == ReviewKind.recurring_cluster,
+            ReviewItem.payload["merchant"].as_string() == series.merchant,
+            ReviewItem.payload["direction"].as_string() == series.direction,
+        )
+    ):
+        ref = bill_ref(item.payload)
+        if ref is not None and ref[2] is not None:
+            return abs(series.expected_cents)
+    return None

@@ -4,7 +4,15 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.models import Account, AccountType, Transaction, to_cents
+from moneta.models import (
+    Account,
+    AccountType,
+    Transaction,
+    bill_ref,
+    recurring_cluster_item,
+    same_bill,
+    to_cents,
+)
 
 
 def test_to_cents() -> None:
@@ -38,3 +46,35 @@ async def test_account_and_transaction_roundtrip(session: AsyncSession) -> None:
     assert got.amount_cents == -4250
     assert got.merchant is None and got.series_id is None
     assert got.raw["id"] == "TRN-1"
+
+
+def test_bill_ref_reads_optional_amount() -> None:
+    assert bill_ref({"merchant": "Acme", "direction": "outflow"}) == ("Acme", "outflow", None)
+    assert bill_ref({"merchant": "Acme", "direction": "outflow", "amount_cents": 999}) == (
+        "Acme",
+        "outflow",
+        999,
+    )
+    assert bill_ref({"merchant": "Acme", "direction": "outflow", "amount_cents": -5}) == (
+        "Acme",
+        "outflow",
+        None,
+    )
+    assert bill_ref({"merchant": "Acme", "direction": "sideways"}) is None
+
+
+def test_same_bill_tolerance_and_merchant_level() -> None:
+    assert same_bill(("Acme", "outflow", None), ("Acme", "outflow", 999))
+    assert same_bill(("Acme", "outflow", 1000), ("Acme", "outflow", 1200))
+    assert not same_bill(("Acme", "outflow", 1000), ("Acme", "outflow", 1300))
+    assert not same_bill(("Acme", "outflow", None), ("Acme", "inflow", None))
+    assert not same_bill(("Acme", "outflow", None), ("Acmes", "outflow", None))
+
+
+def test_recurring_cluster_item_names_amount_only_when_given() -> None:
+    plain = recurring_cluster_item("Acme", "outflow")
+    assert plain.question == "Is 'Acme' a recurring bill?"
+    assert plain.payload == {"merchant": "Acme", "direction": "outflow"}
+    priced = recurring_cluster_item("Acme", "outflow", 4999)
+    assert priced.question == "Is 'Acme' ($49.99) a recurring bill?"
+    assert priced.payload == {"merchant": "Acme", "direction": "outflow", "amount_cents": 4999}

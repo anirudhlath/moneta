@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 import moneta.db
 from moneta.db import init_db, make_sessionmaker
 from moneta.models import Base
+from tests.factories import make_series
 
 
 def _script_directory() -> ScriptDirectory:
@@ -71,3 +72,18 @@ async def test_init_db_is_idempotent() -> None:
 
 def test_head_constant_matches_script_directory() -> None:
     assert _script_directory().get_current_head() == moneta.db._HEAD
+
+
+async def test_0007_allows_several_series_per_merchant() -> None:
+    engine, sm = make_sessionmaker("sqlite+aiosqlite://")
+    await init_db(engine)
+    async with engine.connect() as conn:
+        uniques = await conn.run_sync(
+            lambda c: inspect(c).get_unique_constraints("recurring_series")
+        )
+    assert uniques == []
+    async with sm() as session:
+        await make_series(session, merchant="Acme Fitness", expected_cents=-999)
+        await make_series(session, merchant="Acme Fitness", expected_cents=-4999)
+        await session.commit()
+    await engine.dispose()

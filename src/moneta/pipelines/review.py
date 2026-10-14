@@ -27,19 +27,27 @@ from moneta.models import (
     SeriesStatus,
     Transaction,
     TransferLink,
+    amounts_match,
+    bill_ref,
     dollars,
     recurring_cluster_item,
-    series_key,
+    same_bill,
+    series_ref,
 )
 from moneta.pipelines.account_overlap import set_account_link
 from moneta.pipelines.events import apply_price_change
 from moneta.pipelines.transaction_overlap import (
-    human_recurring_keys,
+    human_recurring_refs,
     reviewed_merchant_occurrences,
     set_transaction_duplicate,
 )
 from moneta.pipelines.transfers import effective_transfer_choices
-from moneta.queries import foreign_series_ids, price_review_matches_currency, primary_currency
+from moneta.queries import (
+    bill_amount,
+    foreign_series_ids,
+    price_review_matches_currency,
+    primary_currency,
+)
 
 _MERCHANT_PROMPT = """You are auto-resolving a personal-finance review question.
 Name the merchant behind this bank descriptor.
@@ -211,7 +219,14 @@ async def review_context(session: AsyncSession, item: ReviewItem) -> dict[str, A
             return {}
         logical = await load_logical_data(session)
         primary = await primary_currency(session)
-        matching = [t for t in logical.transactions if t.merchant == merchant]
+        ref = bill_ref(item.payload)
+        amount = ref[2] if ref is not None else None
+        matching = [
+            t
+            for t in logical.transactions
+            if t.merchant == merchant
+            and (amount is None or amounts_match(abs(t.amount_cents), amount))
+        ]
         domestic = [
             t
             for t in matching
@@ -254,6 +269,12 @@ async def review_context(session: AsyncSession, item: ReviewItem) -> dict[str, A
     return {}
 
 
+async def _human_decision_covers(session: AsyncSession, item: ReviewItem) -> bool:
+    ref = bill_ref(item.payload)
+    protected = human_recurring_refs(list(await session.scalars(select(ReviewItem))))
+    return ref is not None and any(same_bill(ref, p) for p in protected)
+
+
 async def apply_resolution(
     session: AsyncSession,
     item: ReviewItem,
@@ -261,10 +282,12 @@ async def apply_resolution(
     resolved_by: str = "manual",
 ) -> None:
     """Apply a resolution's effects and mark the item resolved. Caller commits."""
-    if item.kind == ReviewKind.recurring_cluster and resolved_by != "manual":
-        protected_keys = human_recurring_keys(list(await session.scalars(select(ReviewItem))))
-        if (item.payload.get("merchant"), item.payload.get("direction")) in protected_keys:
-            raise ValueError("Automatic recurring resolution cannot override a human decision")
+    if (
+        item.kind == ReviewKind.recurring_cluster
+        and resolved_by != "manual"
+        and await _human_decision_covers(session, item)
+    ):
+        raise ValueError("Automatic recurring resolution cannot override a human decision")
     if item.kind in (ReviewKind.account_overlap, ReviewKind.transaction_overlap):
         key = (
             "canonical_account_id" if item.kind == ReviewKind.account_overlap else "duplicate_of_id"
@@ -392,27 +415,27 @@ async def apply_resolution(
             )
     elif item.kind == ReviewKind.transfer_pair:
         raise ValueError("resolution.inflow_id is required (integer candidate ID or null)")
-    elif item.kind == ReviewKind.recurring_cluster and resolution.get("is_recurring") is False:
-        # detection's force map suppresses future runs; end the live series now so
-        # fixed costs stop counting it immediately instead of after the stale sweep
-        stmt = select(RecurringSeries).where(
-            RecurringSeries.merchant == item.payload.get("merchant"),
-            RecurringSeries.status == SeriesStatus.active,
-        )
-        direction = item.payload.get("direction")
-        if direction is not None:
-            stmt = stmt.where(RecurringSeries.direction == direction)
-        for series in (await session.execute(stmt)).scalars():
-            series.status = SeriesStatus.ended
-    elif item.kind == ReviewKind.recurring_cluster and resolution.get("is_recurring") is True:
+    elif item.kind == ReviewKind.recurring_cluster and isinstance(
+        resolution.get("is_recurring"), bool
+    ):
         stmt = select(RecurringSeries).where(
             RecurringSeries.merchant == item.payload.get("merchant")
         )
         direction = item.payload.get("direction")
         if direction is not None:
             stmt = stmt.where(RecurringSeries.direction == direction)
+        ref = bill_ref(item.payload)
+        amount = ref[2] if ref is not None else None
         for series in (await session.execute(stmt)).scalars():
-            series.discretionary = bool(resolution.get("discretionary"))
+            if amount is not None and not amounts_match(abs(series.expected_cents), amount):
+                continue  # a per-bill answer leaves the merchant's other bills alone
+            if resolution["is_recurring"] is False:
+                # detection's force map suppresses future runs; end the live series now
+                # so fixed costs stop counting it immediately, not after the stale sweep
+                if series.status == SeriesStatus.active:
+                    series.status = SeriesStatus.ended
+            else:
+                series.discretionary = bool(resolution.get("discretionary"))
     elif item.kind == ReviewKind.price_change and resolution.get("is_price_change") is True:
         logical = await load_logical_data(session)
         if not price_review_matches_currency(item, logical, await primary_currency(session)):
@@ -477,15 +500,15 @@ async def autoreview_items(session: AsyncSession, llm: Classifier) -> int:
     for item in items:
         if item.payload.get("llm_flagged"):
             continue  # opened because the LLM already looked — human-only
-        if item.kind == ReviewKind.recurring_cluster:
-            protected_keys = human_recurring_keys(list(await session.scalars(select(ReviewItem))))
-            if (item.payload.get("merchant"), item.payload.get("direction")) in protected_keys:
-                item.status = ReviewStatus.resolved
-                item.resolution = {
-                    "resolved_by": "reconciliation",
-                    "superseded_reason": "Recurring cluster already has a human decision",
-                }
-                continue
+        if item.kind == ReviewKind.recurring_cluster and await _human_decision_covers(
+            session, item
+        ):
+            item.status = ReviewStatus.resolved
+            item.resolution = {
+                "resolved_by": "reconciliation",
+                "superseded_reason": "Recurring cluster already has a human decision",
+            }
+            continue
         if item.kind == ReviewKind.transfer_pair:
             logical = await load_logical_data(session)
             choices, conflicts = effective_transfer_choices(
@@ -574,15 +597,15 @@ async def verify_series(session: AsyncSession, llm: Classifier | None) -> Verify
     stats = VerifyStats()
     if llm is None:
         return stats
-    seen = {
-        key
+    seen = [
+        ref
         for item in (
             await session.execute(
                 select(ReviewItem).where(ReviewItem.kind == ReviewKind.recurring_cluster)
             )
         ).scalars()
-        if (key := series_key(item.payload.get("merchant"), item.payload.get("direction")))
-    }
+        if (ref := bill_ref(item.payload)) is not None
+    ]
     series_list = (
         (
             await session.execute(
@@ -597,7 +620,7 @@ async def verify_series(session: AsyncSession, llm: Classifier | None) -> Verify
     for series in series_list:
         if series.id in foreign_series:
             continue
-        if series_key(series.merchant, series.direction) in seen:
+        if any(same_bill(series_ref(series), r) for r in seen):
             continue
         occurrences = await _recent_occurrences(session, series.id)
         amounts = [abs(t.amount_cents) for t in occurrences] or [abs(series.expected_cents)]
@@ -613,7 +636,9 @@ async def verify_series(session: AsyncSession, llm: Classifier | None) -> Verify
                 samples=[_prompt_txn(_sample(t)) for t in occurrences],
             )
         )
-        item = recurring_cluster_item(series.merchant, series.direction)
+        amount = await bill_amount(session, series)
+        item = recurring_cluster_item(series.merchant, series.direction, amount)
+        seen.append((series.merchant, str(series.direction), amount))
         classification = answer.get("classification") if answer else None
         if classification not in ("bill", "habit", "not_recurring"):
             classification = None

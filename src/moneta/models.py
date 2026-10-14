@@ -1,5 +1,6 @@
 """SQLAlchemy models. Money = integer cents; negative = outflow."""
 
+from collections.abc import Mapping
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -55,14 +56,52 @@ def series_key(merchant: object, direction: object) -> tuple[str, str] | None:
         return None
 
 
-def recurring_cluster_item(merchant: str, direction: str) -> "ReviewItem":
+BILL_TOLERANCE = 0.20
+# (merchant, direction value, unsigned amount) — amount None = merchant-level
+BillRef = tuple[str, str, int | None]
+
+
+def amounts_match(a: int, b: int) -> bool:
+    """Two unsigned amounts name the same bill: within 20% of the larger."""
+    return abs(a - b) <= max(a, b) * BILL_TOLERANCE
+
+
+def bill_ref(payload: Mapping[str, object]) -> BillRef | None:
+    """The bill a recurring_cluster payload addresses (design 2026-10-13 §4)."""
+    key = series_key(payload.get("merchant"), payload.get("direction"))
+    if key is None:
+        return None
+    amount = payload.get("amount_cents")
+    return key[0], key[1], amount if type(amount) is int and amount > 0 else None
+
+
+def same_bill(a: BillRef, b: BillRef) -> bool:
+    """A merchant-level ref (amount None) covers every bill of its merchant+direction."""
+    if a[:2] != b[:2]:
+        return False
+    if a[2] is None or b[2] is None:
+        return True
+    return amounts_match(a[2], b[2])
+
+
+def decision_precedence(ref: BillRef, item_id: int) -> tuple[bool, int]:
+    """Sort key for decisions covering one bill: amount-specific beats merchant-level,
+    then the highest item id (design 2026-10-13 §4). The greatest key wins."""
+    return ref[2] is not None, item_id
+
+
+def recurring_cluster_item(
+    merchant: str, direction: str, amount_cents: int | None = None
+) -> "ReviewItem":
     """The one recurring_cluster ReviewItem construction — question text and payload
-    shape are pinned by tests. Used by detection, verification, and the API ledger."""
-    return ReviewItem(
-        kind=ReviewKind.recurring_cluster,
-        question=f"Is {merchant!r} a recurring bill?",
-        payload={"merchant": merchant, "direction": direction},
-    )
+    shape are pinned by tests. Used by detection, verification, and the API ledger.
+    An amount is named only when the merchant has several bills (design 2026-10-13 §4)."""
+    payload: dict[str, Any] = {"merchant": merchant, "direction": direction}
+    question = f"Is {merchant!r} a recurring bill?"
+    if amount_cents is not None:
+        payload["amount_cents"] = amount_cents
+        question = f"Is {merchant!r} (${dollars(amount_cents)}) a recurring bill?"
+    return ReviewItem(kind=ReviewKind.recurring_cluster, question=question, payload=payload)
 
 
 class Cadence(StrEnum):
@@ -162,7 +201,6 @@ class TransferLink(Base):
 
 class RecurringSeries(Base):
     __tablename__ = "recurring_series"
-    __table_args__ = (UniqueConstraint("merchant", "direction"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     merchant: Mapped[str]
@@ -172,6 +210,10 @@ class RecurringSeries(Base):
     next_expected_on: Mapped[date] = mapped_column(Date)
     status: Mapped[SeriesStatus] = mapped_column(String, default=SeriesStatus.active)
     discretionary: Mapped[bool] = mapped_column(default=False)
+
+
+def series_ref(series: RecurringSeries) -> BillRef:
+    return series.merchant, str(series.direction), abs(series.expected_cents)
 
 
 class SeriesEvent(Base):

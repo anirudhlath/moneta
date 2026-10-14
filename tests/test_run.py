@@ -276,3 +276,41 @@ async def test_second_identical_sync_is_a_full_noop(session: AsyncSession) -> No
     assert report.transfers.linked == 0
     assert report.events == 0
     assert await counts() == before
+
+
+async def test_sync_merges_one_bills_descriptors(session: AsyncSession) -> None:
+    snap = Snapshot(
+        accounts=[
+            AccountDTO(
+                id="A-1",
+                name="Checking",
+                org_name="Bank",
+                currency="USD",
+                balance=Decimal("1000.00"),
+                balance_date=date(2026, 7, 1),
+            )
+        ],
+        transactions=[
+            TransactionDTO(
+                id=f"T-{i}",
+                account_id="A-1",
+                posted_on=date(2026, month, 3),
+                amount=Decimal("-49.99"),
+                description=desc,
+                raw={},
+            )
+            for i, (month, desc) in enumerate(
+                (
+                    (3, "ACME FITNESS LLC RIVERTON TX"),
+                    (4, "ACME FITNESS"),
+                    (5, "ACME FITNESS"),
+                    (6, "ACME FITNESS LLC RIVERTON TX"),
+                )
+            )
+        ],
+        holdings=[],
+    )
+    report = await run_sync(session, [FakeAdapter(snap)], llm=None, today=date(2026, 7, 9))
+    assert report.merchants_renamed == 1
+    series = (await session.execute(select(RecurringSeries))).scalars().all()
+    assert [(s.merchant, s.expected_cents) for s in series] == [("Acme Fitness", -4999)]
