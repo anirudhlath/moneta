@@ -32,6 +32,8 @@ from moneta.models import (
     SeriesStatus,
     SyncRun,
     TransferLink,
+    amounts_match,
+    bill_ref,
     recurring_cluster_item,
 )
 from moneta.pipelines.digest import DigestResult, run_digest
@@ -44,7 +46,7 @@ from moneta.pipelines.reconcile import (
 from moneta.pipelines.recurring import reactivate_series
 from moneta.pipelines.review import apply_resolution, review_context
 from moneta.pipelines.run import SyncReport, run_sync
-from moneta.queries import classified_links, primary_currency
+from moneta.queries import bill_amount, classified_links, primary_currency
 from moneta.vesting import apply_vesting, parse_vesting_csv
 from moneta.views.cashflow import accrual_by_month, accrual_spend, cash_out
 from moneta.views.financing import Obligation, compute_obligations
@@ -441,21 +443,36 @@ def create_app(
         ).scalar_one_or_none()
         if series is None:
             raise HTTPException(status_code=404, detail="series not found")
-        item = (
+        amount = await bill_amount(session, series)
+
+        def addresses(candidate: ReviewItem) -> bool:
+            ref = bill_ref(candidate.payload)
+            if ref is None:
+                return False
+            if amount is None:
+                return ref[2] is None
+            return ref[2] is not None and amounts_match(ref[2], amount)
+
+        item = next(
             (
-                await session.execute(
-                    select(ReviewItem).where(
-                        ReviewItem.kind == ReviewKind.recurring_cluster,
-                        ReviewItem.payload["merchant"].as_string() == series.merchant,
-                        ReviewItem.payload["direction"].as_string() == series.direction,
+                candidate
+                for candidate in (
+                    await session.execute(
+                        select(ReviewItem)
+                        .where(
+                            ReviewItem.kind == ReviewKind.recurring_cluster,
+                            ReviewItem.payload["merchant"].as_string() == series.merchant,
+                            ReviewItem.payload["direction"].as_string() == series.direction,
+                        )
+                        .order_by(ReviewItem.id)
                     )
-                )
-            )
-            .scalars()
-            .first()
+                ).scalars()
+                if addresses(candidate)
+            ),
+            None,
         )
         if item is None:
-            item = recurring_cluster_item(series.merchant, series.direction)
+            item = recurring_cluster_item(series.merchant, series.direction, amount)
             session.add(item)
             await session.flush()
         return series, item

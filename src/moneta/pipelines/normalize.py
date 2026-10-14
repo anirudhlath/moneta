@@ -1,23 +1,116 @@
 import re
+import statistics
+from collections.abc import Iterable
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.llm import Classifier
-from moneta.models import AliasSource, MerchantAlias, ReviewItem, ReviewKind, Transaction
+from moneta.models import (
+    AliasSource,
+    MerchantAlias,
+    RecurringSeries,
+    ReviewItem,
+    ReviewKind,
+    Transaction,
+    bill_ref,
+)
 
-_PREFIXES = re.compile(r"^(sq \*|tst\*\s*|paypal \*|py \*|amzn mktp us\*)", re.IGNORECASE)
+_PREFIXES = re.compile(
+    r"^(aplpay\b|apple pay\b|gpay\b|google pay\b|sq ?\*|tst ?\*|paypal ?\*|py ?\*|dd ?\*|sp ?\*"
+    r"|amzn mktp us\*)\s*",
+    re.IGNORECASE,
+)
+# ACH metadata ("WEB ID: 123…", "PPD ID: …") is not part of the merchant
+_ACH_TAIL = re.compile(r"\b(?:web|ppd|ccd|tel)\s+id\b:?.*$", re.IGNORECASE)
+# a street address and everything after it; runs before _STORE_NUM eats the number
+_ADDRESS = re.compile(
+    r"\b\d+(?:st|nd|rd|th)?\s+(?:[a-z]+\s+){0,3}?"
+    r"(?:street|st|road|rd|avenue|ave|blvd|drive|dr|lane|ln|way|pkwy)\b.*$",
+    re.IGNORECASE,
+)
+_LEGAL = re.compile(r"\b(?:llc|inc|corp|ltd)\b\.?,?", re.IGNORECASE)
 _STORE_NUM = re.compile(r"(#\d+|(?<![\w-])\d{3,}(?![\w-]))")
 # payment-reference tokens: 8+ alphanumeric chars containing at least one digit
 _REF_TOKEN = re.compile(r"\b(?=[0-9a-zA-Z]*\d)[0-9a-zA-Z]{8,}\b")
 _SPACES = re.compile(r"\s+")
+_US_STATES = frozenset(
+    [
+        "al",
+        "ak",
+        "az",
+        "ar",
+        "ca",
+        "co",
+        "ct",
+        "de",
+        "fl",
+        "ga",
+        "hi",
+        "id",
+        "il",
+        "in",
+        "ia",
+        "ks",
+        "ky",
+        "la",
+        "me",
+        "md",
+        "ma",
+        "mi",
+        "mn",
+        "ms",
+        "mo",
+        "mt",
+        "ne",
+        "nv",
+        "nh",
+        "nj",
+        "nm",
+        "ny",
+        "nc",
+        "nd",
+        "oh",
+        "ok",
+        "or",
+        "pa",
+        "ri",
+        "sc",
+        "sd",
+        "tn",
+        "tx",
+        "ut",
+        "vt",
+        "va",
+        "wa",
+        "wv",
+        "wi",
+        "wy",
+        "dc",
+        "pr",
+    ]
+)
 
 
 def rule_normalize(descriptor: str) -> str:
-    s = _PREFIXES.sub("", descriptor.strip())
+    """Strip what banks wrap around a merchant name (design 2026-10-13 §1)."""
+    s = descriptor.strip()
+    while (stripped := _PREFIXES.sub("", s)) != s:  # "AplPay TST* Name" nests prefixes
+        s = stripped
+    s = _ACH_TAIL.sub("", s)
+    s = _ADDRESS.sub("", s)
     s = _REF_TOKEN.sub("", s)
     s = _STORE_NUM.sub("", s)
-    s = _SPACES.sub(" ", s).strip(" -*:")
+    s = _LEGAL.sub("", s).replace("*", " ")
+    tokens = _SPACES.sub(" ", s).strip(" -:").split(" ")
+    # location tails, but never the last remaining token
+    while len(tokens) > 1 and tokens[-1].lower() in ("usa", "us"):
+        tokens.pop()
+    if len(tokens) > 1 and tokens[-1].lower() in _US_STATES:
+        tokens.pop()
+    if len(tokens) > 1 and tokens[-1].lower() == "co":
+        tokens.pop()
+    s = " ".join(tokens).strip(" -:")
     return s.title() if s else descriptor.strip().title()
 
 
@@ -75,48 +168,184 @@ async def normalize_merchants(session: AsyncSession, llm: Classifier | None) -> 
     return count
 
 
-async def renormalize_merchants(session: AsyncSession) -> int:
-    """Re-apply improved rules to existing non-manual aliases.
+_MIN_TARGET_LETTERS = 4
+_MIN_PLACE_NAMES = 3
+# a prefix followed by this many different non-place tails is a payment rail or a
+# generic label ("Zelle Payment To …"), not one merchant
+_MAX_TAILS = 3
 
-    Rewrites the affected transactions' merchants and renames series where the
-    old→new mapping is unambiguous and collision-free. Manual aliases are never touched.
+
+def _tokens(name: str) -> tuple[str, ...]:
+    """Comparison tokens: lower-cased, leading digits dropped ("0Elmton" -> "elmton")."""
+    return tuple(t for raw in name.lower().split() if (t := raw.lstrip("0123456789")))
+
+
+def merge_targets(names: Iterable[str], targets_only: Iterable[str] = ()) -> dict[str, str]:
+    """name -> the shorter name it merges into (design 2026-10-13 §1).
+
+    A multi-token name absorbs any name it is a token prefix of; a single-token name
+    absorbs only itself plus one *place* — a token that follows 3+ distinct existing
+    names, learned from the data. Brand + product names therefore stay apart. A prefix
+    with 3+ different non-place tails absorbs only its place variants. Names in
+    `targets_only` can absorb others but never merge themselves and teach no places.
     """
-    from moneta.models import RecurringSeries
+    sources = set(names)
+    keyed = {n: _tokens(n) for n in sorted(sources | set(targets_only))}
+    by_tokens: dict[tuple[str, ...], str] = {}
+    for name, toks in keyed.items():
+        by_tokens.setdefault(toks, name)
+    followers: dict[str, set[tuple[str, ...]]] = {}
+    for name, toks in keyed.items():
+        if name in sources and len(toks) >= 2 and toks[:-1] in by_tokens:
+            followers.setdefault(toks[-1], set()).add(toks[:-1])
+    places = {t for t, prefixes in followers.items() if len(prefixes) >= _MIN_PLACE_NAMES}
 
-    aliases = (
-        (
-            await session.execute(
-                select(MerchantAlias).where(MerchantAlias.source != AliasSource.manual)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    rename: dict[str, str | None] = {}  # old merchant -> new (None = ambiguous)
-    changed = 0
+    def is_place(tail: tuple[str, ...]) -> bool:
+        return len(tail) == 1 and tail[0] in places
+
+    tails: dict[tuple[str, ...], set[tuple[str, ...]]] = {}
+    for name, toks in keyed.items():
+        if name in sources:
+            for size in range(1, len(toks)):
+                if toks[:size] in by_tokens and not is_place(toks[size:]):
+                    tails.setdefault(toks[:size], set()).add(toks[size:])
+    generic = {prefix for prefix, found in tails.items() if len(found) >= _MAX_TAILS}
+    targets: dict[str, str] = {}
+    for name, toks in keyed.items():
+        if not toks or name not in sources:
+            continue
+        for size in range(1, len(toks)):  # shortest qualifying prefix wins
+            target = by_tokens.get(toks[:size])
+            if target is None or sum(c.isalpha() for c in target) < _MIN_TARGET_LETTERS:
+                continue
+            if toks[:size] in generic and not is_place(toks[size:]):
+                continue
+            if size >= 2 or (len(toks) == 2 and toks[1] in places):
+                targets[name] = target
+                break
+        else:
+            if by_tokens[toks] != name:  # same tokens, different spelling
+                targets[name] = by_tokens[toks]
+    for name in list(targets):  # resolve chains: A -> B -> C becomes A -> C
+        seen = {name}
+        while (nxt := targets.get(targets[name])) is not None and nxt not in seen:
+            seen.add(nxt)
+            targets[name] = nxt
+    return targets
+
+
+async def renormalize_merchants(session: AsyncSession) -> int:
+    """Re-apply rules to non-manual aliases, then merge names (design 2026-10-13 §1).
+
+    Runs every sync and is idempotent. Renames follow onto series and recurring
+    decisions; an old name whose aliases now split across several names is ambiguous,
+    so its series is left for detection to untag and end, and a name some alias still
+    carries keeps its series and decisions. A merchant-level decision that follows a
+    merge of two or more old names names the old name's median amount, so it covers only
+    that bill; a pure rename leaves it merchant-level. Manual
+    aliases, LLM aliases whose rule output is unclean, and LLM groups whose aliases
+    would not all land on one name are never rewritten, but their names are merge
+    targets.
+    """
+    aliases = list((await session.execute(select(MerchantAlias))).scalars())
+    base: dict[int, str] = {}
+    fixed: set[int] = set()  # aliases that keep their name: manual, or LLM-only names
     for alias in aliases:
         candidate = rule_normalize(alias.raw_descriptor)
-        if not looks_clean(candidate) or candidate == alias.merchant:
-            continue
+        clean = looks_clean(candidate)
+        base[alias.id] = (
+            candidate if clean and alias.source != AliasSource.manual else alias.merchant
+        )
+        # an LLM name with no clean rule output is the LLM's call: merging it would
+        # rewrite the name the next run learns places from, and flip merges back
+        if alias.source == AliasSource.manual or (alias.source == AliasSource.llm and not clean):
+            fixed.add(alias.id)
+    # an LLM group (aliases sharing one LLM name) is rewritten only when every alias
+    # lands on one final name; otherwise rewriting would split what the LLM unified
+    llm_groups: dict[str, list[MerchantAlias]] = {}
+    for alias in aliases:
+        if alias.source == AliasSource.llm:
+            llm_groups.setdefault(alias.merchant, []).append(alias)
+    while True:  # fixing a group changes the merge input, so repeat until it stops growing
+        targets = merge_targets(
+            (base[a.id] for a in aliases if a.id not in fixed),
+            targets_only=(base[a.id] for a in aliases if a.id in fixed),
+        )
+        grown = False
+        for group in llm_groups.values():
+            if any(a.id not in fixed for a in group) and (
+                len(
+                    {
+                        a.merchant if a.id in fixed else targets.get(base[a.id], base[a.id])
+                        for a in group
+                    }
+                )
+                > 1
+            ):
+                for a in group:
+                    fixed.add(a.id)
+                    base[a.id] = a.merchant  # a kept alias targets its own name, not the rules'
+                grown = True
+        if not grown:
+            break
+    rename: dict[str, str | None] = {}  # old merchant -> new (None = ambiguous)
+    by_target: dict[str, list[str]] = {}
+    changed = 0
+    came_from: dict[str, set[str]] = {}  # final name -> the old names its aliases carried
+    for alias in aliases:
         old = alias.merchant
-        rename[old] = None if rename.get(old, candidate) != candidate else candidate
-        alias.merchant = candidate
-        alias.source = AliasSource.rule
+        final = old if alias.id in fixed else targets.get(base[alias.id], base[alias.id])
+        came_from.setdefault(final, set()).add(old)
+        if final == old:
+            continue
+        rename[old] = None if rename.get(old, final) != final else final
+        if alias.source == AliasSource.llm and base[alias.id] != old:
+            alias.source = AliasSource.rule  # the clean rule output replaced the LLM's name
+        alias.merchant = final
+        by_target.setdefault(final, []).append(alias.raw_descriptor)
+        changed += 1
+    # a name some alias still carries keeps its own series and decisions
+    carried = {alias.merchant for alias in aliases}
+    renames = {old: new for old, new in rename.items() if new is not None and old not in carried}
+    # a merchant-level decision about the old name now addresses only that name's bill:
+    # left merchant-level, it would cover every bill of the merged merchant (design §4)
+    old_medians: dict[tuple[str, str], int] = {}
+    if renames:
+        amounts: dict[tuple[str, str], list[int]] = {}
         for txn in (
+            await session.execute(select(Transaction).where(Transaction.merchant.in_(renames)))
+        ).scalars():
+            direction = "outflow" if txn.amount_cents < 0 else "inflow"
+            amounts.setdefault((str(txn.merchant), direction), []).append(abs(txn.amount_cents))
+        old_medians = {key: round(statistics.median(cents)) for key, cents in amounts.items()}
+    for final, raws in by_target.items():
+        await session.execute(
+            update(Transaction).where(Transaction.description.in_(raws)).values(merchant=final)
+        )
+    if renames:
+        for series in (
             await session.execute(
-                select(Transaction).where(Transaction.description == alias.raw_descriptor)
+                select(RecurringSeries).where(RecurringSeries.merchant.in_(renames))
             )
         ).scalars():
-            txn.merchant = candidate
-        changed += 1
-
-    series_rows = (await session.execute(select(RecurringSeries))).scalars().all()
-    taken = {(s.merchant, s.direction) for s in series_rows}
-    for s in series_rows:
-        new = rename.get(s.merchant)
-        if new and (new, s.direction) not in taken:
-            taken.discard((s.merchant, s.direction))
-            s.merchant = new
-            taken.add((new, s.direction))
+            series.merchant = renames[series.merchant]
+        for item in (
+            await session.execute(
+                select(ReviewItem).where(ReviewItem.kind == ReviewKind.recurring_cluster)
+            )
+        ).scalars():
+            merchant = item.payload.get("merchant")
+            if not isinstance(merchant, str) or merchant not in renames:
+                continue
+            payload = {**item.payload, "merchant": renames[merchant]}
+            ref = bill_ref(item.payload)
+            if (
+                ref is not None
+                and ref[2] is None
+                and len(came_from[renames[merchant]]) > 1
+                and old_medians.get(ref[:2], 0) > 0
+            ):
+                payload["amount_cents"] = old_medians[ref[:2]]
+            item.payload = payload
     await session.commit()
     return changed

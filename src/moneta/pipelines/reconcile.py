@@ -17,10 +17,12 @@ from moneta.models import (
     SeriesStatus,
     Transaction,
     TransferLink,
+    bill_ref,
+    same_bill,
 )
 from moneta.pipelines.account_overlap import propose_account_links
 from moneta.pipelines.transaction_overlap import (
-    human_recurring_keys,
+    human_recurring_refs,
     reconcile_transactions,
     reviewed_merchant_occurrences,
 )
@@ -120,7 +122,7 @@ async def _retire_questions(
     choices, _ = effective_transfer_choices(
         list(await session.scalars(select(ReviewItem))), logical.transaction_roots
     )
-    recurring_choices = human_recurring_keys(list(await session.scalars(select(ReviewItem))))
+    recurring_choices = human_recurring_refs(list(await session.scalars(select(ReviewItem))))
     for item in items:
         if item.kind == ReviewKind.merchant:
             descriptor = item.payload.get("descriptor")
@@ -137,10 +139,16 @@ async def _retire_questions(
             elif descriptor in raw_descriptors and descriptor not in live_descriptors:
                 _supersede(item, "Descriptor is supported only by suppressed observations", today)
         elif item.kind == ReviewKind.recurring_cluster:
-            series_key = (item.payload.get("merchant"), item.payload.get("direction"))
-            if series_key in recurring_choices:
+            ref = bill_ref(item.payload)
+            cluster = (item.payload.get("merchant"), item.payload.get("direction"))
+            # a legacy merchant-level answer must not retire a per-bill question a human
+            # re-opened; only an amount-specific answer retires an amount-specific one
+            if ref is not None and any(
+                same_bill(ref, c) and (ref[2] is None or c[2] is not None)
+                for c in recurring_choices
+            ):
                 _supersede(item, "Recurring cluster already has a human decision", today)
-            elif series_key in raw_keys and series_key not in live_keys:
+            elif cluster in raw_keys and cluster not in live_keys:
                 _supersede(
                     item, "Recurring cluster is supported only by suppressed observations", today
                 )

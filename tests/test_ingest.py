@@ -224,7 +224,7 @@ async def test_description_correction_clears_merchant_keeps_series(session: Asyn
     assert txn.series_id == series.id  # untagging is detection's call, not ingest's
     await normalize_merchants(session, llm=None)
     await session.refresh(txn)
-    assert txn.merchant == "Spotify Usa"
+    assert txn.merchant == "Spotify"
 
 
 async def test_ingest_skips_txn_and_holding_with_unknown_account_id(session: AsyncSession) -> None:

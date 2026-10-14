@@ -16,6 +16,7 @@ from moneta.logical import _resolve_roots, resolve_account_roots
 from moneta.models import (
     Account,
     AliasSource,
+    BillRef,
     LinkMethod,
     MerchantAlias,
     ReviewItem,
@@ -23,6 +24,9 @@ from moneta.models import (
     ReviewStatus,
     Transaction,
     TransferLink,
+    bill_ref,
+    decision_precedence,
+    same_bill,
 )
 from moneta.pipelines.normalize import rule_normalize
 
@@ -232,6 +236,7 @@ def _decisions(
     transfer_choices = reviewed_transfer_choices(items)
 
     for txn in txns:
+        best = (False, -1)
         if txn.description in manual:
             decisions[txn.id]["merchant"] = manual[txn.description]
         direction = "outflow" if txn.amount_cents < 0 else "inflow"
@@ -240,12 +245,15 @@ def _decisions(
                 continue
             if item.resolution.get("resolved_by") == "reconciliation":
                 continue
+            ref = bill_ref(item.payload) if item.kind == ReviewKind.recurring_cluster else None
             if (
-                item.kind == ReviewKind.recurring_cluster
-                and item.payload.get("merchant") == txn.merchant
-                and item.payload.get("direction") == direction
+                ref is not None
+                and txn.merchant is not None
+                and same_bill(ref, (txn.merchant, direction, abs(txn.amount_cents)))
                 and isinstance(item.resolution.get("is_recurring"), bool)
+                and (precedence := decision_precedence(ref, item.id)) > best
             ):
+                best = precedence
                 decisions[txn.id]["recurring"] = (
                     item.resolution["is_recurring"],
                     bool(item.resolution.get("discretionary")),
@@ -288,33 +296,39 @@ def _conflicts(
     return False
 
 
-def human_recurring_keys(items: list[ReviewItem]) -> set[tuple[str, str]]:
-    return {
-        (item.payload["merchant"], item.payload["direction"])
+def human_recurring_refs(items: list[ReviewItem]) -> list[BillRef]:
+    return [
+        ref
         for item in items
         if item.kind == ReviewKind.recurring_cluster
         and item.status == ReviewStatus.resolved
         and item.resolution
         and isinstance(item.resolution.get("is_recurring"), bool)
         and item.resolution.get("resolved_by") not in ("llm", "reconciliation")
-        and isinstance(item.payload.get("merchant"), str)
-        and isinstance(item.payload.get("direction"), str)
-    }
+        and (ref := bill_ref(item.payload)) is not None
+    ]
 
 
 async def reviewed_merchant_occurrences(session: AsyncSession, roots: dict[int, int]) -> set[int]:
     """Occurrences with a human merchant or merchant-bound recurrence choice."""
     aliases = list(await session.scalars(select(MerchantAlias)))
     manual = {a.raw_descriptor for a in aliases if a.source == AliasSource.manual}
-    recurring = human_recurring_keys(list(await session.scalars(select(ReviewItem))))
+    # bucketed by (merchant, direction): a txn is tested only against its own bucket
+    recurring: dict[tuple[str, str], list[BillRef]] = {}
+    for ref in human_recurring_refs(list(await session.scalars(select(ReviewItem)))):
+        recurring.setdefault((ref[0], ref[1]), []).append(ref)
+
+    def decided(t: Transaction) -> bool:
+        if t.merchant is None:
+            return False
+        direction = "outflow" if t.amount_cents < 0 else "inflow"
+        ref: BillRef = (t.merchant, direction, abs(t.amount_cents))
+        return any(same_bill(r, ref) for r in recurring.get((t.merchant, direction), ()))
+
     return {
         roots[t.id]
         for t in await session.scalars(select(Transaction))
-        if t.id in roots
-        and (
-            t.description in manual
-            or (t.merchant, "outflow" if t.amount_cents < 0 else "inflow") in recurring
-        )
+        if t.id in roots and (t.description in manual or decided(t))
     }
 
 

@@ -1,11 +1,27 @@
+from datetime import date
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.models import MerchantAlias, ReviewItem, Transaction
-from moneta.pipelines.normalize import looks_clean, normalize_merchants, rule_normalize
-from tests.factories import make_account, make_txn
+from moneta.models import (
+    AliasSource,
+    MerchantAlias,
+    ReviewItem,
+    ReviewKind,
+    ReviewStatus,
+    SeriesStatus,
+    Transaction,
+)
+from moneta.pipelines.normalize import (
+    looks_clean,
+    merge_targets,
+    normalize_merchants,
+    renormalize_merchants,
+    rule_normalize,
+)
+from moneta.pipelines.recurring import detect_recurring
+from tests.factories import make_account, make_series, make_txn
 
 
 class FakeLLM:
@@ -128,12 +144,11 @@ def test_rule_normalize_strips_reference_tokens() -> None:
     ]
     names = {rule_normalize(v) for v in variants}
     assert len(names) == 1
-    assert names.pop() == "Bilt Payment Biltrent Web Id"
+    assert names.pop() == "Bilt Payment Biltrent"
 
 
 async def test_renormalize_merges_fragmented_merchants(session: AsyncSession) -> None:
-    from moneta.models import AliasSource, RecurringSeries
-    from moneta.pipelines.normalize import renormalize_merchants
+    from moneta.models import RecurringSeries
 
     acct = await make_account(session)
     raws = [
@@ -166,7 +181,386 @@ async def test_renormalize_merges_fragmented_merchants(session: AsyncSession) ->
     assert changed == 3
     txns = (await session.execute(select(Transaction))).scalars().all()
     bilt_names = {t.merchant for t in txns if t.description.startswith("BILT")}
-    assert bilt_names == {"Bilt Payment Biltrent Web Id"}
+    assert bilt_names == {"Bilt Payment Biltrent"}
     manual = next(t for t in txns if t.description == "SOME RAW 12345678x")
     assert manual.merchant == "My Custom Name"
     assert (await session.execute(select(RecurringSeries))).scalars().all() == []
+
+
+def test_rule_normalize_strips_wallets_legal_ach_address_and_state() -> None:
+    assert rule_normalize("APLPAY TST* ACME GRILL 0ELMTON TX") == "Acme Grill 0Elmton"
+    assert rule_normalize("ACME FITNESS LLC RIVERTON TX") == "Acme Fitness Riverton"
+    assert rule_normalize("ACME FITNESS LLC 500 EAST MAIN ROAD RIVERTON TX USA") == "Acme Fitness"
+    assert rule_normalize("STREAMCO *SUBSCRIPTION 3RD STREET SAN CA USA") == (
+        "Streamco Subscription"
+    )
+    assert rule_normalize("DD *STREAMCOPASS SAN FRANCISCO CA") == "Streamcopass San Francisco"
+    assert rule_normalize("GOOGLE PAY ACME CO") == "Acme"
+    assert rule_normalize("ACME PAYROLL PPD ID: 1234567890") == "Acme Payroll"
+    assert rule_normalize("TX") == "Tx"  # a lone token is never stripped to nothing
+
+
+def test_rule_normalize_requires_word_boundaries_on_bare_wallets() -> None:
+    # bare-word wallets need word boundaries to avoid matching partial words
+    assert rule_normalize("APPLE PAYROLL SVC") == "Apple Payroll Svc"
+    assert rule_normalize("GOOGLE PAYMENT 1234") == "Google Payment"
+    # optional space before * in symbol prefixes
+    assert rule_normalize("SQ*ACME GRILL") == "Acme Grill"
+
+
+_PLACES = ["Kroger", "Kroger Elmton", "Target", "Target Elmton", "Lidl", "Lidl Elmton"]
+
+
+def test_multi_token_name_absorbs_longer_names() -> None:
+    assert merge_targets(
+        ["Acme Fitness", "Acme Fitness Riverton", "Acme Fitness Of Texlakeside"]
+    ) == {
+        "Acme Fitness Riverton": "Acme Fitness",
+        "Acme Fitness Of Texlakeside": "Acme Fitness",
+    }
+
+
+def test_single_token_name_absorbs_only_a_place() -> None:
+    names = [*_PLACES, "Streamco", "Streamco Elmton", "Streamco Plus", "Streamco Energy Ven"]
+    targets = merge_targets(names)
+    assert targets["Streamco Elmton"] == "Streamco"
+    assert "Streamco Plus" not in targets  # brand + product stays its own merchant
+    assert "Streamco Energy Ven" not in targets
+    assert merge_targets([*_PLACES, "Shyco", "Shyco 0Elmton"])["Shyco 0Elmton"] == "Shyco"
+
+
+def test_merge_needs_four_letters_and_resolves_chains() -> None:
+    assert "Abc Fitness" not in merge_targets(["Abc", "Abc Fitness"])
+    chained = merge_targets([*_PLACES, "Shyco", "Shyco Elmton", "Shyco Elmton Hifi"])
+    assert chained["Shyco Elmton Hifi"] == "Shyco"
+
+
+async def test_renormalize_merges_names_and_renames_series_and_decisions(
+    session: AsyncSession,
+) -> None:
+    acct = await make_account(session)
+    for raw in ("ACME FITNESS LLC RIVERTON TX", "APLPAY ACME FITNESS"):
+        await make_txn(session, acct, description=raw)
+    await make_txn(session, acct, description="ACME FITNESS ELMTON")
+    session.add(
+        MerchantAlias(
+            raw_descriptor="ACME FITNESS ELMTON", merchant="My Gym", source=AliasSource.manual
+        )
+    )
+    await session.flush()
+    await normalize_merchants(session, llm=None)  # "Acme Fitness Riverton", "Acme Fitness"
+    series = await make_series(session, merchant="Acme Fitness Riverton")
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.recurring_cluster,
+            question="Is 'Acme Fitness Riverton' a recurring bill?",
+            payload={"merchant": "Acme Fitness Riverton", "direction": "outflow"},
+        )
+    )
+    await session.commit()
+
+    changed = await renormalize_merchants(session)
+
+    assert changed == 1
+    txns = (await session.execute(select(Transaction))).scalars().all()
+    by_raw = {t.description: t.merchant for t in txns}
+    assert by_raw["ACME FITNESS LLC RIVERTON TX"] == "Acme Fitness"
+    assert by_raw["ACME FITNESS ELMTON"] == "My Gym"  # manual aliases are never rewritten
+    await session.refresh(series)
+    assert series.merchant == "Acme Fitness"
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.payload["merchant"] == "Acme Fitness"
+
+
+async def test_renormalize_is_idempotent(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    for raw in ("ACME FITNESS LLC RIVERTON TX", "ACME FITNESS"):
+        await make_txn(session, acct, description=raw)
+    await normalize_merchants(session, llm=None)
+    assert await renormalize_merchants(session) == 1
+    assert await renormalize_merchants(session) == 0
+
+
+def test_prefix_shared_by_many_payees_absorbs_nothing() -> None:
+    payees = [
+        "Zelle Payment",
+        "Zelle Payment To Alice",
+        "Zelle Payment To Bob",
+        "Zelle Payment To Carol",
+    ]
+    assert merge_targets(payees) == {}
+    # a place variant of the shared prefix still merges
+    assert merge_targets([*_PLACES, *payees, "Zelle Payment Elmton"]) == {
+        "Kroger Elmton": "Kroger",
+        "Target Elmton": "Target",
+        "Lidl Elmton": "Lidl",
+        "Zelle Payment Elmton": "Zelle Payment",
+    }
+
+
+async def test_unclean_llm_name_neither_merges_nor_teaches_a_place(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    for raw in ("ALPHA", "ALPHA ELMTON", "BRAVO", "BRAVO ELMTON", "CHARLIE"):
+        await make_txn(session, acct, description=raw)
+    await normalize_merchants(session, llm=None)
+    await make_txn(session, acct, description="X4529182 84756")  # rule output is unclean
+    await normalize_merchants(session, llm=FakeLLM({"X4529182": "Charlie Elmton"}))
+    bravo = await make_series(session, merchant="Bravo")
+    item = ReviewItem(
+        kind=ReviewKind.recurring_cluster,
+        question="?",
+        payload={"merchant": "Bravo", "direction": "outflow"},
+    )
+    session.add(item)
+    await session.commit()
+
+    await renormalize_merchants(session)
+    assert await renormalize_merchants(session) == 0  # nothing flips back
+
+    await session.refresh(bravo)
+    await session.refresh(item)
+    assert bravo.merchant == "Bravo"
+    assert item.payload == {"merchant": "Bravo", "direction": "outflow"}
+    llm_alias = (
+        await session.execute(
+            select(MerchantAlias).where(MerchantAlias.raw_descriptor == "X4529182 84756")
+        )
+    ).scalar_one()
+    assert llm_alias.merchant == "Charlie Elmton" and llm_alias.source == "llm"
+
+
+async def test_name_a_manual_alias_still_carries_is_not_renamed(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    for raw in ("ACME FITNESS LLC RIVERTON TX", "ACME FITNESS", "ACME FIT RIVERTON"):
+        await make_txn(session, acct, description=raw)
+    session.add(
+        MerchantAlias(
+            raw_descriptor="ACME FIT RIVERTON",
+            merchant="Acme Fitness Riverton",
+            source=AliasSource.manual,
+        )
+    )
+    await session.flush()
+    await normalize_merchants(session, llm=None)
+    series = await make_series(session, merchant="Acme Fitness Riverton")
+    item = ReviewItem(
+        kind=ReviewKind.recurring_cluster,
+        question="?",
+        payload={"merchant": "Acme Fitness Riverton", "direction": "outflow"},
+    )
+    session.add(item)
+    await session.commit()
+
+    assert await renormalize_merchants(session) == 1  # the rule alias leaves the name
+
+    await session.refresh(series)
+    await session.refresh(item)
+    assert series.merchant == "Acme Fitness Riverton"
+    assert item.payload["merchant"] == "Acme Fitness Riverton"
+
+
+async def test_llm_alias_with_clean_rule_output_becomes_a_rule_alias(
+    session: AsyncSession,
+) -> None:
+    acct = await make_account(session)
+    await make_txn(session, acct, description="ACME FITNESS")
+    await make_txn(session, acct, description="ACME FITNESS LLC RIVERTON TX", merchant="Acme Gym")
+    session.add(
+        MerchantAlias(
+            raw_descriptor="ACME FITNESS LLC RIVERTON TX",
+            merchant="Acme Gym",
+            source=AliasSource.llm,
+        )
+    )
+    await session.flush()
+    await normalize_merchants(session, llm=None)
+
+    await renormalize_merchants(session)
+
+    alias = (
+        await session.execute(
+            select(MerchantAlias).where(
+                MerchantAlias.raw_descriptor == "ACME FITNESS LLC RIVERTON TX"
+            )
+        )
+    ).scalar_one()
+    assert alias.merchant == "Acme Fitness" and alias.source == "rule"
+
+
+async def test_merged_away_decision_keeps_to_its_own_bill(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    for month in range(1, 7):
+        await make_txn(
+            session,
+            acct,
+            description="ACME FITNESS",
+            amount_cents=-4999,
+            posted_on=date(2026, month, 3),
+        )
+    for posted_on, cents in (
+        (date(2026, 2, 9), -2350),
+        (date(2026, 3, 20), -1720),
+        (date(2026, 5, 2), -3100),
+    ):
+        await make_txn(
+            session,
+            acct,
+            description="ACME FITNESS LLC RIVERTON TX",
+            amount_cents=cents,
+            posted_on=posted_on,
+        )
+    await normalize_merchants(session, llm=None)  # "Acme Fitness", "Acme Fitness Riverton"
+    series = await make_series(session, merchant="Acme Fitness", expected_cents=-4999)
+    shop = ReviewItem(
+        kind=ReviewKind.recurring_cluster,
+        question="?",
+        payload={"merchant": "Acme Fitness Riverton", "direction": "outflow"},
+        status=ReviewStatus.resolved,
+        resolution={"is_recurring": False, "resolved_by": "manual"},
+    )
+    session.add(shop)
+    await session.commit()
+
+    await renormalize_merchants(session)
+
+    await session.refresh(shop)
+    # the "not a bill" answer now names the shop charges' median, not every bill
+    assert shop.payload == {
+        "merchant": "Acme Fitness",
+        "direction": "outflow",
+        "amount_cents": 2350,
+    }
+
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+
+    await session.refresh(series)
+    assert series.status == SeriesStatus.active
+    membership = (
+        await session.execute(select(Transaction).where(Transaction.amount_cents == -4999))
+    ).scalars()
+    assert {t.series_id for t in membership} == {series.id}
+
+
+async def test_llm_group_whose_rule_outputs_diverge_keeps_its_name(
+    session: AsyncSession,
+) -> None:
+    acct = await make_account(session)
+    raws = (
+        "ACME PARKINGMONT RIVERTON TX",
+        "Acme Parking Monthly",
+        "ACME PARKING MONTH 1300 ELM STREET RIVERTON 75000 TX USA",
+    )
+    outputs = {rule_normalize(raw) for raw in raws}
+    assert len(outputs) == 3 and all(looks_clean(o) for o in outputs)
+    assert merge_targets(outputs) == {}  # the rules cannot reunite them
+    for raw in raws:
+        await make_txn(session, acct, description=raw, merchant="Acme Parking")
+        session.add(
+            MerchantAlias(raw_descriptor=raw, merchant="Acme Parking", source=AliasSource.llm)
+        )
+    await session.flush()
+    series = await make_series(session, merchant="Acme Parking")
+    item = ReviewItem(
+        kind=ReviewKind.recurring_cluster,
+        question="?",
+        payload={"merchant": "Acme Parking", "direction": "outflow"},
+        status=ReviewStatus.resolved,
+        resolution={"is_recurring": True, "resolved_by": "manual"},
+    )
+    session.add(item)
+    await session.commit()
+
+    assert await renormalize_merchants(session) == 0
+    assert await renormalize_merchants(session) == 0
+
+    await session.refresh(series)
+    await session.refresh(item)
+    assert series.merchant == "Acme Parking"
+    assert item.payload == {"merchant": "Acme Parking", "direction": "outflow"}
+    aliases = (await session.execute(select(MerchantAlias))).scalars().all()
+    assert {(a.merchant, a.source) for a in aliases} == {("Acme Parking", "llm")}
+    txns = (await session.execute(select(Transaction))).scalars().all()
+    assert {t.merchant for t in txns} == {"Acme Parking"}
+
+
+async def test_llm_group_whose_rule_outputs_land_on_one_name_flips_to_rules(
+    session: AsyncSession,
+) -> None:
+    acct = await make_account(session)
+    raws = ("ACME FITNESS", "ACME FITNESS RIVERTON")
+    assert merge_targets({rule_normalize(raw) for raw in raws}) == {
+        "Acme Fitness Riverton": "Acme Fitness"
+    }
+    for raw in raws:
+        await make_txn(session, acct, description=raw, merchant="Acme Gym")
+        session.add(MerchantAlias(raw_descriptor=raw, merchant="Acme Gym", source=AliasSource.llm))
+    await session.commit()
+
+    assert await renormalize_merchants(session) == 2
+    assert await renormalize_merchants(session) == 0
+
+    aliases = (await session.execute(select(MerchantAlias))).scalars().all()
+    assert {(a.merchant, a.source) for a in aliases} == {("Acme Fitness", "rule")}
+
+
+async def test_pure_rename_keeps_decisions_merchant_level(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    raw = "ACME PAYROLL PPD ID: 123456"
+    assert rule_normalize(raw) == "Acme Payroll"
+    for month, cents in enumerate((250000, 310000, 180000), start=1):
+        await make_txn(
+            session,
+            acct,
+            description=raw,
+            merchant="Acme Payroll Ppd Id",
+            amount_cents=cents,
+            posted_on=date(2026, month, 5),
+        )
+    session.add(
+        MerchantAlias(raw_descriptor=raw, merchant="Acme Payroll Ppd Id", source=AliasSource.rule)
+    )
+    item = ReviewItem(
+        kind=ReviewKind.recurring_cluster,
+        question="?",
+        payload={"merchant": "Acme Payroll Ppd Id", "direction": "inflow"},
+        status=ReviewStatus.resolved,
+        resolution={"is_recurring": True, "resolved_by": "manual"},
+    )
+    session.add(item)
+    await session.commit()
+
+    assert await renormalize_merchants(session) == 1
+
+    await session.refresh(item)
+    assert item.payload == {"merchant": "Acme Payroll", "direction": "inflow"}
+
+
+async def test_kept_llm_group_is_not_a_phantom_merge_target(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    group = ("Acme Parking Monthly", "ACME PARKINGMONT RIVERTON TX")
+    plus = "ACME PARKING MONTHLY RIVERTON PLUS"
+    assert rule_normalize(plus) == "Acme Parking Monthly Riverton Plus"
+    for raw in group:
+        await make_txn(session, acct, description=raw, merchant="Acme Garage")
+        session.add(
+            MerchantAlias(raw_descriptor=raw, merchant="Acme Garage", source=AliasSource.llm)
+        )
+    await make_txn(session, acct, description=plus, merchant="Acme Parking Monthly Riverton Plus")
+    session.add(
+        MerchantAlias(
+            raw_descriptor=plus,
+            merchant="Acme Parking Monthly Riverton Plus",
+            source=AliasSource.rule,
+        )
+    )
+    await session.commit()
+
+    assert await renormalize_merchants(session) == 0  # the group keeps "Acme Garage"
+    assert await renormalize_merchants(session) == 0
+
+    aliases = (await session.execute(select(MerchantAlias))).scalars().all()
+    assert {a.raw_descriptor: a.merchant for a in aliases} == {
+        group[0]: "Acme Garage",
+        group[1]: "Acme Garage",
+        plus: "Acme Parking Monthly Riverton Plus",
+    }

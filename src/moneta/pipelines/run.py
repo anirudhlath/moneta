@@ -11,7 +11,7 @@ from moneta.models import Account, SyncRun, Transaction
 from moneta.pipelines.events import emit_series_events
 from moneta.pipelines.financing import detect_financing
 from moneta.pipelines.ingest import IngestStats, ingest_snapshot
-from moneta.pipelines.normalize import normalize_merchants
+from moneta.pipelines.normalize import normalize_merchants, renormalize_merchants
 from moneta.pipelines.reconcile import OverlapStats, reconcile_provider_overlap
 from moneta.pipelines.recurring import RecurringStats, detect_recurring
 from moneta.pipelines.review import VerifyStats, autoreview_items, verify_series
@@ -62,6 +62,7 @@ class SyncReport(BaseModel):
     overlap: OverlapStats = Field(default_factory=OverlapStats)
     ingest: IngestStats
     normalized: int
+    merchants_renamed: int = 0
     transfers: TransferStats
     financing_questions: int
     auto_resolved: int
@@ -115,6 +116,9 @@ async def run_sync(
         snap = await _fetch_all(session, adapters, full)
         ingest = await ingest_snapshot(session, snap)
         normalized = await normalize_merchants(session, llm)
+        # every sync: improved rules and name merges reach existing aliases, series
+        # and decisions, so one bill's descriptors form one merchant (design 2026-10-13 §1)
+        merchants_renamed = await renormalize_merchants(session)
         overlap = await reconcile_provider_overlap(session, today)
         transfers = await link_transfers(session, llm)
         financing_questions = await detect_financing(session)
@@ -136,6 +140,7 @@ async def run_sync(
         overlap=overlap,
         ingest=ingest,
         normalized=normalized,
+        merchants_renamed=merchants_renamed,
         transfers=transfers,
         financing_questions=financing_questions,
         auto_resolved=auto_resolved,

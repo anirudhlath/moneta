@@ -169,7 +169,7 @@ moneta sync --full     # re-pull all history — use after linking a new source
 moneta status          # is data fresh? did the last sync work? what changed
 ```
 
-A sync runs the full pipeline: ingest → merchant normalization → provider-overlap reconciliation → transfer dedup →
+A sync runs the full pipeline: ingest → merchant normalization and merging → provider-overlap reconciliation → transfer dedup →
 financing-account detection → LLM auto-review → recurring detection → LLM verification →
 series events. The summary line tells you what changed (new transactions, transfers linked,
 new series, events); if items need your attention (including a financing check) it points
@@ -418,6 +418,19 @@ Series end automatically when charges stop, and revive if a genuinely new charge
 the old cadence. A price increase is only applied after two agreeing charges (or an LLM/your
 confirmation) — a single weird charge never rewrites what a bill is "supposed to" cost.
 
+One bill is one series, however the bank words it. Every sync strips wallet prefixes
+(`AplPay`, `SQ*`), legal suffixes (`LLC`), street addresses and city/state tails from
+descriptors, then merges a longer name into a shorter one it starts with (`Acme Fitness`
+and `Acme Fitness Riverton` become `Acme Fitness`). A single-word brand absorbs only a
+trailing place, so `Streamco` and `Streamco Plus` stay apart. A prefix shared by many
+unrelated names, such as a payment rail (`Zelle Payment To …`), absorbs nothing. A
+merchant can also have several series: if a subscription has irregular purchases alongside
+it, or two subscriptions at the same price bill on different days, each schedule is its own
+series and the other charges are ordinary spending. A merchant whose amounts just vary
+month to month stays one series, and a small fee alongside it does not split it. When a
+rename or merge leaves two series for one bill, the sync folds them into one, keeping their
+events. A price jump of more than 20% starts a new series and the old one goes stale.
+
 `--end`, `--not-a-bill`, `--habit`, `--re-review`, and `--reactivate` are mutually exclusive
 with each other — pass exactly one. `--end`/`--not-a-bill`/`--habit`/`--re-review` each write
 through the same `recurring_cluster` review-item ledger a bill/habit/not-recurring answer
@@ -428,6 +441,11 @@ future sync; `--habit` flips it to discretionary spending and reactivates it if 
 can supersede the old one). `--re-review` only reopens the question — it never changes the
 series itself, so an ended series stays ended until you answer `h` (habit, reactivates) or
 bring it back directly.
+
+When a merchant has several series, these overrides and the review answer apply to the one
+bill you pick (the table's ID), not to the whole merchant; its other bills keep their own
+verdicts. An answer given before the merchant had several bills still covers all of them
+until you answer a specific bill, and a specific answer beats the merchant-wide one.
 
 `--reactivate ID` is that direct path: it flips an ended series (auto-ended from inactivity,
 or ended via `--end`) straight back to active and bumps `next_expected_on` forward to today,
@@ -552,7 +570,7 @@ You'll see an upfront summary, then one question at a time:
 | Shared account identity | Pick a numbered candidate after checking provider, mask, currency, type, and any metadata conflicts; `0` chooses none; Enter skips |
 | Overlapping provider transaction | Compare numbered observations' signed amount, posting date, description, account, and provider; pick a duplicate counterpart, `0` chooses none; Enter skips |
 | Transfer match ("which inflow matches…") | Type the number of the right candidate, or Enter to skip |
-| Bill, habit, or not recurring ("Is X a recurring bill?") | `b` bill (fixed cost) / `h` habit (discretionary, still tracked) / `n` not recurring |
+| Bill, habit, or not recurring ("Is X a recurring bill?"; with several bills, "Is 'X' ($12.34) a recurring bill?") | `b` bill (fixed cost) / `h` habit (discretionary, still tracked) / `n` not recurring |
 | Financing check ("X looks like promo financing being paid down…") | `y` treat its payments as fixed costs / `n` leave it as a plain credit card |
 | Price change ("Did X change price from $A to $B?") | `y` (applies the new amount) / `n` |
 | Merchant name | Type the real merchant name, or Enter to skip |
@@ -716,7 +734,8 @@ Files in the config dir (all owner-only, dir is 0700):
 | A shared bank appears twice | Inspect `moneta accounts --sources` and account overlap questions in `moneta review`; confirm identity only with corroborating evidence, then link or reconcile. |
 | A provider match is wrong | Reverse an account link with `moneta accounts --unlink-source <ID>` to restore its observations. For an uncertain match with an open transaction overlap question, choose none in that review. Automatic matches do not necessarily have open questions; there is no separate public transaction-unlink endpoint. |
 | Reconciliation did not make data fresh | It only rebuilds stored data; run `moneta sync` and inspect source warnings for new observations. |
-| Merchant names look wrong | Answer the merchant questions in `moneta review`; after rule improvements, `moneta renormalize` re-applies naming to all history. |
+| Merchant names look wrong | Answer the merchant questions in `moneta review`; naming rules and merchant merging already run on every sync, and `moneta renormalize` applies them on demand without a sync. |
+| One bill shows up as two series, or two bills as one | Merging is by name: a truncated name that is not a prefix of the full one (`Acme Fitnriverton`) stays split, as do descriptors with short per-charge codes. Duplicates that a merge does produce are folded automatically on the next sync. `moneta recurring --end <ID>` only ends a series, and a series that is still charging revives. |
 | A subscription shows as active but is cancelled | `moneta recurring --end <ID>`. |
 | A series was wrongly confirmed as a recurring bill | `moneta recurring --not-a-bill <ID>` — ends it and suppresses it from every future sync. |
 | A recurring series is really discretionary spending | `moneta recurring --habit <ID>` — reactivates it if ended, tags it discretionary (not a fixed cost). |
