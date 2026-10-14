@@ -355,6 +355,21 @@ async def test_fetch_transactions_paginates_negates_and_skips_pending() -> None:
     assert snap.transactions[0].raw["merchant_name"] == "Clean Name"
     assert [b["cursor"] for b in bodies] == ["", "cur-next"]
     assert all(b["count"] == 500 for b in bodies)
+    assert all(b["options"] == {"include_original_description": True} for b in bodies)
+
+
+async def test_description_is_the_bank_descriptor_when_plaid_supplies_it() -> None:
+    # SimpleFIN reports the bank's descriptor; Plaid's `name` is a cleaned label. Storing
+    # the same text from both keeps overlap matching and merchant keys provider-neutral.
+    original = {**_txn("t1", 2087.9), "original_description": "WAL-MART ASSOCS. PAYROLL PPD"}
+    pages = [httpx.Response(200, json=_sync_page([original, _txn("t2", 5.0)], False))]
+    adapter = PlaidAdapter(_plaid_client(_accounts_then_sync(pages)), [_item(["transactions"])])
+    snap = await adapter.fetch()
+    assert [t.description for t in snap.transactions] == [
+        "WAL-MART ASSOCS. PAYROLL PPD",
+        "RAW DESCRIPTOR t2",
+    ]
+    assert snap.transactions[0].raw["name"] == "RAW DESCRIPTOR t1"
 
 
 def _mutation_error() -> httpx.Response:

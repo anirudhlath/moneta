@@ -299,7 +299,12 @@ class PlaidAdapter:
         while True:
             data = await self._client.post(
                 "/transactions/sync",
-                {"access_token": item.access_token, "cursor": cursor, "count": _SYNC_PAGE_SIZE},
+                {
+                    "access_token": item.access_token,
+                    "cursor": cursor,
+                    "count": _SYNC_PAGE_SIZE,
+                    "options": {"include_original_description": True},
+                },
             )
             for txn in data.get("added", []):
                 if txn.get("pending"):
@@ -311,7 +316,9 @@ class PlaidAdapter:
                         posted_on=date.fromisoformat(txn["date"]),
                         # Plaid: positive = money out; moneta: negative = outflow
                         amount=-_to_decimal(txn["amount"]),
-                        description=txn.get("name") or "",
+                        # the bank's descriptor, as other providers report it, so one
+                        # event yields one merchant; Plaid's cleaned `name` stays in raw
+                        description=txn.get("original_description") or txn.get("name") or "",
                         raw=txn,
                     )
                 )
