@@ -92,6 +92,10 @@ async def test_run_sync_autoreview_resolves_before_detection(session: AsyncSessi
 
     from moneta.models import ReviewItem, ReviewStatus
 
+    acct = await make_account(session)
+    await make_txn(
+        session, acct, description="Q9X8Z7Y6", merchant="Q9X8Z7Y6", posted_on=date(2026, 7, 1)
+    )
     session.add(
         ReviewItem(
             kind="merchant",

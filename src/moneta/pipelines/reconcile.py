@@ -21,6 +21,7 @@ from moneta.models import (
     same_bill,
 )
 from moneta.pipelines.account_overlap import propose_account_links
+from moneta.pipelines.normalize import looks_clean
 from moneta.pipelines.transaction_overlap import (
     human_recurring_refs,
     reconcile_transactions,
@@ -138,6 +139,16 @@ async def _retire_questions(
                 )
             elif descriptor in raw_descriptors and descriptor not in live_descriptors:
                 _supersede(item, "Descriptor is supported only by suppressed observations", today)
+            elif descriptor not in live_descriptors:
+                # an upstream correction rewrote the descriptor: an answer would name text
+                # no transaction carries
+                _supersede(item, "Descriptor no longer appears on any transaction", today)
+            elif all(
+                t.merchant and looks_clean(t.merchant)
+                for t in survivors.values()
+                if t.description == descriptor
+            ):
+                _supersede(item, "Descriptor's transactions already carry a clean name", today)
         elif item.kind == ReviewKind.recurring_cluster:
             ref = bill_ref(item.payload)
             cluster = (item.payload.get("merchant"), item.payload.get("direction"))

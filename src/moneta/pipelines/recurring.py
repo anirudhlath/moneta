@@ -168,14 +168,27 @@ class _Run:
     primary: str
 
 
-def _forced(resolved: list[tuple[BillRef, int, ForcedAnswer]], ref: BillRef) -> ForcedAnswer | None:
-    """The decision in force for a bill: amount-specific beats merchant-level, then the
-    newest (design 2026-10-13 §4)."""
-    covering = [
-        (decision_precedence(r, item_id), answer)
-        for r, item_id, answer in resolved
-        if same_bill(r, ref)
-    ]
+def _forced(
+    resolved: list[tuple[BillRef, int, ForcedAnswer]],
+    ref: BillRef,
+    span: tuple[int, int] | None = None,
+) -> ForcedAnswer | None:
+    """The decision in force for a bill: amount-specific beats merchant-level, then one
+    matching the bill's median beats one only inside its span, then the newest (design
+    2026-10-13 §4). `span`, the low and high of a lone bill's newest charges, lets a
+    decision follow a varying bill whose median drifted from the amount it was made at."""
+    covering = []
+    for r, item_id, answer in resolved:
+        direct = same_bill(r, ref)
+        spanned = (
+            span is not None
+            and r[:2] == ref[:2]
+            and r[2] is not None
+            and span[0] <= r[2] <= span[1]
+        )
+        if direct or spanned:
+            amount_specific, newest = decision_precedence(r, item_id)
+            covering.append(((amount_specific, direct, newest), answer))
     return max(covering, key=lambda c: c[0])[1] if covering else None
 
 
@@ -248,7 +261,9 @@ async def _detect_bill(
     typical = _typical_amount(newest)
     expected = -typical if direction == Direction.outflow else typical
     ref: BillRef = (merchant, str(direction), round(med))
-    forced = _forced(ctx.resolved, ref)
+    # a lone bill has no sibling a decision could mean instead, so any decision made at
+    # an amount it still charges covers it; split bills keep the 20% median match
+    forced = _forced(ctx.resolved, ref, None if split else (min(newest), max(newest)))
     if forced is not None and forced.is_recurring is False:
         return None  # user-resolved as not recurring — suppress silently, forever
     discretionary = forced.discretionary if forced is not None else False
