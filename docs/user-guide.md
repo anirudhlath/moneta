@@ -742,6 +742,7 @@ Files in the config dir (all owner-only, dir is 0700):
 | A series ended but the bill actually resumed | `moneta recurring --reactivate <ID>` — flips it straight back to active, no review-queue detour. |
 | An overrule was a mistake | `moneta recurring --re-review <ID>` reopens the question in `moneta review`. |
 | A price change looks wrong | It only applies after two agreeing charges or a confirmation; deny it in `moneta review` and the old expected amount stands. |
+| A bill whose amount varies shows an odd expected amount | A variable bill (newest 12 charges more than 20% apart) is expected at the charge that repeats most often among them, or their median when nothing repeats, recomputed every sync. One-off extras at the same merchant don't move it, and it never gets price-change events or questions. |
 | Numbers exclude an account | Foreign-currency accounts are excluded from aggregates by design and reported in `networth`. |
 | `power`/`networth` show a dim "data as of ..." line | The newest successful sync is more than 24h old (or there's never been one) — run `moneta sync`. See [Staleness footers](#staleness-footers). |
 | `Error: could not reach ...` on any command | Remote mode: the server at `MONETA_API_URL` is down or unreachable — check it's running and the URL/port are right. In-process mode: the aggregator itself (e.g. SimpleFIN) couldn't be reached — check your network. Either way this is a clean exit, not a traceback. |

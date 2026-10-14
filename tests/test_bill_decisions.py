@@ -168,3 +168,23 @@ async def test_specific_decision_beats_a_newer_merchant_level_one(
     assert specific.id < newer.id
     decisions = _decisions([txn], [], [specific, newer], [])
     assert decisions[txn.id]["recurring"] == (False, False)
+
+
+async def test_verify_knows_a_variable_bill_by_its_median(session: AsyncSession) -> None:
+    # a variable bill's expected amount is its typical charge, which can sit far from the
+    # median detection keyed the decision by: the decided bill must not be asked again
+    acct = await make_account(session)
+    s = await make_series(session, merchant="Streamco", expected_cents=-1000)
+    for month, cents in ((3, -1000), (4, -4000), (5, -2500), (6, -1000), (7, -3000)):
+        await make_txn(
+            session,
+            acct,
+            amount_cents=cents,
+            merchant="Streamco",
+            posted_on=date(2026, month, 10),
+            series_id=s.id,
+        )
+    session.add(_human(recurring_cluster_item("Streamco", "outflow", 2500), True))
+    await session.commit()
+    stats = await verify_series(session, _BillLLM())
+    assert stats.verified == 0 and stats.flagged == 0
