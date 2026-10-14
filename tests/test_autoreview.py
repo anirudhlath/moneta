@@ -80,6 +80,33 @@ async def test_confident_merchant_answer_resolves(session: AsyncSession) -> None
     assert item.resolution is not None and item.resolution["resolved_by"] == "llm"
 
 
+async def test_merchant_prompt_shows_the_descriptors_charges(session: AsyncSession) -> None:
+    # the amounts and dates tell the LLM what kind of payee it is naming
+    acct = await make_account(session)
+    for day, cents in ((3, -1234), (9, -4321)):
+        await make_txn(
+            session,
+            acct,
+            description="ACME ROOM 1234567890123-45 TX",
+            merchant="Acme Room -45",
+            amount_cents=cents,
+            posted_on=date(2026, 9, day),
+        )
+    session.add(
+        ReviewItem(
+            kind="merchant",
+            question="What merchant is 'ACME ROOM 1234567890123-45 TX'?",
+            payload={"descriptor": "ACME ROOM 1234567890123-45 TX", "fallback": "Acme Room -45"},
+        )
+    )
+    await session.flush()
+    llm = ScriptedLLM({"ACME ROOM": {"merchant": "Acme Room", "confident": True}})
+    assert await autoreview_items(session, llm) == 1
+    (prompt,) = llm.prompts
+    assert "'posted_on': '2026-09-09', 'amount': '43.21'" in prompt
+    assert "'posted_on': '2026-09-03', 'amount': '12.34'" in prompt
+
+
 async def test_unconfident_answer_stays_open(session: AsyncSession) -> None:
     session.add(
         ReviewItem(

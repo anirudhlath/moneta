@@ -188,3 +188,22 @@ async def test_verify_knows_a_variable_bill_by_its_median(session: AsyncSession)
     await session.commit()
     stats = await verify_series(session, _BillLLM())
     assert stats.verified == 0 and stats.flagged == 0
+
+
+async def test_verify_knows_a_lone_bill_by_any_amount_it_charges(session: AsyncSession) -> None:
+    # the decision was made when charges centred on $10; they now centre on $17
+    acct = await make_account(session)
+    s = await make_series(session, merchant="Streamco", expected_cents=-1700)
+    for month, cents in ((1, -1000), (2, -1700), (3, -1700), (4, -2500), (5, -400), (6, -1700)):
+        await make_txn(
+            session,
+            acct,
+            amount_cents=cents,
+            merchant="Streamco",
+            posted_on=date(2026, month, 10),
+            series_id=s.id,
+        )
+    session.add(_human(recurring_cluster_item("Streamco", "outflow", 1000), True))
+    await session.commit()
+    stats = await verify_series(session, _BillLLM())
+    assert stats.verified == 0 and stats.flagged == 0

@@ -720,3 +720,44 @@ async def test_manual_no_transfer_survives_alias_rule_link(
     again = await reconcile(session)
     assert again.transactions_suppressed == again.transactions_restored == 0
     assert list(await session.scalars(select(TransferLink))) == []
+
+
+async def test_merchant_question_without_its_descriptor_is_superseded(
+    session: AsyncSession,
+) -> None:
+    # an upstream correction rewrote the descriptor: no transaction carries the asked text
+    a, _ = await accounts(session)
+    await make_txn(session, a, description="ACME TOLL 12A34B 877-555-0100 TX", merchant="Acme")
+    item = ReviewItem(
+        kind=ReviewKind.merchant,
+        question="Merchant?",
+        payload={"descriptor": "ACME TOLL 12A34B", "fallback": "Acme Toll 12A34B"},
+    )
+    session.add(item)
+    stats = await reconcile(session)
+    assert stats.reviews_superseded == 1
+    assert item.status == ReviewStatus.resolved
+    assert item.resolution is not None
+    assert item.resolution["superseded_reason"] == "Descriptor no longer appears on any transaction"
+
+
+async def test_merchant_question_with_clean_names_is_superseded(session: AsyncSession) -> None:
+    # the rules learned to clean this descriptor after the question opened
+    a, _ = await accounts(session)
+    await make_txn(session, a, description="ACME ROOM 1234567890123-45", merchant="Acme Room")
+    clean = ReviewItem(
+        kind=ReviewKind.merchant,
+        question="Merchant?",
+        payload={"descriptor": "ACME ROOM 1234567890123-45", "fallback": "Acme Room -45"},
+    )
+    await make_txn(session, a, description="WITHDRAWAL 03/14", merchant="Withdrawal 03/14")
+    still_unclear = ReviewItem(
+        kind=ReviewKind.merchant,
+        question="Merchant?",
+        payload={"descriptor": "WITHDRAWAL 03/14", "fallback": "Withdrawal 03/14"},
+    )
+    session.add_all([clean, still_unclear])
+    stats = await reconcile(session)
+    assert stats.reviews_superseded == 1
+    assert clean.status == ReviewStatus.resolved
+    assert still_unclear.status == ReviewStatus.open

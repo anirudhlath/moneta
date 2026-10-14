@@ -6,6 +6,7 @@ resolution path a human answer takes, tagged resolved_by="llm" for audit.
 """
 
 import statistics
+from collections import Counter
 from datetime import date
 from typing import Any
 
@@ -36,7 +37,7 @@ from moneta.models import (
 )
 from moneta.pipelines.account_overlap import set_account_link
 from moneta.pipelines.events import apply_price_change
-from moneta.pipelines.recurring import newest_run
+from moneta.pipelines.recurring import amount_window, newest_run
 from moneta.pipelines.transaction_overlap import (
     human_recurring_refs,
     reviewed_merchant_occurrences,
@@ -51,10 +52,18 @@ from moneta.queries import (
 )
 
 _MERCHANT_PROMPT = """You are auto-resolving a personal-finance review question.
-Name the merchant behind this bank descriptor.
+Name the merchant or payee behind a bank descriptor, as a person would write it in a budget.
 Descriptor: {descriptor!r} (current guess: {suggested!r})
-Respond with JSON: {{"merchant": "<canonical name, title case>" | null, "confident": true/false}}
-Set confident=true ONLY if the merchant is clearly identifiable from the descriptor."""
+Transactions with this descriptor: {samples}
+Drop store and terminal numbers, reference codes, dates, phone numbers, city/state and
+payment prefixes (AplPay, TST*, SQ *). You do not need to recognise the business: a name
+you can read from the descriptor is enough.
+Respond with JSON: {{"merchant": "<name, title case>" | null, "confident": true/false}}
+Set confident=true when the descriptor contains a readable business or payee name.
+Use merchant=null when it contains none (only codes, numbers or a generic word)."""
+
+# a few charges tell the LLM what kind of payee it is naming, without the whole history
+_MERCHANT_SAMPLES = 5
 
 _TRANSFER_PROMPT = """You are auto-resolving a personal-finance review question.
 An outflow may be an internal transfer; pick its matching inflow.
@@ -245,9 +254,17 @@ async def review_context(session: AsyncSession, item: ReviewItem) -> dict[str, A
             "direction": item.payload.get("direction"),
         }
     if item.kind == ReviewKind.merchant:
+        descriptor = item.payload.get("descriptor")
+        logical = await load_logical_data(session)
+        txns = sorted(
+            (t for t in logical.transactions if t.description == descriptor),
+            key=lambda t: (t.posted_on, t.id),
+            reverse=True,
+        )[:_MERCHANT_SAMPLES]
         return {
-            "descriptor": item.payload.get("descriptor"),
+            "descriptor": descriptor,
             "suggested": item.payload.get("fallback"),
+            "samples": [_sample(t) for t in txns],
         }
     if item.kind == ReviewKind.price_change:
         logical = await load_logical_data(session)
@@ -538,7 +555,9 @@ async def autoreview_items(session: AsyncSession, llm: Classifier) -> int:
         context = await review_context(session, item)
         if item.kind == ReviewKind.merchant:
             prompt = _MERCHANT_PROMPT.format(
-                descriptor=context.get("descriptor"), suggested=context.get("suggested")
+                descriptor=context.get("descriptor"),
+                suggested=context.get("suggested"),
+                samples=[_prompt_txn(t) for t in context.get("samples", [])],
             )
         elif item.kind == ReviewKind.transfer_pair:
             if not context.get("candidates"):
@@ -619,6 +638,9 @@ async def verify_series(session: AsyncSession, llm: Classifier | None) -> Verify
     logical = await load_logical_data(session)
     primary = await primary_currency(session)
     foreign_series = foreign_series_ids(logical, primary)
+    bills_per_key = Counter(
+        (s.merchant, str(s.direction)) for s in await session.scalars(select(RecurringSeries))
+    )
     for series in series_list:
         if series.id in foreign_series:
             continue
@@ -636,8 +658,18 @@ async def verify_series(session: AsyncSession, llm: Classifier | None) -> Verify
             # expected amount (its typical charge) can sit far from it
             med = round(statistics.median([abs(t.amount_cents) for t in run]))
             refs.append((series.merchant, str(series.direction), med))
+        key = (series.merchant, str(series.direction))
         if any(same_bill(ref, r) for ref in refs for r in seen):
             continue
+        if run and bills_per_key[key] == 1:
+            # a lone bill is covered by a decision at any amount it still charges, as in
+            # detection's force map
+            newest = amount_window(run)
+            if any(
+                r[:2] == key and r[2] is not None and min(newest) <= r[2] <= max(newest)
+                for r in seen
+            ):
+                continue
         occurrences = await _recent_occurrences(session, series.id)
         amounts = [abs(t.amount_cents) for t in occurrences] or [abs(series.expected_cents)]
         answer = await llm.classify_json(

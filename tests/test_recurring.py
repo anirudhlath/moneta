@@ -1224,3 +1224,40 @@ async def test_split_supersedes_an_open_merchant_level_question(session: AsyncSe
     assert answered.resolution == {"is_recurring": True, "resolved_by": "manual"}
     assert per_bill.status == ReviewStatus.open  # only merchant-level questions retire
     assert [s.expected_cents for s in await _series(session)] == [-999]
+
+
+async def test_lone_bill_decision_follows_its_drifting_amount(session: AsyncSession) -> None:
+    # a habit answer made when the bar's charges centred on $10 still covers it once they
+    # centre on $17, and beats a newer merchant-level "bill" from the LLM
+    acct = await make_account(session)
+    for month, cents in ((1, -1000), (2, -1700), (3, -1700), (4, -2500), (5, -400), (6, -1700)):
+        await make_txn(
+            session, acct, amount_cents=cents, merchant="Acme Bar", posted_on=date(2026, month, 25)
+        )
+    habit = recurring_cluster_item("Acme Bar", "outflow", 1000)
+    habit.status = ReviewStatus.resolved
+    habit.resolution = {"is_recurring": True, "discretionary": True, "resolved_by": "manual"}
+    session.add(habit)
+    await session.flush()
+    bill = recurring_cluster_item("Acme Bar", "outflow")
+    bill.status = ReviewStatus.resolved
+    bill.resolution = {"is_recurring": True, "resolved_by": "llm"}
+    session.add(bill)
+    await session.commit()
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    (s,) = await _series(session)
+    assert s.discretionary is True
+
+
+async def test_lone_steady_bill_ignores_a_decision_outside_its_charges(
+    session: AsyncSession,
+) -> None:
+    # a decision about another bill the merchant once had says nothing about this one
+    await _seed_monthly(session, (4, 5, 6))
+    other = recurring_cluster_item("Netflix", "outflow", 2600)
+    other.status = ReviewStatus.resolved
+    other.resolution = {"is_recurring": False, "resolved_by": "manual"}
+    session.add(other)
+    await session.commit()
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert len(await _series(session)) == 1
