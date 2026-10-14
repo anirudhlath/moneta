@@ -36,6 +36,7 @@ from moneta.models import (
 )
 from moneta.pipelines.account_overlap import set_account_link
 from moneta.pipelines.events import apply_price_change
+from moneta.pipelines.recurring import newest_run
 from moneta.pipelines.transaction_overlap import (
     human_recurring_refs,
     reviewed_merchant_occurrences,
@@ -616,11 +617,26 @@ async def verify_series(session: AsyncSession, llm: Classifier | None) -> Verify
         .all()
     )
     logical = await load_logical_data(session)
-    foreign_series = foreign_series_ids(logical, await primary_currency(session))
+    primary = await primary_currency(session)
+    foreign_series = foreign_series_ids(logical, primary)
     for series in series_list:
         if series.id in foreign_series:
             continue
-        if any(same_bill(series_ref(series), r) for r in seen):
+        refs = [series_ref(series)]
+        _, run = newest_run(
+            [
+                t
+                for t in logical.transactions
+                if t.series_id == series.id
+                and logical.accounts[logical.account_roots[t.account_id]].currency == primary
+            ]
+        )
+        if run:
+            # detection matches decisions by the bill's median, and a variable bill's
+            # expected amount (its typical charge) can sit far from it
+            med = round(statistics.median([abs(t.amount_cents) for t in run]))
+            refs.append((series.merchant, str(series.direction), med))
+        if any(same_bill(ref, r) for ref in refs for r in seen):
             continue
         occurrences = await _recent_occurrences(session, series.id)
         amounts = [abs(t.amount_cents) for t in occurrences] or [abs(series.expected_cents)]

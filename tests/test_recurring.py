@@ -348,6 +348,82 @@ async def test_unstable_llm_bill_stays_fixed(session: AsyncSession) -> None:
     assert s.discretionary is False
 
 
+async def test_variable_bill_expects_its_repeating_amount(session: AsyncSession) -> None:
+    # a monthly fee with occasional larger charges at the same shop: the fee repeats,
+    # so it is the bill's amount; the median would land between fee and extras
+    acct = await make_account(session)
+    for month, cents in ((3, -3000), (4, -15000), (5, -30000), (6, -3000)):
+        await make_txn(
+            session, acct, amount_cents=cents, merchant="Acme Lab", posted_on=date(2026, month, 20)
+        )
+    llm = _UnstableLLM({"classification": "bill"})
+    await detect_recurring(session, llm=llm, today=date(2026, 7, 1))
+    s = (await _series(session))[0]
+    assert s.expected_cents == -3000
+
+
+async def test_existing_variable_bill_follows_its_typical_amount(session: AsyncSession) -> None:
+    # an existing series whose amounts vary keeps up with them every sync: its last
+    # one-off price must not stand in for the bill
+    acct = await make_account(session)
+    series = await make_series(session, merchant="Acme Device", expected_cents=-15000)
+    for month, cents in ((2, -11000), (3, -8000), (4, -11000), (5, -16000), (6, -15000)):
+        await make_txn(
+            session,
+            acct,
+            amount_cents=cents,
+            merchant="Acme Device",
+            posted_on=date(2026, month, 25),
+            series_id=series.id,
+        )
+    llm = _UnstableLLM({"classification": "bill"})
+    stats = await detect_recurring(session, llm=llm, today=date(2026, 7, 1))
+    assert stats.new_series == 0
+    s = (await _series(session))[0]
+    assert s.id == series.id and s.expected_cents == -11000
+
+
+async def test_variable_bill_judges_its_newest_charges_only(session: AsyncSession) -> None:
+    # a long biweekly run whose old pay repeats more often than today's: only the newest
+    # twelve deposits say what the paycheck is now
+    acct = await make_account(session)
+    series = await make_series(
+        session, merchant="Acme Payroll", direction=Direction.inflow, expected_cents=150000
+    )
+    recent = [200000] * 4 + [700000] + [190000 + 1000 * i for i in range(7)]
+    for i, cents in enumerate([300000] * 14 + recent):
+        await make_txn(
+            session,
+            acct,
+            amount_cents=cents,
+            merchant="Acme Payroll",
+            posted_on=date(2025, 7, 4) + timedelta(days=14 * i),
+            series_id=series.id,
+        )
+    llm = _UnstableLLM({"classification": "bill"})
+    await detect_recurring(session, llm=llm, today=date(2026, 7, 1))
+    s = (await _series(session))[0]
+    assert s.id == series.id and s.expected_cents == 200000
+
+
+async def test_existing_stable_bill_keeps_its_confirmed_price(session: AsyncSession) -> None:
+    # a steady bill's price moves only through events' two-occurrence agreement
+    acct = await make_account(session)
+    series = await make_series(session, merchant="Acme Stream", expected_cents=-1500)
+    for month, cents in ((4, -1500), (5, -1500), (6, -1650)):
+        await make_txn(
+            session,
+            acct,
+            amount_cents=cents,
+            merchant="Acme Stream",
+            posted_on=date(2026, month, 15),
+            series_id=series.id,
+        )
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    s = (await _series(session))[0]
+    assert s.expected_cents == -1500
+
+
 async def test_unstable_llm_not_recurring_opens_review(session: AsyncSession) -> None:
     await _seed_weekly_unstable(session)
     llm = _UnstableLLM({"classification": "not_recurring"})

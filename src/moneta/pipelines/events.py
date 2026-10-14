@@ -17,7 +17,8 @@ from moneta.models import (
     Transaction,
     dollars,
 )
-from moneta.pipelines.recurring import missed_event
+from moneta.pipelines.reconcile import _supersede
+from moneta.pipelines.recurring import amount_window, amounts_vary, missed_event, newest_run
 from moneta.queries import foreign_series_ids, price_review_matches_currency, primary_currency
 
 _PRICE_CHANGE_THRESHOLD = 0.05
@@ -70,7 +71,7 @@ async def emit_series_events(session: AsyncSession, llm: Classifier | None, toda
     ]
     emitted = 0
     # price-change questions already in flight (open) or answered "no" (denied)
-    open_series: set[int] = set()
+    open_items: dict[int, list[ReviewItem]] = {}
     denied: set[tuple[int, int]] = set()
     for item in (
         await session.execute(select(ReviewItem).where(ReviewItem.kind == ReviewKind.price_change))
@@ -81,7 +82,7 @@ async def emit_series_events(session: AsyncSession, llm: Classifier | None, toda
         if not isinstance(sid, int):
             continue
         if item.status == ReviewStatus.open:
-            open_series.add(sid)
+            open_items.setdefault(sid, []).append(item)
         elif isinstance(item.resolution, dict) and item.resolution.get("is_price_change") is False:
             new_cents = item.payload.get("new_cents")
             if isinstance(new_cents, int):
@@ -111,18 +112,22 @@ async def emit_series_events(session: AsyncSession, llm: Classifier | None, toda
                 emitted += 1
             s.next_expected_on = advance_expected_on(s.next_expected_on, s.cadence)
 
-        latest_two = sorted(
-            (t for t in txns if t.series_id == s.id),
-            key=lambda t: (t.posted_on, t.id),
-            reverse=True,
-        )[:2]
+        tagged = sorted((t for t in txns if t.series_id == s.id), key=lambda t: (t.posted_on, t.id))
+        _, run = newest_run(tagged)
+        if run and amounts_vary(amount_window(run)):
+            # a variable bill has no price to change: detection sets its expected amount
+            # from its typical charge every sync, so a question here would only fight it
+            for item in open_items.get(s.id, []):
+                _supersede(item, "A variable bill follows its typical charge", today)
+            continue
+        latest_two = tagged[::-1][:2]
         if not latest_two or s.expected_cents == 0:
             continue
         latest = latest_two[0]
         drift = abs(latest.amount_cents - s.expected_cents) / abs(s.expected_cents)
         if (
             drift <= _PRICE_CHANGE_THRESHOLD
-            or s.id in open_series
+            or s.id in open_items
             or (s.id, latest.amount_cents) in denied
         ):
             continue

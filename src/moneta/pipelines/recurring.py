@@ -1,4 +1,5 @@
 import statistics
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -35,6 +36,9 @@ from moneta.queries import classified_links, foreign_series_ids, primary_currenc
 
 _MIN_OCCURRENCES = 3
 _AMOUNT_TOLERANCE = 0.20
+# a bill's typical amount is judged on its newest charges only: a long run reaches back
+# through old prices (a paycheck before a pay change) that would otherwise out-repeat it
+_AMOUNT_WINDOW = 12
 _STALE_PERIODS = 3
 # cadence-miss groups only warrant a review question when timing is bill-like,
 # not habitual spending (coffee, rideshare) with sub-weekly bursts
@@ -88,6 +92,39 @@ def _stale(last_seen: date, cadence: Cadence, today: date) -> bool:
 def _median_gap(dates: list[date]) -> float:
     gaps = [(b - a).days for a, b in zip(dates, dates[1:], strict=False)]
     return float(statistics.median(gaps))
+
+
+def newest_run(charges: Sequence[Transaction]) -> tuple[Cadence | None, list[Transaction]]:
+    """A bill's cadence and its newest cadence run, oldest first — every charge when no
+    cadence holds. Shared with events.py, so both stages judge a bill on the same charges."""
+    ordered = sorted(charges, key=lambda t: (t.posted_on, t.id))
+    match = match_cadence(sorted({t.posted_on for t in ordered}))
+    if match is None:
+        return None, ordered
+    cadence, run_start = match
+    return cadence, [t for t in ordered if t.posted_on >= run_start]
+
+
+def amount_window(run: Sequence[Transaction]) -> list[int]:
+    """The magnitudes of a run's newest charges: what a bill costs now, not years ago."""
+    return [abs(t.amount_cents) for t in run[-_AMOUNT_WINDOW:]]
+
+
+def amounts_vary(amounts: list[int]) -> bool:
+    """A variable bill: some charge sits more than 20% from the median."""
+    med = statistics.median(amounts)
+    return any(abs(a - med) > med * _AMOUNT_TOLERANCE for a in amounts)
+
+
+def _typical_amount(amounts: list[int]) -> int:
+    """A bill's amount: the one that repeats most (a fee beside occasional extras), else
+    the median. Ties go to the amount nearest the median."""
+    med = statistics.median(amounts)
+    counts = Counter(amounts)
+    top = max(counts.values())
+    if top < 2:
+        return round(med)
+    return min((a for a, n in counts.items() if n == top), key=lambda a: (abs(a - med), a))
 
 
 def _closest_cadence(dates: list[date]) -> Cadence:
@@ -201,17 +238,15 @@ async def _detect_bill(
         return None
     voted = {t.series_id for t in significant if t.series_id is not None}
     dates = sorted({t.posted_on for t in significant})  # dedup: double-posts aren't 0-day gaps
-    match = match_cadence(dates)
-    if match is None:
-        cadence, recent = None, significant
-    else:
-        # stats come from the newest cadence-run so ancient price epochs don't skew them
-        cadence, run_start = match
-        recent = [t for t in significant if t.posted_on >= run_start]
+    # stats come from the newest cadence-run so ancient price epochs don't skew them
+    cadence, recent = newest_run(significant)
     amounts = [abs(t.amount_cents) for t in recent]
     med = statistics.median(amounts)
     stable = all(abs(a - med) <= med * _AMOUNT_TOLERANCE for a in amounts)
-    expected = -round(med) if direction == Direction.outflow else round(med)
+    newest = amount_window(recent)
+    variable = amounts_vary(newest)
+    typical = _typical_amount(newest)
+    expected = -typical if direction == Direction.outflow else typical
     ref: BillRef = (merchant, str(direction), round(med))
     forced = _forced(ctx.resolved, ref)
     if forced is not None and forced.is_recurring is False:
@@ -323,6 +358,11 @@ async def _detect_bill(
                     txn.series_id = None
             series.expected_cents = expected
             ctx.foreign_series.discard(series.id)
+        elif variable:
+            # a variable bill has no confirmed price for events to move (events.py skips
+            # it): it tracks its typical amount every sync, so one odd charge can't stand
+            # in for the bill
+            series.expected_cents = expected
         advanced_on = max(series.next_expected_on, next_on)
         if stale:
             status = SeriesStatus.ended

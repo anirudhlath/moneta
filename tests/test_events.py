@@ -237,3 +237,45 @@ async def test_price_change_denied_resolution_suppresses(session: AsyncSession) 
     assert await emit_series_events(session, llm=llm, today=date(2026, 7, 16)) == 0
     assert llm.prompts == []
     assert s.expected_cents == -1599
+
+
+async def _variable_series(session: AsyncSession) -> Any:
+    # a fee that repeats beside occasional extras: its amounts vary by more than 20%
+    acct = await make_account(session)
+    s = await make_series(
+        session, merchant="Acme Device", expected_cents=-11000, next_expected_on=date(2026, 8, 25)
+    )
+    for month, cents in ((3, -11000), (4, -8000), (5, -11000), (6, -16000), (7, -15000)):
+        await make_txn(
+            session,
+            acct,
+            amount_cents=cents,
+            merchant="Acme Device",
+            posted_on=date(2026, month, 25),
+            series_id=s.id,
+        )
+    return s
+
+
+async def test_variable_bill_has_no_price_change(session: AsyncSession) -> None:
+    # detection owns a variable bill's amount: events neither asks nor applies
+    s = await _variable_series(session)
+    llm = PriceLLM({"is_price_change": True, "confident": True})
+    assert await emit_series_events(session, llm=llm, today=date(2026, 7, 26)) == 0
+    assert llm.prompts == []
+    assert s.expected_cents == -11000
+    assert await emit_series_events(session, llm=None, today=date(2026, 7, 26)) == 0
+    assert s.expected_cents == -11000
+    assert (await session.execute(select(ReviewItem))).scalars().all() == []
+
+
+async def test_variable_bill_retires_its_open_price_question(session: AsyncSession) -> None:
+    s = await _variable_series(session)
+    item = make_price_change_item(s.id)
+    session.add(item)
+    await session.flush()
+    assert await emit_series_events(session, llm=None, today=date(2026, 7, 26)) == 0
+    assert item.status == ReviewStatus.resolved
+    assert item.resolution is not None
+    assert item.resolution["resolved_by"] == "reconciliation"
+    assert s.expected_cents == -11000
