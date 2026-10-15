@@ -1,5 +1,6 @@
 from datetime import date
 
+from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -219,14 +220,29 @@ def _absent_from_replay(
 
 async def _delete_absent(session: AsyncSession, gone: set[int]) -> None:
     """Delete withdrawn rows, leaving nothing pointing at them."""
-    tags: dict[int, int | None] = {
-        tid: sid
-        for tid, sid in (
-            await session.execute(
-                select(Transaction.id, Transaction.series_id).where(Transaction.id.in_(gone))
-            )
-        ).all()
-    }
+    withdrawn = (
+        await session.execute(
+            select(
+                Transaction.id,
+                Transaction.series_id,
+                Transaction.aggregator_id,
+                Transaction.posted_on,
+                Transaction.amount_cents,
+                Transaction.description,
+            ).where(Transaction.id.in_(gone))
+        )
+    ).all()
+    tags: dict[int, int | None] = {tid: sid for tid, sid, *_ in withdrawn}
+    for tid, _sid, aggregator_id, posted_on, cents, desc in sorted(withdrawn, key=lambda r: r[0]):
+        # the store is the only copy of the history: keep enough to restore a wrong deletion
+        logger.info(
+            "ingest: deleted withdrawn transaction {} (id {}) posted {} amount_cents {} {!r}",
+            aggregator_id,
+            tid,
+            posted_on,
+            cents,
+            desc,
+        )
     survivors = await session.scalars(
         select(Transaction).where(
             Transaction.duplicate_of_id.in_(gone), Transaction.id.not_in(gone)

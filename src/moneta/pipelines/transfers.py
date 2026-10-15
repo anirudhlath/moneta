@@ -87,6 +87,16 @@ class EffectiveTransferChoice:
     method: LinkMethod
 
 
+def _names_vanished_inflow(item: ReviewItem, roots: dict[int, int]) -> bool:
+    """A resolved choice for an inflow that is no longer stored (a provider withdrew it).
+
+    The answer cannot be honoured, and nothing on the row can ever satisfy it, so it
+    is void: the outflow re-matches by the normal rules or is asked again.
+    """
+    inflow_id = (item.resolution or {}).get("inflow_id")
+    return type(inflow_id) is int and inflow_id not in roots
+
+
 def effective_transfer_choices(
     items: list[ReviewItem], roots: dict[int, int]
 ) -> tuple[dict[int, EffectiveTransferChoice], dict[int, list[ReviewItem]]]:
@@ -104,7 +114,7 @@ def effective_transfer_choices(
 
     groups: dict[int, list[ReviewItem]] = {}
     for row, item in effective_transfer_reviews(items).items():
-        if row in roots:
+        if row in roots and not _names_vanished_inflow(item, roots):
             groups.setdefault(roots[row], []).append(item)
     selected: dict[int, EffectiveTransferChoice] = {}
     conflicts: dict[int, list[ReviewItem]] = {}
@@ -143,6 +153,8 @@ async def link_transfers(session: AsyncSession, llm: Classifier | None) -> Trans
             )
         ).scalars()
         if "outflow_id" in item.payload
+        # an answer naming a withdrawn inflow is void, so it must not suppress a new question
+        and not _names_vanished_inflow(item, logical.transaction_roots)
     }
     items = list(await session.scalars(select(ReviewItem)))
     choices, conflicts = effective_transfer_choices(items, logical.transaction_roots)

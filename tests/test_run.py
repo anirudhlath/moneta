@@ -11,6 +11,8 @@ from moneta.models import (
     Account,
     RecurringSeries,
     ReviewItem,
+    ReviewKind,
+    ReviewStatus,
     SeriesEvent,
     SyncRun,
     Transaction,
@@ -422,3 +424,69 @@ async def test_simplefin_copy_is_counted_after_plaid_drops_its_own(session: Asyn
     assert report.ingest.deleted_transactions == 1
     logical = await load_logical_data(session)
     assert {t.aggregator_id for t in logical.transactions} == {"keep", "s1"}
+
+
+async def test_withdrawn_inflow_voids_a_human_transfer_choice_and_the_outflow_is_asked_again(
+    session: AsyncSession,
+) -> None:
+    day = date(2026, 6, 15)
+    checking = _acme_plaid()
+    savings = checking.model_copy(update={"id": "plaid-acme-savings", "name": "Acme Savings"})
+
+    def leg(txn_id: str, account: AccountDTO, amount: str) -> TransactionDTO:
+        return TransactionDTO(
+            id=txn_id,
+            account_id=account.id,
+            posted_on=day,
+            amount=Decimal(amount),
+            description="ACME TRANSFER",
+            raw={},
+        )
+
+    def replay(*legs: TransactionDTO) -> Snapshot:
+        return Snapshot(
+            accounts=[checking, savings],
+            transactions=list(legs),
+            holdings=[],
+            complete_replays={checking.id: day, savings.id: day},
+        )
+
+    out = leg("out", checking, "-1000.00")
+    adapter = FakeAdapter(
+        replay(out, leg("i1", savings, "1000.00"), leg("i2", savings, "1000.00")), source="plaid"
+    )
+    await run_sync(session, [adapter], llm=None, today=date(2026, 7, 9))
+    # two equal inflows: the outflow cannot link on its own, so it is asked about
+    question = await session.scalar(
+        select(ReviewItem).where(ReviewItem.kind == ReviewKind.transfer_pair)
+    )
+    assert question is not None and question.status == ReviewStatus.open
+    chosen = await session.scalar(select(Transaction).where(Transaction.aggregator_id == "i1"))
+    assert chosen is not None
+    question.status = ReviewStatus.resolved
+    question.resolution = {"inflow_id": chosen.id, "resolved_by": "manual"}
+    await session.commit()
+    await run_sync(session, [adapter], llm=None, today=date(2026, 7, 9))
+    assert [link.inflow_id for link in await session.scalars(select(TransferLink))] == [chosen.id]
+
+    # the bank withdraws the chosen inflow and re-posts it under a new id
+    adapter.snapshot = replay(
+        out, leg("i1-reposted", savings, "1000.00"), leg("i2", savings, "1000.00")
+    )
+    report = await run_sync(session, [adapter], llm=None, today=date(2026, 7, 9))
+    assert report.ingest.deleted_transactions == 1
+    assert list(await session.scalars(select(TransferLink))) == []
+    # the human's pick named a row that no longer exists, so it is void: the outflow has
+    # two candidates again (re-posted and i2) and is asked about once more, not silently
+    # left as spending
+    open_questions = list(
+        await session.scalars(
+            select(ReviewItem).where(
+                ReviewItem.kind == ReviewKind.transfer_pair, ReviewItem.status == ReviewStatus.open
+            )
+        )
+    )
+    assert len(open_questions) == 1
+    ids = {t.aggregator_id: t.id for t in await session.scalars(select(Transaction))}
+    assert open_questions[0].payload["outflow_id"] == ids["out"]
+    assert set(open_questions[0].payload["candidates"]) == {ids["i1-reposted"], ids["i2"]}
