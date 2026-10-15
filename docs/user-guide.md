@@ -246,12 +246,14 @@ Coverage: Acme Card ··1234 has no transactions since 2026-07-02 (usually posts
 
 The first two lines come from the most recent sync run (as before): timestamp, outcome
 (`ok` / `failed` — with the error / `incomplete` — still running or the process died
-mid-sync), and a one-line summary of what changed. The last two lines are new: total
+mid-sync), and a one-line summary of what changed. The next two lines are new: total
 accounts, open review-queue items, which sources are configured (`aggregators`, from
 `AggregatorAdapter.source` — `simplefin` and/or `plaid`), and whether an LLM is configured.
-These are booleans/counts only — never credentials. Below them comes one yellow `Coverage:` line for each account whose feed has gone quiet (see [Coverage notes](#coverage-notes)); none when every feed looks alive. On a fresh database with no sync yet,
-you still see the accounts/reviews/aggregators/LLM summary; only the "Last sync" line is
-replaced with "No sync has run yet."
+These are booleans/counts only — never credentials. Below them comes one yellow `Coverage:`
+line for each account whose feed has gone quiet (see [Coverage notes](#coverage-notes));
+none when every feed looks alive. On a fresh database with no sync yet, you still see the
+accounts/reviews/aggregators/LLM summary; only the "Last sync" line is replaced with "No
+sync has run yet."
 
 `moneta status --json` merges both API calls into one object: the `/status` fields
 (`last_sync_at`, `last_sync_ok`, `accounts`, `open_reviews`, `aggregators`, `llm_configured`, `stale_accounts`)
@@ -299,11 +301,13 @@ Coverage: Acme Card ··1234 has no transactions since 2026-07-02 (usually posts
 
 An account is noted when its newest transaction is at least 7 days old **and**, at its usual
 rate — distinct posting days over the last 365 days — you'd have expected at least 5 posting
-days since then. A card you use every day is noted after a week of silence, one you use a few
-days a week after about ten days, and a weekly account after about six weeks. An account that
-posts twice a month is noted only after three to four months of silence, and one that posts about
-once a month (roughly 18 posting days a year or fewer, spread through the year) never is. An
-account linked across providers is judged once, and a transaction from either provider counts.
+days since then. For an account with about a year of history behind it, a card you use every
+day is noted after a week of silence, one you use a few days a week after about ten days, and a
+weekly account after about six weeks. An account that posts twice a month is noted only after
+three to four months of silence, and one that posts about once a month (roughly 18 posting days
+a year or fewer, spread through the year) never is. A younger account is noted later, because
+its rate is averaged over the whole year. An account linked across providers is judged once,
+and a transaction from either provider counts.
 Accounts with no transactions in the last year are skipped.
 
 It's a note, not an error: nothing is dropped from the numbers, but spending you made on that
@@ -378,6 +382,9 @@ The flagship view for the current month:
   non-credit-card-payment fixed costs (plus derived loan payments) due later this month, e.g.
   `Upcoming this month: Rent $1400.00 (Jul 15) · Netflix $15.99 (Jul 28)`. Omitted when nothing
   is due before month-end.
+- **Coverage** — a yellow `Coverage:` line under the table (after the Upcoming line) for each
+  account whose feed has gone quiet. Omitted when every feed looks alive; see
+  [Coverage notes](#coverage-notes).
 
 `moneta power --history N` (e.g. `--history 6`, 1-60 months) replaces the table above with a
 compact Month/Income/Spend/Net history instead. The newest row is the current, still-in-progress
@@ -769,7 +776,7 @@ Files in the config dir (all owner-only, dir is 0700):
 | "Did my sync run last night?" | `moneta status` — shows the last run, success/failure, and the error if it failed. |
 | Sync failed | `moneta status` for the error; details in `~/.config/moneta/moneta.log`. Failures never corrupt data — fix the cause and re-sync. |
 | One source failed but the sync "succeeded" | That's by design when at least one other source is configured and healthy — check the `⚠` warning line the sync prints (or `moneta status`/the log) for which source and why; a source only fails the whole sync when it's the only one configured, or every configured source fails together. |
-| A bank's history is missing | `moneta sync --full` re-pulls everything the institution retains for every configured source. It's needed after adding a new source or linking a new account at an existing one, and after an account was quiet for more than 90 days while others at its source kept posting. An outage, or a card whose transactions arrive in late batches, heals on the next plain `moneta sync`. |
+| A bank's history is missing | `moneta sync --full` re-pulls everything the institution retains for every configured source. It's needed after adding a new source or linking a new account at an existing one, and after an account was quiet for more than 90 days while others at its source kept posting. An outage, or a card whose transactions arrive in late batches, heals on the next plain `moneta sync`, with two exceptions. Rows an older version's window already skipped are not fetched again by a plain sync, so run `moneta sync --full` once after upgrading. And the window follows each account's newest row: if a row reaches a late-batch card ahead of the batch (a payment, say), batch rows older than that row minus 7 days are still skipped, and `moneta sync --full` recovers them. |
 | Account has the wrong type | `moneta accounts --set-type <ID> <TYPE>` — sticks across syncs. |
 | A shared bank appears twice | Inspect `moneta accounts --sources` and account overlap questions in `moneta review`; confirm identity only with corroborating evidence, then link or reconcile. |
 | A provider match is wrong | Reverse an account link with `moneta accounts --unlink-source <ID>` to restore its observations. For an uncertain match with an open transaction overlap question, choose none in that review. Automatic matches do not necessarily have open questions; there is no separate public transaction-unlink endpoint. |

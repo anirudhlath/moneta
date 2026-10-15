@@ -163,6 +163,19 @@ async def test_account_without_transactions_does_not_reset_the_window(
     assert since == date(2026, 7, 5) - timedelta(days=RESYNC_OVERLAP_DAYS)
 
 
+async def test_source_with_accounts_but_no_transactions_requests_from_the_epoch(
+    session: AsyncSession,
+) -> None:
+    """Pins today's behaviour: accounts with no transactions leave nothing to resume
+    from, so the source asks for the epoch on every sync — not the global-newest
+    fallback that a source with no accounts at all gets."""
+    await make_account(session, source="simplefin", type=AccountType.brokerage)
+    plaid_acct = await make_account(session, source="plaid")
+    await make_txn(session, plaid_acct, posted_on=date(2026, 7, 5))
+    since = await _sync_since(session, full=False, source="simplefin")
+    assert since == date(1970, 1, 1)
+
+
 async def test_run_sync_autoreview_resolves_before_detection(session: AsyncSession) -> None:
     from typing import Any
 
