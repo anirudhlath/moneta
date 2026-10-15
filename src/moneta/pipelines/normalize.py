@@ -179,6 +179,12 @@ _MAX_TAILS = 3
 # rather than one longer word ("Corner Storehouse" is not "Corner Store" plus a place)
 _MIN_GLUED_LETTERS = 4
 _MIN_GLUED_TAILS = 2
+# a per-charge code hyphenated onto the merchant ("ACMEAPP-QWERTYUI"); a code with a digit
+# is already a reference token, so only letters-only codes reach the merge pass
+_CHARGE_CODE = re.compile(r"^([a-z]{4,})-([0-9a-z]{8})$", re.IGNORECASE)
+# one hyphenated name may be a real one ("Corner-Sandwich"); different codes behind one
+# merchant are per-charge references
+_MIN_CODES = 2
 
 
 def _tokens(name: str) -> tuple[str, ...]:
@@ -217,6 +223,23 @@ def _glued(
     return glued
 
 
+def _charge_codes(names: set[str]) -> dict[str, str]:
+    """name -> the name without its per-charge code ("Acmeapp-Qwertyui" -> "Acmeapp"),
+    for a merchant seen with 2+ different codes."""
+    parts: dict[str, tuple[str, str]] = {}  # name -> (merchant, rest of the name)
+    codes: dict[str, set[str]] = {}
+    for name in names:
+        first, _, rest = name.partition(" ")
+        if (match := _CHARGE_CODE.match(first)) is not None:
+            parts[name] = (match[1], rest)
+            codes.setdefault(match[1].lower(), set()).add(match[2].lower())
+    return {
+        name: f"{merchant} {rest}".strip()
+        for name, (merchant, rest) in parts.items()
+        if len(codes[merchant.lower()]) >= _MIN_CODES
+    }
+
+
 def merge_targets(names: Iterable[str], targets_only: Iterable[str] = ()) -> dict[str, str]:
     """name -> the shorter name it merges into (design 2026-10-13 §1).
 
@@ -226,10 +249,13 @@ def merge_targets(names: Iterable[str], targets_only: Iterable[str] = ()) -> dic
     with 3+ different non-place tails absorbs only its place variants. A name whose last
     word is a shorter name's last word with a place glued on ("Acme Universityriverton")
     merges into it when the glued tail is a place, or when a multi-word name shows 2+
-    different glued tails. Names in `targets_only` can absorb others but never merge
-    themselves and teach no places.
+    different glued tails. A per-charge code ("Acmeapp-Qwertyui") is dropped once 2+
+    different codes share the merchant. Names in `targets_only` can absorb others but
+    never merge themselves and teach no places.
     """
     sources = set(names)
+    coded = _charge_codes(sources)
+    sources = (sources - coded.keys()) | set(coded.values())
     keyed = {n: _tokens(n) for n in sorted(sources | set(targets_only))}
     by_tokens: dict[tuple[str, ...], str] = {}
     for name, toks in keyed.items():
@@ -284,6 +310,8 @@ def merge_targets(names: Iterable[str], targets_only: Iterable[str] = ()) -> dic
                 targets[name] = by_tokens[toks]
             elif (glued_into := glued_target(name)) is not None:
                 targets[name] = glued_into
+    for name, bare in coded.items():  # before chains, so a code follows its merchant
+        targets[name] = bare
     for name in list(targets):  # resolve chains: A -> B -> C becomes A -> C
         seen = {name}
         while (nxt := targets.get(targets[name])) is not None and nxt not in seen:
