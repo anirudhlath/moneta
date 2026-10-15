@@ -415,8 +415,9 @@ An outflow with exactly one candidate links automatically when the pair scores 8
 **and** has transfer wording. A same-amount pair with no transfer wording is as often a
 coincidence as a transfer, so it is never linked on points alone. Every other case goes
 to the LLM when one is configured, else to `moneta review` as a transfer question. When
-two outflows want the same inflow, the higher score wins and an equal score goes to the
-outflow Moneta stored first; the other outflow is asked about.
+two outflows that both qualify for an automatic link want the same inflow, the higher
+score wins and an equal score goes to the outflow Moneta stored first; the other
+outflow is asked about.
 
 ### `moneta networth`
 

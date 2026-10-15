@@ -1,21 +1,25 @@
-"""Greedy, confidence-ordered transfer-pair linking.
+"""Greedy, score-ordered transfer-pair linking.
 
-Outflows are grouped with their candidate inflows, then the groups are processed
-in descending order of each group's best confidence; within a group, candidates
-whose inflow has already been consumed by a higher-confidence group are dropped.
+Each candidate pair gets a score in integer tenths (``score_pair``). Outflows are
+grouped with their candidate inflows, then the groups are processed in descending
+order of each group's best score, the lower outflow id breaking an exact tie; within
+a group, candidates whose inflow has already been consumed by a higher-scoring group
+are dropped. A lone candidate links by rule only when it scores at least
+``_AUTO_LINK`` and a transfer keyword appears in either description.
+
 Two edge cases (design 2026-07-16 §7) are handled deliberately rather than left
 to fall through silently:
 
 - **Greedy loser**: if every one of an outflow's candidates has already been
-  consumed by a higher-confidence group, the outflow has nothing left to
+  consumed by a higher-scoring group, the outflow has nothing left to
   auto-link. Rather than vanishing, it opens a ``transfer_pair`` ReviewItem
   carrying its ORIGINAL candidate ids (the post-filter set is empty by
   definition, so there's nothing else to show).
 - **Originally-ambiguous outflows never late-auto-link**: an outflow that
   started with 2+ candidate inflows never takes the single-candidate
-  auto-link fast path, even when higher-confidence groups consuming their
+  auto-link fast path, even when higher-scoring groups consuming their
   own inflows happen to leave exactly one candidate standing for this one.
-  Its confidence was computed against the original, more ambiguous candidate
+  Its score was computed against the original, more ambiguous candidate
   set, not the reduced one, so treating "last one standing" as a confident
   rule-based match would be unearned. It falls through to the same
   LLM-pick / review-item path as any other multi-candidate group instead —
@@ -258,7 +262,7 @@ async def link_transfers(session: AsyncSession, llm: Classifier | None) -> Trans
         out = original[0].outflow
         cands = [c for c in original if c.inflow.id not in used and c.outflow.id not in used]
         if not cands:
-            # Greedy loser: every candidate was consumed by a higher-confidence
+            # Greedy loser: every candidate was consumed by a higher-scoring
             # group. Nothing to show from the (now-empty) filtered set, so the
             # review item carries the original candidates instead of vanishing.
             _open_review(session, out, [c.inflow.id for c in original], reviewed, stats)
