@@ -403,8 +403,13 @@ posted at most 6 days apart. Each candidate pair is scored in points:
 |---|---|
 | 5 | every candidate |
 | +2 | the legs post 0–1 days apart (+1 at 2–3 days; nothing at 4–6) |
-| +2 | either description has transfer wording: `payment`, `pymt`, `transfer`, `xfer`, `ach`, `autopay`, `epay`, `billpay` or `deposit` (any case) |
+| +2 | either description has transfer wording: `payment`, `pymt`, `transfer`, `xfer`, `ach`, `autopay`, `epay`, `billpay` or `deposit` (any case; every word but `ach` also counts inside a longer word, e.g. `ONETIMEPAYMENT`, while `ach` must stand alone, so `BEACH` doesn't count) |
 | +1 | the outflow leaves a checking or savings account |
+
+Payment-app rail wording doesn't count as transfer wording: `Zelle payment from`/`to`,
+`Venmo payment` and `PayPal Inst Xfer` (any case or spacing) name a person, not one of
+your accounts, so that phrase is ignored before the search. Other words in the same
+description still count.
 
 An outflow with exactly one candidate links automatically when the pair scores 8 or more
 **and** has transfer wording. A same-amount pair with no transfer wording is as often a

@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.models import AccountType, ReviewItem, TransferLink
+from moneta.models import AccountType, ReviewItem, Transaction, TransferLink
 from moneta.pipelines.reconcile import reconcile_provider_overlap
 from moneta.pipelines.run import run_sync
 from moneta.pipelines.transfers import PairScore, link_transfers, score_pair
@@ -371,3 +371,71 @@ async def test_reconcile_keeps_the_older_of_two_equal_links(session: AsyncSessio
     await reconcile_provider_overlap(session, TODAY)
     link = (await session.execute(select(TransferLink))).scalar_one()
     assert link.inflow_id == first_in.id
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Zelle payment from JANE DOE 1234",
+        "ZELLE PAYMENT TO JANE DOE",
+        "zelle  payment   from jane doe",
+        "VENMO PAYMENT 1234",
+        "PayPal Inst Xfer JANE DOE",
+    ],
+)
+def test_p2p_rail_wording_is_not_a_transfer_keyword(description: str) -> None:
+    out = Transaction(posted_on=date(2026, 7, 1), description="Acme Wallet: Add Money")
+    inn = Transaction(posted_on=date(2026, 7, 1), description=description)
+    assert score_pair(out, inn, AccountType.credit) == PairScore(7, False)
+
+
+def test_text_after_a_rail_still_counts() -> None:
+    out = Transaction(posted_on=date(2026, 7, 1), description="ACME STORE")
+    inn = Transaction(posted_on=date(2026, 7, 1), description="Zelle payment from JANE DOE ACH")
+    assert score_pair(out, inn, AccountType.credit).keyword
+
+
+@pytest.mark.parametrize(
+    ("description", "keyword"),
+    [
+        ("CORNER CAFE ELMTON BEACH CA", False),
+        ("buy 2 shares of Acme for $10.00 each", False),
+        ("ACME COACH LINES", False),
+        ("ACME BANK ACH PMT", True),
+        ("ONETIMEPAYMENT", True),
+        ("ACME PAYMENTS PPD", True),
+    ],
+)
+def test_ach_must_be_a_whole_word(description: str, keyword: bool) -> None:
+    """Only `ach` is matched as a whole word ("BEACH", "COACH" and "each" are not
+    transfers); every other keyword stays a substring, so glued descriptors such as
+    "ONETIMEPAYMENT" still count."""
+    out = Transaction(posted_on=date(2026, 7, 1), description="ACME STORE")
+    inn = Transaction(posted_on=date(2026, 7, 1), description=description)
+    assert score_pair(out, inn, AccountType.credit).keyword is keyword
+
+
+async def test_p2p_inflow_does_not_link_to_a_wallet_top_up(session: AsyncSession) -> None:
+    """A friend's Zelle inflow and an unrelated same-amount card outflow on one day
+    must not pair: the rail's own "payment" is not a transfer keyword."""
+    card = await make_account(session, type=AccountType.credit)
+    checking = await make_account(session, type=AccountType.checking)
+    out = await make_txn(
+        session,
+        card,
+        amount_cents=-30000,
+        posted_on=date(2026, 7, 1),
+        description="Acme Wallet: Add Money",
+    )
+    inn = await make_txn(
+        session,
+        checking,
+        amount_cents=30000,
+        posted_on=date(2026, 7, 1),
+        description="Zelle payment from JANE DOE 1234",
+    )
+    stats = await link_transfers(session, llm=None)
+    assert (stats.linked, stats.review) == (0, 1)
+    assert (await session.execute(select(TransferLink))).scalar_one_or_none() is None
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.payload == {"outflow_id": out.id, "candidates": [inn.id]}

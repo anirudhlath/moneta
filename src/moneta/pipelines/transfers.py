@@ -43,8 +43,16 @@ from moneta.models import (
 )
 from moneta.pipelines.transaction_overlap import effective_transfer_reviews
 
+# Substring matches on purpose: descriptors glue words ("ONETIMEPAYMENT"). Only "ach"
+# is a whole word, because as a substring it hides in "BEACH", "COACH" and "each".
 _TRANSFER_PAT = re.compile(
-    r"payment|pymt|transfer|xfer|ach|autopay|epay|billpay|deposit", re.IGNORECASE
+    r"payment|pymt|transfer|xfer|\bach\b|autopay|epay|billpay|deposit", re.IGNORECASE
+)
+# A P2P rail names a person, not one of your accounts: in "Zelle payment from JANE
+# DOE" the word "payment" belongs to the rail. The rail phrase is removed before the
+# keyword search, so it can't vouch for a transfer on its own.
+_P2P_RAILS = re.compile(
+    r"zelle\s+payment\s+(?:from|to)|venmo\s+payment|paypal\s+inst\s+xfer", re.IGNORECASE
 )
 _MAX_DAYS = 6
 # Scores are integer tenths: summed float tenths drift (0.5 + 0.2 + 0.1 is
@@ -76,6 +84,10 @@ class PairScore:
         return self.keyword and self.tenths >= _AUTO_LINK
 
 
+def _has_keyword(description: str) -> bool:
+    return _TRANSFER_PAT.search(_P2P_RAILS.sub(" ", description)) is not None
+
+
 def score_pair(out: Transaction, inn: Transaction, out_type: AccountType) -> PairScore:
     """Base 5; +2 when the legs post 0-1 days apart, else +1 at 2-3 days; +2 for a
     transfer keyword; +1 when the outflow leaves a checking or savings account."""
@@ -85,7 +97,7 @@ def score_pair(out: Transaction, inn: Transaction, out_type: AccountType) -> Pai
         tenths += 2
     elif diff <= 3:
         tenths += 1
-    keyword = bool(_TRANSFER_PAT.search(out.description) or _TRANSFER_PAT.search(inn.description))
+    keyword = _has_keyword(out.description) or _has_keyword(inn.description)
     if keyword:
         tenths += 2
     if out_type in (AccountType.checking, AccountType.savings):
