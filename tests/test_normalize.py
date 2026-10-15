@@ -564,3 +564,41 @@ async def test_kept_llm_group_is_not_a_phantom_merge_target(session: AsyncSessio
         group[1]: "Acme Garage",
         plus: "Acme Parking Monthly Riverton Plus",
     }
+
+
+def test_rule_normalize_strips_expressway_addresses() -> None:
+    assert rule_normalize("ACME DINER 4500 OAK HOLLOW EXPY ELMTON TX") == "Acme Diner"
+    assert rule_normalize("ACME DINER 4500 OAK HOLLOW EXPWY ELMTON TX") == "Acme Diner"
+
+
+def test_glued_places_fold_into_the_spaced_name() -> None:
+    assert merge_targets(
+        ["Acme University", "Acme Universityelmton", "Acme Universityriverton"]
+    ) == {
+        "Acme Universityelmton": "Acme University",
+        "Acme Universityriverton": "Acme University",
+    }
+    # a one-word name absorbs only a glued place learned from other names
+    assert merge_targets([*_PLACES, "Shyco", "Shycoelmton"])["Shycoelmton"] == "Shyco"
+    assert merge_targets(["Shyco", "Shycobrook", "Shycofield"]) == {}
+
+
+def test_one_longer_word_is_not_a_glued_place() -> None:
+    # one glued variant is as likely a different word as a place
+    assert merge_targets(["Corner Store", "Corner Storehouse"]) == {}
+    # a short tail is a word ending, not a place, however many there are
+    names = ["Acme Parking Month", "Acme Parking Monthly", "Acme Parking Months"]
+    assert merge_targets(names) == {}
+
+
+async def test_renormalize_folds_glued_place_descriptors(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    for raw in ("ACME UNIVERSITY CA", "ACME UNIVERSITYELMTON CA", "ACME UNIVERSITYRIVERTON CA"):
+        await make_txn(session, acct, description=raw)
+    await normalize_merchants(session, llm=None)
+
+    assert await renormalize_merchants(session) == 2
+    assert await renormalize_merchants(session) == 0
+
+    txns = (await session.execute(select(Transaction))).scalars().all()
+    assert {t.merchant for t in txns} == {"Acme University"}

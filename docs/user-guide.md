@@ -419,16 +419,20 @@ the old cadence. A price increase is only applied after two agreeing charges (or
 confirmation) — a single weird charge never rewrites what a bill is "supposed to" cost.
 
 One bill is one series, however the bank words it. Every sync strips wallet prefixes
-(`AplPay`, `SQ*`), legal suffixes (`LLC`), street addresses and city/state tails from
-descriptors, then merges a longer name into a shorter one it starts with (`Acme Fitness`
-and `Acme Fitness Riverton` become `Acme Fitness`). A single-word brand absorbs only a
-trailing place, so `Streamco` and `Streamco Plus` stay apart. A prefix shared by many
-unrelated names, such as a payment rail (`Zelle Payment To …`), absorbs nothing. A
-merchant can also have several series: if a subscription has irregular purchases alongside
-it, or two subscriptions at the same price bill on different days, each schedule is its own
-series and the other charges are ordinary spending. A merchant whose amounts just vary
-month to month stays one series, and a small fee alongside it does not split it. When a
-rename or merge leaves two series for one bill, the sync folds them into one, keeping their
+(`AplPay`, `SQ*`), legal suffixes (`LLC`), street addresses (expressways too) and
+city/state tails from descriptors, then merges a longer name into a shorter one it
+starts with (`Acme Fitness` and `Acme Fitness Riverton` become `Acme Fitness`). A city
+glued onto the name folds the same way: `Acme Universityelmton` and
+`Acme Universityriverton` become `Acme University` once the tail is a known place or the
+name shows two different glued tails, while one longer word (`Corner Storehouse` beside
+`Corner Store`) stays its own merchant. A single-word brand absorbs only a trailing
+place, so `Streamco` and `Streamco Plus` stay apart. A prefix shared by many unrelated
+names, such as a payment rail (`Zelle Payment To …`), absorbs nothing. A merchant can
+also have several series: if a subscription has irregular purchases alongside it, or two
+subscriptions at the same price bill on different days, each schedule is its own series
+and the other charges are ordinary spending. A merchant whose amounts just vary month to
+month stays one series, and a small fee alongside it does not split it. When a rename or
+merge leaves two series for one bill, the sync folds them into one, keeping their
 events. A price jump of more than 20% starts a new series and the old one goes stale.
 
 `--end`, `--not-a-bill`, `--habit`, `--re-review`, and `--reactivate` are mutually exclusive
