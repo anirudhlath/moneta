@@ -171,3 +171,26 @@ def test_same_day_collision_follows_expectation() -> None:
     assert sorted([t.posted_on for t in tr] for tr in tracks) == sorted(
         [[t.posted_on for t in early], [t.posted_on for t in late]]
     )
+
+
+def test_a_charge_after_the_schedule_before_it_is_due_splits_it() -> None:
+    # three installments, then a deposit before the next installment is due
+    installments = _monthly(15, range(6, 9), -120000)
+    assert split_bills([*installments, _t(date(2026, 9, 1), -210000)]) == [installments]
+
+
+def test_a_repriced_charge_in_the_due_window_does_not_split() -> None:
+    # the next charge at a new price is that charge, not an extra: one bill, as before
+    charges = [*_monthly(15, range(5, 8), -1500), _t(date(2026, 8, 12), -2000)]
+    assert split_bills(charges) is None
+
+
+def test_a_later_charge_closes_the_not_yet_due_window() -> None:
+    # a purchase just after the newest charge, then the plan goes on at a new price: the
+    # next charge came due, so the purchase is judged by the run alone, as before
+    charges = [
+        *_monthly(9, range(3, 7), -4000),
+        _t(date(2026, 6, 12), -30000),
+        *_monthly(9, range(7, 10), -8000),
+    ]
+    assert split_bills(charges) is None

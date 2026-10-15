@@ -430,10 +430,13 @@ place, so `Streamco` and `Streamco Plus` stay apart. A prefix shared by many unr
 names, such as a payment rail (`Zelle Payment To …`), absorbs nothing. A merchant can
 also have several series: if a subscription has irregular purchases alongside it, or two
 subscriptions at the same price bill on different days, each schedule is its own series
-and the other charges are ordinary spending. A merchant whose amounts just vary month to
-month stays one series, and a small fee alongside it does not split it. When a rename or
-merge leaves two series for one bill, the sync folds them into one, keeping their
-events. A price jump of more than 20% starts a new series and the old one goes stale.
+and the other charges are ordinary spending. A charge that lands after a schedule's
+newest charge, before the next one is due, counts the same way: a term deposit beside a
+monthly payment-plan installment is ordinary spending, and the installment alone is the
+fixed cost. A merchant whose amounts just vary month to month stays one series, and a
+small fee alongside it does not split it. When a rename or merge leaves two series for
+one bill, the sync folds them into one, keeping their events. A price jump of more than
+20% starts a new series and the old one goes stale.
 
 `--end`, `--not-a-bill`, `--habit`, `--re-review`, and `--reactivate` are mutually exclusive
 with each other — pass exactly one. `--end`/`--not-a-bill`/`--habit`/`--re-review` each write

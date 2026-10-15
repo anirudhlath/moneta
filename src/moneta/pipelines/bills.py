@@ -9,7 +9,7 @@ detection handles it exactly as before, so a variable bill is never dropped.
 import itertools
 import statistics
 from collections.abc import Sequence
-from datetime import date
+from datetime import date, timedelta
 
 from moneta.cadence import TOLERANCE, advance_expected_on, match_cadence
 from moneta.models import BILL_TOLERANCE, Cadence, Transaction
@@ -102,7 +102,8 @@ def _scheduled_units(
     """The group's scheduled units (those with a cadence) and whether anything splits them.
 
     Splits when two same-price subscriptions run side by side, or when a charge of
-    real size (not an adjustment) sits inside a unit's schedule without belonging to it.
+    real size (not an adjustment) sits inside a unit's schedule without belonging to it:
+    within its newest run, or after it while the next charge is not due yet.
     """
     units: list[list[Transaction]] = []
     concurrent = False
@@ -122,7 +123,12 @@ def _scheduled_units(
             continue
         scheduled.append(unit)
         members = {t.id for t in unit}
-        start, end = match[1], dates[-1]
+        (cadence, start), end = match, dates[-1]
+        # nothing charged since the next charge came due: a later charge (a term deposit
+        # after the newest installment) sits alongside the schedule too
+        due = advance_expected_on(end, cadence) - timedelta(days=TOLERANCE[cadence])
+        if all(t.posted_on < due for t in group):
+            end = max(t.posted_on for t in group)
         # a charge far below the bill is an adjustment (a fee, a true-up), not a second bill
         floor = statistics.median(abs(t.amount_cents) for t in unit) * MINOR_FRACTION
         extras = extras or any(
