@@ -11,7 +11,7 @@ from datetime import date
 from typing import Any
 
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.llm import CLASSIFICATION_TAXONOMY, Classifier
@@ -452,6 +452,13 @@ async def apply_resolution(
                 # so fixed costs stop counting it immediately, not after the stale sweep
                 if series.status == SeriesStatus.active:
                     series.status = SeriesStatus.ended
+                # and untag its charges so the answer applies without waiting for a sync:
+                # an ended series' inflows would otherwise still read as history income
+                await session.execute(
+                    update(Transaction)
+                    .where(Transaction.series_id == series.id)
+                    .values(series_id=None)
+                )
             else:
                 series.discretionary = bool(resolution.get("discretionary"))
     elif item.kind == ReviewKind.price_change and resolution.get("is_price_change") is True:

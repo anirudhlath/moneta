@@ -351,8 +351,9 @@ calendar month — not today's recurring-series state — so a since-cancelled b
 still shows correctly even though no series reflects it anymore. **Income** counts inflows
 tagged to an income series: a recurring inflow series that isn't a habit (a paycheck), whether
 it is still active or has since ended, so a former employer's paychecks count in the months they
-paid. **Other inflows** is every other inflow that isn't a transfer — refunds, money from
-friends, one-off deposits — shown so nothing disappears, but not income. **Net** = income −
+paid. A series you answered "not recurring" keeps no tagged charges, so its inflows count as
+Other inflows, never income. **Other inflows** is every other inflow that isn't a transfer —
+refunds, money from friends, one-off deposits — shown so nothing disappears, but not income. **Net** = income −
 spend; other inflows are left out of it.
 
 ### `moneta txns` — auditing the numbers
@@ -481,9 +482,10 @@ events. A price jump of more than 20% starts a new series and the old one goes s
 with each other — pass exactly one. `--end`/`--not-a-bill`/`--habit`/`--re-review` each write
 through the same `recurring_cluster` review-item ledger a bill/habit/not-recurring answer
 would (`resolved_by: "manual"`), so a wrong LLM or detection verdict is always
-human-correctable: `--not-a-bill` ends the series immediately and suppresses it from every
-future sync; `--habit` flips it to discretionary spending and reactivates it if it had ended;
-`--re-review` reopens the ledger item so it reappears in `moneta review` (and a fresh answer
+human-correctable: `--not-a-bill` ends the series immediately, untags its charges and
+suppresses it from every future sync (its outflows count as spend, its inflows as Other
+inflows in `power --history`, never income); `--habit` flips it to discretionary spending and
+reactivates it if it had ended; `--re-review` reopens the ledger item so it reappears in `moneta review` (and a fresh answer
 can supersede the old one). `--re-review` only reopens the question — it never changes the
 series itself, so an ended series stays ended until you answer `h` (habit, reactivates) or
 bring it back directly.
@@ -616,7 +618,7 @@ You'll see an upfront summary, then one question at a time:
 | Shared account identity | Pick a numbered candidate after checking provider, mask, currency, type, and any metadata conflicts; `0` chooses none; Enter skips |
 | Overlapping provider transaction | Compare numbered observations' signed amount, posting date, description, account, and provider; pick a duplicate counterpart, `0` chooses none; Enter skips |
 | Transfer match ("which inflow matches…") | Type the number of the right candidate, or Enter to skip |
-| Bill, habit, or not recurring ("Is X a recurring bill?"; with several bills, "Is 'X' ($12.34) a recurring bill?") | `b` bill (fixed cost) / `h` habit (discretionary, still tracked) / `n` not recurring |
+| Bill, habit, or not recurring ("Is X a recurring bill?"; with several bills, "Is 'X' ($12.34) a recurring bill?") | `b` bill (fixed cost) / `h` habit (discretionary, still tracked) / `n` not recurring (ends the series and untags its charges: spend for an outflow, Other inflows for an inflow) |
 | Financing check ("X looks like promo financing being paid down…") | `y` treat its payments as fixed costs / `n` leave it as a plain credit card |
 | Price change ("Did X change price from $A to $B?") | `y` (applies the new amount) / `n` |
 | Merchant name | Type the real merchant name, or Enter to skip |
@@ -783,7 +785,7 @@ Files in the config dir (all owner-only, dir is 0700):
 | Merchant names look wrong | Answer the merchant questions in `moneta review`; naming rules and merchant merging already run on every sync, and `moneta renormalize` applies them on demand without a sync. A question disappears by itself once its descriptor no longer appears on any transaction or the rules already name it cleanly. |
 | One bill shows up as two series, or two bills as one | Merging is by name: a truncated name that is not a prefix of the full one (`Acme Fitnriverton`) stays split, as do descriptors with short per-charge codes. Duplicates that a merge does produce are folded automatically on the next sync. `moneta recurring --end <ID>` only ends a series, and a series that is still charging revives. |
 | A subscription shows as active but is cancelled | `moneta recurring --end <ID>`. |
-| A series was wrongly confirmed as a recurring bill | `moneta recurring --not-a-bill <ID>` — ends it and suppresses it from every future sync. |
+| A series was wrongly confirmed as a recurring bill | `moneta recurring --not-a-bill <ID>` — ends it, untags its charges (they count as spend, or as Other inflows if money came in) and suppresses it from every future sync. |
 | A recurring series is really discretionary spending | `moneta recurring --habit <ID>` — reactivates it if ended, tags it discretionary (not a fixed cost). When the merchant has a single bill, the answer keeps applying as long as its amount is among the bill's newest charges, so a habit whose typical spend drifts stays a habit. |
 | A series ended but the bill actually resumed | `moneta recurring --reactivate <ID>` — flips it straight back to active, no review-queue detour. |
 | An overrule was a mistake | `moneta recurring --re-review <ID>` reopens the question in `moneta review`. |

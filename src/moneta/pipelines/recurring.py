@@ -265,7 +265,11 @@ async def _detect_bill(
     # an amount it still charges covers it; split bills keep the 20% median match
     forced = _forced(ctx.resolved, ref, None if split else (min(newest), max(newest)))
     if forced is not None and forced.is_recurring is False:
-        return None  # user-resolved as not recurring — suppress silently, forever
+        # user-resolved as not recurring — suppress silently, forever. The bill keeps no
+        # tagged charges: a tag would let an inflow read as income in power --history
+        for t in significant:
+            t.series_id = None
+        return None
     discretionary = forced.discretionary if forced is not None else False
     forced_recurring = forced is not None and forced.is_recurring
 

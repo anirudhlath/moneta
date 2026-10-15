@@ -5,7 +5,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from moneta.api import create_app
 from moneta.cadence import month_bounds
-from moneta.models import Account, AccountType, Direction, SeriesStatus, TransferLink
+from moneta.models import (
+    Account,
+    AccountType,
+    Direction,
+    ReviewStatus,
+    SeriesStatus,
+    TransferLink,
+    recurring_cluster_item,
+)
+from moneta.pipelines.recurring import detect_recurring
+from moneta.pipelines.review import apply_resolution
 from moneta.views.cashflow import accrual_by_month, accrual_inflows, accrual_spend, cash_out
 from tests.factories import make_account, make_series, make_txn
 
@@ -248,6 +258,109 @@ async def test_discretionary_inflow_series_is_not_income(session: AsyncSession) 
     )
     rows = await accrual_by_month(session, months=1, today=date(2026, 7, 20))
     assert rows == [("2026-07", 0, 250000, 0)]
+
+
+async def test_not_recurring_answer_takes_its_inflows_out_of_income(
+    session: AsyncSession,
+) -> None:
+    """#19: a person's monthly repayments formed an inflow series; the owner answered
+    "not recurring". The bill then owns no charges, so history reports the money as
+    other inflows, never income, right after the answer and after the next detection."""
+    checking = await make_account(session, type=AccountType.checking)
+    series = await make_series(
+        session, merchant="Jane Doe", direction=Direction.inflow, expected_cents=30000
+    )
+    for posted_on in (date(2026, 5, 3), date(2026, 6, 3), date(2026, 7, 3)):
+        await make_txn(
+            session,
+            checking,
+            amount_cents=30000,
+            posted_on=posted_on,
+            description="Jane Doe",
+            merchant="Jane Doe",
+            series_id=series.id,
+        )
+    before = await accrual_by_month(session, months=3, today=date(2026, 7, 20))
+    assert [row.income_cents for row in before] == [30000, 30000, 30000]
+
+    item = recurring_cluster_item("Jane Doe", "inflow")
+    session.add(item)
+    await session.flush()
+    await apply_resolution(session, item, {"is_recurring": False}, resolved_by="manual")
+
+    expected = [("2026-07", 0, 30000, 0), ("2026-06", 0, 30000, 0), ("2026-05", 0, 30000, 0)]
+    assert series.status == SeriesStatus.ended
+    assert await accrual_by_month(session, months=3, today=date(2026, 7, 20)) == expected
+
+    await detect_recurring(session, None, date(2026, 7, 20))
+    assert series.status == SeriesStatus.ended
+    assert await accrual_by_month(session, months=3, today=date(2026, 7, 20)) == expected
+
+
+async def test_detection_untags_a_bill_already_answered_not_recurring(
+    session: AsyncSession,
+) -> None:
+    """A database that answered "not recurring" before untagging existed is repaired by
+    the next detection run."""
+    checking = await make_account(session, type=AccountType.checking)
+    series = await make_series(
+        session,
+        merchant="Jane Doe",
+        direction=Direction.inflow,
+        expected_cents=30000,
+        status=SeriesStatus.ended,
+    )
+    for posted_on in (date(2026, 5, 3), date(2026, 6, 3), date(2026, 7, 3)):
+        await make_txn(
+            session,
+            checking,
+            amount_cents=30000,
+            posted_on=posted_on,
+            description="Jane Doe",
+            merchant="Jane Doe",
+            series_id=series.id,
+        )
+    item = recurring_cluster_item("Jane Doe", "inflow")
+    item.status = ReviewStatus.resolved
+    item.resolution = {"is_recurring": False, "resolved_by": "manual"}
+    session.add(item)
+    await session.flush()
+    await detect_recurring(session, None, date(2026, 7, 20))
+    rows = await accrual_by_month(session, months=3, today=date(2026, 7, 20))
+    assert rows == [("2026-07", 0, 30000, 0), ("2026-06", 0, 30000, 0), ("2026-05", 0, 30000, 0)]
+    assert series.status == SeriesStatus.ended
+
+
+async def test_transfer_linked_inflow_of_an_income_series_is_neither_income_nor_other(
+    session: AsyncSession,
+) -> None:
+    """A leg of a transfer link is never counted, whatever series tag it carries."""
+    checking = await make_account(session, type=AccountType.checking)
+    savings = await make_account(session, type=AccountType.savings)
+    payroll = await _payroll_series(session)
+    await make_txn(
+        session,
+        checking,
+        amount_cents=250000,
+        posted_on=date(2026, 7, 1),
+        description="ACME PAYROLL",
+        series_id=payroll,
+    )
+    out = await make_txn(
+        session, savings, amount_cents=-30000, posted_on=date(2026, 7, 3), description="TO CHECKING"
+    )
+    inn = await make_txn(
+        session,
+        checking,
+        amount_cents=30000,
+        posted_on=date(2026, 7, 3),
+        description="FROM SAVINGS",
+        series_id=payroll,
+    )
+    session.add(TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule"))
+    await session.flush()
+    rows = await accrual_by_month(session, months=1, today=date(2026, 7, 20))
+    assert rows == [("2026-07", 250000, 0, 0)]
 
 
 async def test_accrual_by_month_excludes_linked_txns(session: AsyncSession) -> None:
