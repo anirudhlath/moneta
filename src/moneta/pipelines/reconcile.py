@@ -169,8 +169,8 @@ async def _retire_questions(
             if item.payload.get("series_id") in orphaned:
                 _supersede(item, "Series is supported only by suppressed observations", today)
             elif type(evidence) is int and evidence not in physical_ids:
-                # the provider withdrew the charge; a "yes" would apply an amount no
-                # stored transaction carries
+                # the provider withdrew the charge: a "yes" is rejected on apply, and the
+                # stale item hides the series from events' open-question check
                 _supersede(item, "Transaction is no longer reported by its provider", today)
         elif item.kind == ReviewKind.transfer_pair:
             old_out = item.payload.get("outflow_id")

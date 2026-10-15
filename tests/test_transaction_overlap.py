@@ -802,3 +802,50 @@ async def test_price_question_whose_transaction_is_gone_is_superseded(
     assert stale.resolution is not None
     assert stale.resolution["superseded_reason"] == reason
     assert current.status == ReviewStatus.open
+
+
+def price_question(series_id: int, **payload: Any) -> ReviewItem:
+    return ReviewItem(
+        kind=ReviewKind.price_change,
+        question="Did 'Acme Fitness' change price from $120.00 to $130.00?",
+        payload={
+            "series_id": series_id,
+            "currency": "USD",
+            "merchant": "Acme Fitness",
+            "old_cents": -12000,
+            "new_cents": -13000,
+            "occurred_on": "2026-07-01",
+            **payload,
+        },
+    )
+
+
+async def test_price_question_naming_a_suppressed_duplicate_stays_open(
+    session: AsyncSession,
+) -> None:
+    plaid, simplefin = await accounts(session)
+    series = await make_series(session, merchant="Acme Fitness", expected_cents=-12000)
+    root = await make_txn(session, plaid, description="ACME FITNESS", amount_cents=-13000)
+    copy = await make_txn(session, simplefin, description="ACME FITNESS", amount_cents=-13000)
+    await reconcile(session)
+    assert copy.duplicate_of_id == root.id
+    question = price_question(series.id, transaction_id=copy.id)
+    session.add(question)
+    stats = await reconcile(session)
+    assert stats.reviews_superseded == 0
+    assert question.status == ReviewStatus.open
+
+
+async def test_price_question_without_an_integer_transaction_id_stays_open(
+    session: AsyncSession,
+) -> None:
+    a, _ = await accounts(session)
+    series = await make_series(session, merchant="Acme Fitness", expected_cents=-12000)
+    live = await make_txn(session, a, description="ACME FITNESS", amount_cents=-13000)
+    legacy = price_question(series.id)
+    textual = price_question(series.id, transaction_id=str(live.id + 1000))
+    session.add_all([legacy, textual])
+    stats = await reconcile(session)
+    assert stats.reviews_superseded == 0
+    assert legacy.status == ReviewStatus.open
+    assert textual.status == ReviewStatus.open

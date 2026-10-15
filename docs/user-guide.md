@@ -582,10 +582,10 @@ You'll see an upfront summary, then one question at a time:
 | Price change ("Did X change price from $A to $B?") | `y` (applies the new amount) / `n` |
 | Merchant name | Type the real merchant name, or Enter to skip |
 
-Skipped items come back next time, except a price-change question whose transaction the
-provider no longer reports, which retires itself. Invalid input skips cleanly — nothing is guessed on your
-behalf. Answers are recorded with who resolved them (`manual` vs `llm`) so every
-classification is auditable.
+Skipped items come back next time, except questions whose evidence has gone away (for
+example a price-change question about a transaction the provider withdrew), which retire
+themselves. Invalid input skips cleanly — nothing is guessed on your behalf. Answers are
+recorded with who resolved them (`manual` vs `llm`) so every classification is auditable.
 
 ## LLM assist (optional)
 
