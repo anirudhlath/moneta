@@ -162,31 +162,54 @@ class LoanPayment(BaseModel):
     last_paid_on: date
 
 
+# a payment above this multiple of the payments before it is a one-off extra, not the
+# new obligation
+_ONE_OFF_FACTOR = 1.5
+_PRIOR_PAYMENTS = 3  # the yardstick: up to this many payments before the newest
+
+
+def _current_payment(amounts: list[int]) -> int:
+    """What the account is paid now, from its in-run payment magnitudes (oldest first).
+
+    The newest payment, so a plan winding down is not held at its old median — unless it
+    is more than _ONE_OFF_FACTOR x the median of the payments just before it, in which
+    case that median: a one-off extra must not set the obligation.
+    """
+    newest = amounts[-1]
+    prior = amounts[-1 - _PRIOR_PAYMENTS : -1]
+    if prior:
+        typical = statistics.median(prior)
+        if newest > _ONE_OFF_FACTOR * typical:
+            return round(typical)
+    return newest
+
+
 def loan_payment_stats(links: list[ClassifiedLink]) -> dict[int, LoanPayment]:
     """Per-loan-account payment cadence/amount derived from transfer-linked outflows.
 
     Banks collapse different loans' payments into one descriptor; the link's inflow
-    account is the reliable per-loan identity (design 2026-07-16 §3).
+    account is the reliable per-loan identity (design 2026-07-16 §3). Payments on one
+    day are one payment (a payment split in two), so cadence and amount read the same
+    per-day totals.
     """
-    by_account: dict[int, list[ClassifiedLink]] = {}
+    by_account: dict[int, dict[date, int]] = {}
     for link in links:
         if link.inflow_is_loan_like:
-            by_account.setdefault(link.inflow_account_id, []).append(link)
+            days = by_account.setdefault(link.inflow_account_id, {})
+            day = link.outflow_posted_on
+            days[day] = days.get(day, 0) + abs(link.outflow_amount_cents)
     result: dict[int, LoanPayment] = {}
-    for account_id, group in by_account.items():
-        dates = sorted({link.outflow_posted_on for link in group})
+    for account_id, days in by_account.items():
+        dates = sorted(days)
         match = match_cadence(dates)
         if match is None:
             cadence, run_start = Cadence.monthly, dates[0]  # loans are near-universally monthly
         else:
             cadence, run_start = match
-        amounts = [
-            abs(link.outflow_amount_cents) for link in group if link.outflow_posted_on >= run_start
-        ]
         result[account_id] = LoanPayment(
             account_id=account_id,
             cadence=cadence,
-            expected_cents=-round(statistics.median(amounts)),
+            expected_cents=-_current_payment([days[d] for d in dates if d >= run_start]),
             last_paid_on=dates[-1],
         )
     return result

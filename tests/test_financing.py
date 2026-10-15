@@ -150,3 +150,42 @@ async def test_loan_without_links_has_no_payment(session: AsyncSession) -> None:
 async def test_paid_off_loan_excluded(session: AsyncSession) -> None:
     await make_account(session, type=AccountType.loan, balance_cents=0)
     assert await compute_obligations(session, today=date(2026, 7, 7)) == []
+
+
+async def test_falling_payments_set_the_obligation_and_its_promo_warning(
+    session: AsyncSession,
+) -> None:
+    """A plan winding down is paid at its newest amount: the payoff estimate (and the
+    promo warning) must follow it, not an older median that hides the warning."""
+    checking = await make_account(session, type=AccountType.checking)
+    loan = await make_account(
+        session,
+        type=AccountType.loan,
+        name="Acme Furniture Plan",
+        balance_cents=-70000,
+        promo_expires_on=date(2027, 3, 1),
+    )
+    for month, amount in ((4, 12000), (5, 11000), (6, 10000), (7, 7000)):
+        out = await make_txn(
+            session,
+            checking,
+            amount_cents=-amount,
+            merchant="Acme Bank Payment",
+            posted_on=date(2026, month, 5),
+        )
+        inn = await make_txn(
+            session,
+            loan,
+            amount_cents=amount,
+            merchant="Acme Bank Payment",
+            posted_on=date(2026, month, 5),
+        )
+        await _link(session, out, inn)
+    await session.flush()
+
+    obs = await compute_obligations(session, today=date(2026, 7, 7))
+
+    assert obs[0].monthly_payment_cents == 7000  # the median, 10500, would say 7 months
+    assert obs[0].months_left == 10
+    assert obs[0].payoff_estimate == date(2027, 5, 3)  # today + 10 * 30 days
+    assert obs[0].deferred_interest_risk is True  # payoff lands after the 2027-03-01 promo end

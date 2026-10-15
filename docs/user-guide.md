@@ -465,6 +465,11 @@ into one shared descriptor (e.g. `"Synchrony Bank Payment Web Id"` for three unr
 store cards); grouping by descriptor would blend or lose individual payments, but grouping
 by the linked account keeps each obligation's amount and cadence correct.
 
+The payment is the account's **newest** payment, so a plan whose payments are winding down is
+judged by what you pay now rather than an older average. One exception: a payment more than
+1.5× the median of the (up to) three payments before it is a one-off extra — the obligation
+stays at that median. Payments to one account on the same day count as one payment, their sum.
+
 ### Financing cards
 
 Some store credit cards (e.g. Synchrony-issued cards) are used purely as 0%-promo
