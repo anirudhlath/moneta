@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.aggregator.base import AccountDTO, Snapshot, TransactionDTO
+from moneta.aggregator.base import AccountDTO, Snapshot, TransactionDTO, concat_snapshots
 from moneta.models import (
     Account,
     RecurringSeries,
@@ -318,3 +318,17 @@ async def test_sync_merges_one_bills_descriptors(session: AsyncSession) -> None:
     assert report.merchants_renamed == 1
     series = (await session.execute(select(RecurringSeries))).scalars().all()
     assert [(s.merchant, s.expected_cents) for s in series] == [("Acme Fitness", -4999)]
+
+
+def test_concat_snapshots_keeps_each_accounts_earliest_floor() -> None:
+    def snap(floors: dict[str, date]) -> Snapshot:
+        return Snapshot(accounts=[], transactions=[], holdings=[], complete_replays=floors)
+
+    merged = concat_snapshots(
+        [
+            snap({"acc-a": date(2026, 6, 1)}),
+            snap({"acc-a": date(2026, 5, 1), "acc-b": date(2026, 6, 9)}),
+            snap({}),
+        ]
+    )
+    assert merged.complete_replays == {"acc-a": date(2026, 5, 1), "acc-b": date(2026, 6, 9)}

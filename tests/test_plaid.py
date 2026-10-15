@@ -409,6 +409,111 @@ async def test_not_ready_status_is_not_fatal() -> None:
     assert snap.transactions == []
 
 
+def _dated(
+    txn_id: str, day: date, account_id: str = "acc-chk", pending: bool = False
+) -> dict[str, Any]:
+    return {
+        **_txn(txn_id, 12.0, pending=pending),
+        "account_id": account_id,
+        "date": day.isoformat(),
+    }
+
+
+async def test_complete_replay_reports_each_accounts_earliest_posted_date() -> None:
+    pages = [
+        httpx.Response(
+            200,
+            json=_sync_page(
+                [
+                    _dated("t1", date(2026, 6, 20)),
+                    _dated("t2", date(2026, 6, 1), account_id="acc-card"),
+                    # pending rows are never stored, so they never set a floor
+                    _dated("t3", date(2026, 4, 1), pending=True),
+                ],
+                True,
+            ),
+        ),
+        httpx.Response(
+            200,
+            json=_sync_page(
+                [
+                    _dated("t4", date(2026, 5, 3)),
+                    _dated("t5", date(2026, 5, 9), account_id="acc-brok", pending=True),
+                ],
+                False,
+            ),
+        ),
+    ]
+    adapter = PlaidAdapter(_plaid_client(_accounts_then_sync(pages)), [_item(["transactions"])])
+    snap = await adapter.fetch()
+    # acc-brok returned only a pending row: no floor, so none of its rows can be judged
+    assert snap.complete_replays == {"acc-chk": date(2026, 5, 3), "acc-card": date(2026, 6, 1)}
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["NOT_READY", "INITIAL_UPDATE_COMPLETE", "TRANSACTIONS_UPDATE_STATUS_UNKNOWN", None],
+)
+async def test_incomplete_history_reports_no_floors(status: str | None) -> None:
+    page = _sync_page([_dated("t1", date(2026, 6, 1))], False)
+    if status is None:
+        del page["transactions_update_status"]
+    else:
+        page["transactions_update_status"] = status
+    adapter = PlaidAdapter(
+        _plaid_client(_accounts_then_sync([httpx.Response(200, json=page)])),
+        [_item(["transactions"])],
+    )
+    snap = await adapter.fetch()
+    assert [t.id for t in snap.transactions] == ["t1"]  # rows still arrive
+    assert snap.complete_replays == {}
+
+
+async def test_only_items_with_a_complete_replay_report_floors() -> None:
+    def accounts(account_id: str) -> dict[str, Any]:
+        account = {
+            "account_id": account_id,
+            "name": "Everyday Checking",
+            "type": "depository",
+            "subtype": "checking",
+            "balances": {"current": 100.0},
+        }
+        return {"accounts": [account], "item": {"institution_name": "Acme Bank"}}
+
+    june_1 = date(2026, 6, 1)
+    pages = {
+        "access-done": [
+            httpx.Response(200, json=_sync_page([_dated("d1", june_1, "acc-done")], False))
+        ],
+        "access-wait": [
+            httpx.Response(
+                200,
+                json=_sync_page([_dated("w1", june_1, "acc-wait")], False, status="NOT_READY"),
+            )
+        ],
+        "access-dead": [
+            httpx.Response(200, json=_sync_page([_dated("x1", june_1, "acc-dead")], True)),
+            _plaid_error("ITEM_ERROR", "ITEM_LOGIN_REQUIRED", "re-link"),
+        ],
+    }
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        token = json.loads(request.content)["access_token"]
+        if request.url.path == "/accounts/get":
+            return httpx.Response(200, json=accounts(token.replace("access-", "acc-")))
+        return pages[token].pop(0)
+
+    items = [
+        PlaidItem(item_id=f"it-{name}", access_token=f"access-{name}", products=["transactions"])
+        for name in ("done", "wait", "dead")
+    ]
+    snap = await PlaidAdapter(_plaid_client(handle), items).fetch()
+    assert snap.complete_replays == {"acc-done": june_1}
+    # the item that failed mid-paging is dropped whole; the loading one still syncs
+    assert {a.id for a in snap.accounts} == {"acc-done", "acc-wait"}
+    assert len(snap.warnings) == 1
+
+
 _HOLDINGS_PAYLOAD = {
     "holdings": [
         {
