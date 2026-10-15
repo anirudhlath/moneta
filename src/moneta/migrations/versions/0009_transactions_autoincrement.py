@@ -17,6 +17,9 @@ depends_on = None
 def upgrade() -> None:
     # SQLite cannot add AUTOINCREMENT in place. Reflection does not report it either,
     # so any later batch rebuild of this table must pass the same table_kwargs.
+    # The rebuild drops a table that transfer_links and transactions itself
+    # reference, which is safe only while PRAGMA foreign_keys is off (the app's
+    # default: db.py never turns it on). init_db runs this inside one transaction.
     with op.batch_alter_table(
         "transactions", recreate="always", table_kwargs={"sqlite_autoincrement": True}
     ):

@@ -1,11 +1,13 @@
 from pathlib import Path
+from typing import Any
 
+import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from alembic.script import ScriptDirectory
-from sqlalchemy import inspect, select
+from sqlalchemy import event, inspect, select
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
@@ -211,4 +213,62 @@ async def test_0009_downgrade_restores_the_plain_table() -> None:
         assert await conn.run_sync(_autoincrement_tables) == set()
         ids = await conn.exec_driver_sql("SELECT id FROM transactions")
         assert list(ids.scalars()) == [1]
+    await engine.dispose()
+
+
+class _DiskFull(RuntimeError):
+    """Stands in for any failure partway through the 0009 table copy."""
+
+
+def _fail_on_drop_transactions(
+    _conn: Connection, _cursor: Any, statement: str, *_rest: Any
+) -> None:
+    if statement.strip().startswith("DROP TABLE transactions"):
+        raise _DiskFull("database or disk is full")
+
+
+def _upgrade_state(conn: Connection) -> tuple[object, list[str], bool, list[tuple[Any, ...]]]:
+    """Everything a half-applied upgrade could leave behind."""
+    insp = inspect(conn)
+    version = conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
+    leftovers = [t for t in insp.get_table_names() if t.startswith("_alembic_tmp")]
+    has_raw = "raw" in {c["name"] for c in insp.get_columns("accounts")}
+    rows = conn.exec_driver_sql(
+        "SELECT id, aggregator_id, duplicate_of_id FROM transactions ORDER BY id"
+    ).all()
+    return version, leftovers, has_raw, [tuple(r) for r in rows]
+
+
+@pytest.mark.parametrize("start", ["0007", "0008"])
+async def test_a_failed_upgrade_changes_nothing_and_the_rerun_is_clean(
+    tmp_path: Path, start: str
+) -> None:
+    # a file database: the live one is, and so is its commit behaviour
+    engine, _ = make_sessionmaker(f"sqlite+aiosqlite:///{tmp_path / 'm.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(_upgrade_to, start)
+        await conn.exec_driver_sql(_INSERT_ACCOUNT)
+        for txn_id, duplicate_of in ((3, None), (7, 3), (12, None)):
+            await conn.exec_driver_sql(
+                "INSERT INTO transactions (id, account_id, aggregator_id, posted_on,"
+                " amount_cents, description, raw, duplicate_of_id)"
+                " VALUES (?, 1, ?, '2026-07-01', -12000, 'CORNER CURRY ELMTON', '{}', ?)",
+                (txn_id, f"TRN-{txn_id}", duplicate_of),
+            )
+    rows = [(3, "TRN-3", None), (7, "TRN-7", 3), (12, "TRN-12", None)]
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _fail_on_drop_transactions)
+    with pytest.raises(_DiskFull):
+        await init_db(engine)
+    event.remove(engine.sync_engine, "before_cursor_execute", _fail_on_drop_transactions)
+
+    async with engine.connect() as conn:
+        # 0008's ADD COLUMN must not outlive the failed run, or the rerun hits
+        # "duplicate column name"; the half-built copy must not either
+        assert await conn.run_sync(_upgrade_state) == (start, [], start != "0007", rows)
+
+    await init_db(engine)
+    async with engine.connect() as conn:
+        assert await conn.run_sync(_upgrade_state) == ("0009", [], True, rows)
+        assert await conn.run_sync(_autoincrement_tables) == {"transactions"}
     await engine.dispose()

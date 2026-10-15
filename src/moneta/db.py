@@ -42,6 +42,14 @@ def _upgrade(conn: Connection) -> None:
         if current == _HEAD:
             return  # common case (every CLI command) — skip the alembic machinery
 
+    # sqlite3 opens a transaction only before DML, so ALTER TABLE ADD COLUMN and a
+    # batch rebuild's CREATE TABLE autocommit, and a failure halfway through
+    # leaves a database every later start refuses ("duplicate column name",
+    # "table _alembic_tmp_... already exists"). One explicit transaction makes the
+    # whole upgrade all-or-nothing; engine.begin() commits it or rolls it back.
+    # IMMEDIATE takes the write lock now, so contention fails before any change.
+    conn.exec_driver_sql("BEGIN IMMEDIATE")
+
     from alembic import command  # deferred: only imported when migrations actually run
     from alembic.config import Config
 
