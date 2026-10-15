@@ -470,7 +470,7 @@ The monthly payment is derived **per loan/financing account** (a credit card who
 financing check is still unanswered counts as one) from its transfer-linked payments,
 grouped by which account the money lands in — not by the bank's payment descriptor. This
 matters because banks often collapse several different cards' payments into one shared
-descriptor (e.g. `"Synchrony Bank Payment Web Id"` for three unrelated store cards);
+descriptor (e.g. `"ACME BANK PAYMENT WEB ID"` for three unrelated store cards);
 grouping by descriptor would blend or lose individual payments, but grouping by the linked
 account keeps each obligation's amount and cadence correct.
 
