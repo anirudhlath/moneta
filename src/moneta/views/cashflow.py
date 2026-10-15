@@ -3,19 +3,12 @@ from datetime import date
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.cadence import month_bounds
-from moneta.logical import LogicalData, load_logical_data
+from moneta.logical import load_logical_data
 from moneta.models import (
     LIQUID_ACCOUNT_TYPES,
     SPEND_ACCOUNT_TYPES,
 )
 from moneta.queries import ClassifiedLink, classified_links, linked_txn_ids, primary_currency
-
-
-def _financed_roots(logical: LogicalData) -> set[int]:
-    """Logical accounts whose own outflows are not spend: a loan-like account's purchases,
-    interest and fees are paid off by the payments `power` counts as its fixed cost
-    (spend_reason's "financed purchase")."""
-    return {account_id for account_id, a in logical.accounts.items() if a.loan_like}
 
 
 async def _accrual(
@@ -36,7 +29,6 @@ async def _accrual(
     if primary is None:
         primary = await primary_currency(session)
     logical = await load_logical_data(session)
-    financed = _financed_roots(logical)
     txns = [
         t
         for t in logical.transactions
@@ -44,7 +36,6 @@ async def _accrual(
         and logical.accounts[logical.account_roots[t.account_id]].type in SPEND_ACCOUNT_TYPES
         and logical.accounts[logical.account_roots[t.account_id]].currency == primary
         and (t.amount_cents > 0 if inflows else t.amount_cents < 0)
-        and not (t.amount_cents < 0 and logical.account_roots[t.account_id] in financed)
     ]
     sign = 1 if inflows else -1
     return sum(sign * t.amount_cents for t in txns if t.id not in excluded)
@@ -101,14 +92,12 @@ async def accrual_by_month(
     newest_end = bounds[0][2]
 
     logical = await load_logical_data(session)
-    financed = _financed_roots(logical)
     txns = [
         t
         for t in logical.transactions
         if oldest_start <= t.posted_on <= newest_end
         and logical.accounts[logical.account_roots[t.account_id]].type in SPEND_ACCOUNT_TYPES
         and logical.accounts[logical.account_roots[t.account_id]].currency == primary
-        and not (t.amount_cents < 0 and logical.account_roots[t.account_id] in financed)
     ]
     label_by_ym = {(start.year, start.month): label for label, start, _ in bounds}
     income_by_month = dict.fromkeys(label_by_ym.values(), 0)

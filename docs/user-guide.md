@@ -372,7 +372,7 @@ excluded rows render dim with the reason in the same column — one of:
 | `credit-card payment` | Outflow leg of a transfer paying a credit card (the underlying purchases are counted instead) |
 | `fixed cost (series X)` | Tagged to an active, non-discretionary recurring series (counted in `power`'s fixed costs instead) |
 | `non-spend account` | Posted to an account type that isn't spend-eligible (e.g. a loan or brokerage account) |
-| `financed purchase` | A purchase, interest charge or fee on a financing card — `financing_mode`, or a card whose financing question is still open. Its payments count as a fixed cost in `power` instead, so the purchase isn't counted twice. Known gap: a new financed purchase shows in no `power` figure until the card's first payment is linked (`moneta obligations` lists the balance meanwhile) |
+| `financed purchase` | A purchase, interest charge or fee on a financing card — `financing_mode`, or a card whose financing question is still open. `power`'s spent-so-far leaves it out, because the card's payments count as a fixed cost there instead (the payment line stands in for it). `power --history` and `moneta cashflow` count it once, at purchase time, since they exclude every transfer-linked payment. Known gap, `power` only: a new financed purchase shows in no `power` figure until the card's first payment is linked, and never if the card is paid from an account Moneta doesn't sync (`moneta obligations` lists the balance meanwhile) |
 | `foreign currency` | Posted to a non-primary-currency account (excluded from all aggregates) |
 
 `excluded_because` is the *first* matching reason in that order — a row only ever gets one.

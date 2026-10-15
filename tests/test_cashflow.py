@@ -210,14 +210,12 @@ async def test_accrual_by_month_year_boundary_and_equivalence(session: AsyncSess
         assert await accrual_spend(session, start, end) == spend_cents
 
 
-@pytest.mark.parametrize(
-    ("state", "spend"), [("financing mode", 0), ("open question", 0), ("plain card", 100000)]
-)
-async def test_accrual_excludes_financed_purchase(
-    session: AsyncSession, state: str, spend: int
-) -> None:
-    """History and `cashflow` agree with `power`: a financing card's purchase is paid by
-    its fixed-cost payments, so it is not spend; a plain card's purchase still is."""
+@pytest.mark.parametrize("state", ["financing mode", "open question", "plain card"])
+async def test_accrual_counts_financed_purchase_once(session: AsyncSession, state: str) -> None:
+    """The accrual views count a card's purchase once, at purchase time, whether or not
+    the card is loan-like: the payment toward it is a transfer-linked pair, which accrual
+    excludes, so the $1,000.00 purchase is the only spend. (`power`'s spent-so-far
+    leaves a financed purchase out because the payment line stands in for it.)"""
     checking = await make_account(session, type=AccountType.checking)
     card = await make_account(
         session, type=AccountType.credit, financing_mode=state == "financing mode"
@@ -243,7 +241,7 @@ async def test_accrual_excludes_financed_purchase(
     )
     session.add(TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule"))
     await session.flush()
-    assert await accrual_spend(session, date(2026, 7, 1), date(2026, 7, 31)) == spend
+    assert await accrual_spend(session, date(2026, 7, 1), date(2026, 7, 31)) == 100000
     assert await accrual_by_month(session, months=1, today=date(2026, 7, 20)) == [
-        ("2026-07", 0, spend)
+        ("2026-07", 0, 100000)
     ]
