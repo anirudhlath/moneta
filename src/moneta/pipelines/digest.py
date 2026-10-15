@@ -60,8 +60,9 @@ def _obligation_line(ob: Obligation) -> str:
     payoff = ob.payoff_estimate.isoformat() if ob.payoff_estimate else "?"
     promo = ob.promo_expires_on.isoformat() if ob.promo_expires_on else "?"
     return (
-        f"Deferred-interest risk: {ob.account_name!r} payoff est. {payoff} "
-        f"is after promo ends {promo}"
+        f"Promo ends before payoff: {ob.account_name!r} payoff est. {payoff} is after "
+        f"promo ends {promo} — interest applies to the remaining balance (back-dated on "
+        "deferred-interest plans)"
     )
 
 

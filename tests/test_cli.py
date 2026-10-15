@@ -1521,7 +1521,7 @@ def test_backup_command(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no
     assert dest.exists()
 
 
-def test_obligations_renders_deferred_interest_warning(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_obligations_renders_promo_warning(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     _isolate(monkeypatch, tmp_path)
     # /obligations resolves date.today() at request time — seed relative dates
     today = date.today()
@@ -1565,7 +1565,8 @@ def test_obligations_renders_deferred_interest_warning(tmp_path: Path, monkeypat
     result = runner.invoke(app, ["obligations"])
     assert result.exit_code == 0
     assert "Synchrony" in result.output  # rich may wrap the full name across cell lines
-    assert "deferred interest" in result.output  # payoff ~9mo out > promo ~2mo out
+    assert "promo ends" in result.output  # payoff ~9mo out > promo ~2mo out
+    assert "deferred interest risk" not in result.output  # a 0% plan may not be deferred
     assert "Traceback" not in result.output
 
 

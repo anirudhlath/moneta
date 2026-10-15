@@ -539,7 +539,10 @@ def obligations(json_output: JsonOption = False) -> None:
         )
     console.print(table)
     if any(ob["deferred_interest_risk"] for ob in rows):
-        console.print("[red]! payoff lands after the promo expires — deferred interest risk[/red]")
+        console.print(
+            "[red]! payoff lands after the promo ends — interest applies to the remaining "
+            "balance (back-dated on deferred-interest plans)[/red]"
+        )
 
 
 def _parse_bool_flag(value: str) -> bool:

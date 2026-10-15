@@ -287,8 +287,9 @@ just a topic:
 2. Set it: `MONETA_NTFY_TOPIC=https://ntfy.sh/<your-topic>` (env var), or add
    `ntfy_topic = "https://ntfy.sh/<your-topic>"` to `config.toml`.
 3. `moneta digest` — sends one plain-text push containing every series event since the last
-   digest, plus any financing obligation newly showing `deferred_interest_risk` (a risk that
-   clears re-notifies if it later reappears). Nothing new → nothing sent (no empty pings), but
+   digest, plus any financing obligation newly showing `deferred_interest_risk` (payoff lands
+   after the promo ends; a risk that clears re-notifies if it later reappears). Nothing new →
+   nothing sent (no empty pings), but
    moneta still remembers it has "seen" everything up to now.
 
 ```bash
@@ -314,7 +315,7 @@ the point. Unset `ntfy_topic` is a clean 400 with a setup hint, not a crash.
 
 The very first `moneta digest` baselines its cursor to setup time instead of replaying every
 series event in your history — only events from that point forward show up in digests
-(deferred-interest warnings are current-state, so they still send on the first run).
+(promo warnings are current-state, so they still send on the first run).
 
 ## Reading the numbers
 
@@ -455,8 +456,13 @@ that auto-ended after a gap) has resumed. A 404 for an unknown ID prints a clean
 ### `moneta obligations`
 
 Loans and 0%-promo financing, fully derived from observed transfers: monthly payment, balance,
-estimated months left, and a **deferred interest** warning when the payoff estimate lands after
-the promo expiry.
+estimated months left, and a red `!` when the payoff estimate lands after the promo expiry:
+"payoff lands after the promo ends — interest applies to the remaining balance (back-dated on
+deferred-interest plans)". A true 0% promo charges interest only from its end date; a
+deferred-interest plan charges it back to the purchase date. Either way the plan won't be paid
+off in time. A promo ending today with a balance left warns too. In `--json` and the API the
+warning is the `deferred_interest_risk` field — the name is kept for compatibility and means
+only "payoff lands after `promo_expires_on`", not that the plan is deferred-interest.
 
 The monthly payment is derived **per loan/financing account** from its transfer-linked
 payments, grouped by which account the money lands in — not by the bank's payment
@@ -514,7 +520,7 @@ moneta accounts --set-financing <ID> true|false    # mark a credit card as finan
 ```
 
 Type overrides survive re-syncs. `--set-promo` and `--set-financing` are manual fields —
-promo powers the deferred-interest warning; financing-mode gives a credit account loan
+promo powers the promo-ends-before-payoff warning; financing-mode gives a credit account loan
 semantics (its payments count as fixed costs instead of its purchases) without waiting on
 the `financing_account` review prompt. A financing-mode account shows as `credit (financing)`
 in the Type column.

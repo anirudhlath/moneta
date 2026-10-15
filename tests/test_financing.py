@@ -189,3 +189,37 @@ async def test_falling_payments_set_the_obligation_and_its_promo_warning(
     assert obs[0].months_left == 10
     assert obs[0].payoff_estimate == date(2027, 5, 3)  # today + 10 * 30 days
     assert obs[0].deferred_interest_risk is True  # payoff lands after the 2027-03-01 promo end
+
+
+async def test_promo_ending_today_with_a_balance_left_warns(session: AsyncSession) -> None:
+    """A promo that ends today while a balance remains is past saving: the warning holds."""
+    checking = await make_account(session, type=AccountType.checking)
+    loan = await make_account(
+        session,
+        type=AccountType.loan,
+        name="Acme Furniture Plan",
+        balance_cents=-30000,
+        promo_expires_on=date(2026, 7, 7),
+    )
+    for month in (5, 6, 7):
+        out = await make_txn(
+            session,
+            checking,
+            amount_cents=-10000,
+            merchant="Acme Bank Payment",
+            posted_on=date(2026, month, 5),
+        )
+        inn = await make_txn(
+            session,
+            loan,
+            amount_cents=10000,
+            merchant="Acme Bank Payment",
+            posted_on=date(2026, month, 5),
+        )
+        await _link(session, out, inn)
+    await session.flush()
+
+    obs = await compute_obligations(session, today=date(2026, 7, 7))
+
+    assert obs[0].payoff_estimate == date(2026, 10, 5)  # today + 3 * 30 days
+    assert obs[0].deferred_interest_risk is True

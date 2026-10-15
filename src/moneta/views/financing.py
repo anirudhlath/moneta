@@ -18,6 +18,9 @@ class Obligation(BaseModel):
     months_left: int | None
     payoff_estimate: date | None
     promo_expires_on: date | None
+    # True when payoff_estimate lands after promo_expires_on: interest will apply to the
+    # balance left at promo end (back-dated only on deferred-interest plans). The name
+    # predates that wording and is kept for API compatibility.
     deferred_interest_risk: bool
 
 

@@ -132,7 +132,8 @@ async def test_warned_set_adds_new_risk_and_suppresses_repeat(session: AsyncSess
     client = _fake_client(_ok_transport(seen))
     result = await run_digest(session, "https://ntfy.sh/x", today=date(2026, 7, 7), client=client)
     assert result.model_dump() == {"sent": True, "events": 0, "warnings": 1}
-    assert "Deferred-interest risk" in seen[0].content.decode()
+    assert "Promo ends before payoff" in seen[0].content.decode()
+    assert "Deferred-interest risk" not in seen[0].content.decode()
 
     state = await session.get(DigestState, 1)
     assert state is not None and state.warned_account_ids == [loan.id]
@@ -201,7 +202,7 @@ async def test_first_run_baselines_cursor_and_skips_history(session: AsyncSessio
 
 
 async def test_first_run_still_warns_despite_history_baseline(session: AsyncSession) -> None:
-    """Deferred-interest warnings are current-state, not history — the
+    """Promo warnings are current-state, not history — the
     first-run baseline must not suppress them the way it suppresses old
     events."""
     s = await make_series(session, merchant="Netflix")
@@ -213,7 +214,7 @@ async def test_first_run_still_warns_despite_history_baseline(session: AsyncSess
     result = await run_digest(session, "https://ntfy.sh/x", today=date(2026, 7, 7), client=client)
     assert result.model_dump() == {"sent": True, "events": 0, "warnings": 1}
     body = seen[0].content.decode()
-    assert "Deferred-interest risk" in body
+    assert "Promo ends before payoff" in body
     assert "Missed payment" not in body
 
     state = await session.get(DigestState, 1)

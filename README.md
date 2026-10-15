@@ -54,8 +54,9 @@ Existing apps (Origin, Copilot) fail in four specific ways that moneta is built 
   account's monthly payment is derived per-account from its transfer-linked
   payments (not merchant-string grouping, so shared bank descriptors across
   cards can't blend or drop a payment), giving balance ÷ payment = months
-  left, and a deferred-interest warning when payoff lands after
-  `promo_expires_on` (the one optional manual field in the whole system).
+  left, and a warning when payoff lands after `promo_expires_on` (the one
+  optional manual field in the whole system) — interest then applies to the
+  remaining balance, back-dated on deferred-interest plans.
 - **LLM as a gated second opinion** — ambiguous classifications go to an LLM in
   strict JSON mode; anything it isn't confident about lands in a human review
   queue. See [the LLM boundary](#the-llm-boundary) below.
@@ -202,7 +203,7 @@ Unset = no LLM; ambiguous items go to `moneta review` instead.
 | `moneta cashflow [--start D --end D]` | Accrual spend vs cash out for a range (default: this month) |
 | `moneta txns [--month M \| --start D --end D] [--account ID] [--merchant NAME] [--sources]` | Combined retained history; source audit includes superseded provider observations without counting them again |
 | `moneta recurring [--events] [--end\|--not-a-bill\|--habit\|--re-review ID]` | Series; missed payments/price increases; cancel, overrule, or reopen a series |
-| `moneta obligations` | Loans/financing: payment, months left, deferred-interest warnings |
+| `moneta obligations` | Loans/financing: payment, months left, promo-ends-before-payoff warnings |
 | `moneta review` | Resolve ambiguous classifications interactively |
 | `moneta digest [--json]` | Push new series events + financing warnings to ntfy.sh (cursor-tracked); cron with `moneta sync && moneta digest` |
 | `moneta accounts [--sources] [--set-type ID TYPE] [--set-promo ID DATE] [--set-financing ID true\|false]` | List logical accounts or original source records; set shared type / promo expiry / financing metadata |
