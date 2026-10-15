@@ -1394,3 +1394,23 @@ async def test_a_payment_plan_holds_across_a_month_with_only_a_deposit(
     events = (await session.execute(select(SeriesEvent))).scalars().all()
     # nothing posted around September's due date: one missed event, as for any bill
     assert [e.occurred_on for e in events if e.kind == EventKind.missed] == [date(2026, 9, 14)]
+
+
+async def test_a_habit_busy_across_a_gap_forms_no_series(session: AsyncSession) -> None:
+    """Three charges of one price 33 and 52 days apart look like a schedule with a skipped
+    month, but the merchant kept charging at real size in between: spending, not a bill."""
+    acct = await make_account(session)
+    first = date(2026, 3, 1)
+    for days, cents in ((0, -4000), (33, -4000), (85, -4000), (42, -9000), (50, -13000)):
+        await make_txn(
+            session,
+            acct,
+            amount_cents=cents,
+            merchant="Acme Charging",
+            posted_on=first + timedelta(days=days),
+        )
+
+    stats = await detect_recurring(session, llm=None, today=date(2026, 6, 1))
+
+    assert stats.new_series == 0
+    assert await _series(session) == []

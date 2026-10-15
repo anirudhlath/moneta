@@ -231,3 +231,36 @@ def test_a_habit_that_repeats_a_price_is_no_schedule_across_a_miss() -> None:
         _t(date(2026, 8, 23), -10000),
     ]
     assert split_bills(charges) is None
+
+
+def test_a_habit_busy_across_the_gap_is_no_missed_month() -> None:
+    # one price 33 and 52 days apart reads as a schedule with a skipped month, but the
+    # merchant kept charging at real size through the gap: a habit, not a skipped installment
+    first = date(2026, 3, 1)
+    price = [first, first + timedelta(days=33), first + timedelta(days=85)]
+    busy = [first + timedelta(days=33 + 9), first + timedelta(days=33 + 17)]
+    charges = [
+        *(_t(d, -4000) for d in price),
+        _t(busy[0], -9000),
+        _t(busy[1], -13000),
+    ]
+    assert match_across_a_miss(price) is not None  # the dates alone would bridge
+    assert split_bills(charges) is None
+
+
+def test_one_real_size_charge_in_the_gap_still_bridges_and_two_do_not() -> None:
+    installments = [*_monthly(15, range(6, 9), -120000), _t(date(2026, 10, 15), -120000)]
+    deposit = _t(date(2026, 9, 1), -210000)
+    assert split_bills([*installments, deposit]) == [installments]
+    assert split_bills([*installments, deposit, _t(date(2026, 9, 3), -90000)]) is None
+
+
+def test_small_charges_in_the_gap_do_not_count_as_the_merchant_being_busy() -> None:
+    # fees under a quarter of the installment are adjustments, so the merchant stayed quiet
+    installments = [*_monthly(15, range(6, 9), -120000), _t(date(2026, 10, 15), -120000)]
+    gap = [
+        _t(date(2026, 9, 1), -210000),
+        _t(date(2026, 9, 2), -14000),
+        _t(date(2026, 9, 4), -20000),
+    ]
+    assert split_bills([*installments, *gap]) == [installments]

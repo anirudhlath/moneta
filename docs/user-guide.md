@@ -430,13 +430,18 @@ place, so `Streamco` and `Streamco Plus` stay apart. A prefix shared by many unr
 names, such as a payment rail (`Zelle Payment To …`), absorbs nothing. A merchant can
 also have several series: if a subscription has irregular purchases alongside it, or two
 subscriptions at the same price bill on different days, each schedule is its own series
-and the other charges are ordinary spending. A charge that lands after a schedule's
-newest charge, before the next one is due, counts the same way: a term deposit beside a
-monthly payment-plan installment is ordinary spending, and the installment alone is the
-fixed cost. One month paid from an account Moneta can't see does not break the plan: the
-next installment continues it, and that month shows as a missed payment. A merchant
-whose amounts just vary month to month stays one series, and a small fee alongside it
-does not split it. When a rename or merge leaves two series for one bill, the sync folds
+and the other charges are ordinary spending. A charge of at least a quarter of the bill's
+amount that lands after a schedule's newest charge, while the next one is not yet nearly
+due (6 days short of its due date for a monthly bill), counts the same way: a term deposit
+beside a monthly payment-plan installment is ordinary spending, and the installment alone
+is the fixed cost. Once a merchant has split like this, one month paid from an account
+Moneta can't see does not break the plan: the next installment continues it, and that
+month shows as a missed payment. That holds only when nothing was charged around the
+missed due date and the merchant did not keep charging at real size through the gap (a
+habit stays busy in between; a missed installment leaves the merchant quiet). A merchant
+that has not split is judged on its newest run as before, so a missed month cuts that run
+short. A merchant whose amounts just vary month to month stays one series, and a small fee
+alongside it does not split it. When a rename or merge leaves two series for one bill, the sync folds
 them into one, keeping their events. A price jump of more than 20% starts a new series
 and the old one goes stale.
 

@@ -102,11 +102,17 @@ def concurrent_tracks(band: Sequence[Transaction]) -> list[list[Transaction]] | 
     return None
 
 
-def _across_a_miss(dates: list[date], group: Sequence[Transaction]) -> tuple[Cadence, date] | None:
+def _across_a_miss(
+    unit: Sequence[Transaction], group: Sequence[Transaction]
+) -> tuple[Cadence, date] | None:
     """A unit's monthly schedule across one missed month (an installment paid from an
     account that isn't linked). Not when the merchant charged anything around the missed
-    due date: that is the month's bill at another size. Not when the unit charges twice
-    within a month: a habit that repeats a price is not a schedule."""
+    due date: that is the month's bill at another size. Not when two of the unit's
+    charges are less than 18 days apart: a habit that repeats a price is not a schedule.
+    Not when the merchant kept charging at real size through the gap (more than one
+    charge of at least `MINOR_FRACTION` of the unit's median): a missed installment
+    leaves the merchant quiet."""
+    dates = _dates(unit)
     bridged = match_across_a_miss(dates)
     if bridged is None:
         return None
@@ -117,7 +123,10 @@ def _across_a_miss(dates: list[date], group: Sequence[Transaction]) -> tuple[Cad
     shortest = CADENCE_DAYS[cadence] - 2 * TOLERANCE[cadence]
     if any((b - a).days < shortest for a, b in itertools.pairwise(dates)):
         return None
-    return cadence, start
+    after = dates[dates.index(before) + 1]
+    floor = statistics.median(abs(t.amount_cents) for t in unit) * MINOR_FRACTION
+    busy = sum(1 for t in group if before < t.posted_on < after and abs(t.amount_cents) >= floor)
+    return None if busy > 1 else (cadence, start)
 
 
 def _scheduled_units(
@@ -143,7 +152,7 @@ def _scheduled_units(
     extras = False
     for unit in units:
         dates = _dates(unit)
-        match = match_cadence(dates) or _across_a_miss(dates, group)
+        match = match_cadence(dates) or _across_a_miss(unit, group)
         if match is None:
             continue
         scheduled.append(unit)
