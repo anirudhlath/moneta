@@ -4,6 +4,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from moneta.api import create_app
+from moneta.logical import load_logical_data
 from moneta.models import AccountType, ReviewItem, ReviewKind, SeriesStatus, TransferLink
 from moneta.views.power import power_report
 from moneta.views.transactions import transactions_report
@@ -422,3 +423,27 @@ async def test_financed_purchase_reason(session: AsyncSession) -> None:
         "Corner Curry": (True, None),
         "Acme Loan Fee": (False, "non-spend account"),
     }
+
+
+async def test_open_financing_question_on_a_non_credit_account_is_not_loan_like(
+    session: AsyncSession,
+) -> None:
+    """Only credit cards are asked the financing question. After a later `--set-type`
+    to checking the stale open question is inert: the account is not loan-like and its
+    purchases are spend again."""
+    account = await make_account(session, type=AccountType.checking)
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.financing_account, question="q", payload={"account_id": account.id}
+        )
+    )
+    await make_txn(
+        session, account, amount_cents=-100000, merchant="Corner Curry", posted_on=date(2026, 7, 2)
+    )
+    await session.flush()
+
+    logical = await load_logical_data(session)
+    [row] = await transactions_report(session, date(2026, 7, 1), date(2026, 7, 31))
+
+    assert logical.accounts[account.id].loan_like is False
+    assert (row.counted_in_spend, row.excluded_because) == (True, None)

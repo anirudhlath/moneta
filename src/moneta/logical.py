@@ -31,7 +31,7 @@ class LogicalAccount:
     source: str
     mask: str | None
     balance_account_id: int
-    financing_pending: bool  # an open financing question no one has ruled on yet
+    financing_pending: bool  # a credit card's open financing question no one has ruled on
 
     @property
     def loan_like(self) -> bool:
@@ -157,7 +157,8 @@ async def load_logical_data(session: AsyncSession) -> LogicalData:
             source=root.source,
             mask=root.mask,
             balance_account_id=latest.id,
-            financing_pending=root_id in pending_financing,
+            # only credit cards are asked; a stale question after a type change is inert
+            financing_pending=root_id in pending_financing and root.type == AccountType.credit,
         )
 
     transaction_roots = _resolve_roots(
