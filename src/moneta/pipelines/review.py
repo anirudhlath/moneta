@@ -19,6 +19,7 @@ from moneta.logical import load_logical_data
 from moneta.models import (
     Account,
     AliasSource,
+    Direction,
     LinkMethod,
     MerchantAlias,
     RecurringSeries,
@@ -518,6 +519,8 @@ def _validated(item: ReviewItem, answer: dict[str, Any]) -> dict[str, Any] | Non
         return None
     if item.kind == ReviewKind.recurring_cluster:
         label = _classification(answer)
+        if label == "habit" and item.payload.get("direction") == Direction.inflow:
+            return None  # habit is spending only: it would silently drop income from power
         return None if label is None else _cluster_resolution(label)
     return None
 

@@ -219,6 +219,59 @@ async def test_confident_not_recurring_answer_suppresses_the_group(session: Asyn
     assert stats.new_series == 0 and stats.review == 0
 
 
+async def _open_income_question(session: AsyncSession) -> ReviewItem:
+    """An irregular paycheck: steady amounts at bill-like gaps (10 and 45 days)."""
+    acct = await make_account(session)
+    for d in (date(2026, 4, 1), date(2026, 4, 11), date(2026, 5, 26)):
+        await make_txn(session, acct, amount_cents=250000, merchant="Acme Payroll", posted_on=d)
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.payload["direction"] == "inflow"
+    return item
+
+
+async def test_confident_habit_answer_on_income_is_left_for_a_human(
+    session: AsyncSession,
+) -> None:
+    item = await _open_income_question(session)
+    llm = ScriptedLLM({"Acme Payroll": {"classification": "habit", "confident": True}})
+
+    assert await autoreview_items(session, llm) == 0
+
+    assert len(llm.prompts) == 1  # it was asked; the answer is what degrades
+    assert item.status == ReviewStatus.open and item.resolution is None
+    assert "llm_flagged" not in item.payload  # still askable next sync
+    # a discretionary income series would silently leave power's income
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.new_series == 0
+
+
+async def test_confident_bill_answer_on_income_resolves(session: AsyncSession) -> None:
+    item = await _open_income_question(session)
+    llm = ScriptedLLM({"Acme Payroll": {"classification": "bill", "confident": True}})
+
+    assert await autoreview_items(session, llm) == 1
+
+    assert item.resolution == {"is_recurring": True, "resolved_by": "llm"}
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.new_series == 1
+    series = (await session.execute(select(RecurringSeries))).scalar_one()
+    assert series.direction == Direction.inflow and series.discretionary is False
+
+
+async def test_recurring_prompt_for_income_says_a_regular_income_stream_is_a_bill(
+    session: AsyncSession,
+) -> None:
+    await _open_income_question(session)
+    llm = ScriptedLLM({})
+
+    await autoreview_items(session, llm)
+
+    (prompt,) = llm.prompts
+    assert "direction: inflow" in prompt
+    assert "paycheck" in prompt and "Spending only, never income" in prompt
+
+
 @pytest.mark.parametrize(
     "answer",
     [
