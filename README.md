@@ -41,8 +41,9 @@ Existing apps (Origin, Copilot) fail in four specific ways that moneta is built 
   amount-stability analysis over normalized merchants, for outflows (bills) *and*
   inflows (paychecks). Series events: missed payment, price increase, new series.
   Stale series auto-end; a genuinely new charge at cadence revives them.
-- **Transfer dedup** — candidate pairs scored on amount, date proximity, and
-  account direction; high-confidence pairs auto-link, ambiguous ones escalate.
+- **Transfer dedup** — opposite-amount pairs up to 6 days apart, scored on date
+  proximity, transfer wording and account type; a lone pair that scores high *and*
+  carries transfer wording auto-links, the rest escalate.
   Human decisions remain effective across provider aliases and later automatic review.
 - **RSU-vesting-aware net worth** — liquid + *vested* holdings − liabilities;
   unvested reported separately, never summed in. Vesting quantities import via CSV

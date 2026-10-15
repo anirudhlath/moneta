@@ -47,7 +47,9 @@ _TRANSFER_PAT = re.compile(
     r"payment|pymt|transfer|xfer|ach|autopay|epay|billpay|deposit", re.IGNORECASE
 )
 _MAX_DAYS = 6
-_AUTO_LINK = 0.8
+# Scores are integer tenths: summed float tenths drift (0.5 + 0.2 + 0.1 is
+# 0.7999999999999999), so a pair meant to score exactly the threshold never linked.
+_AUTO_LINK = 8
 
 _LLM_PROMPT = """An outflow transaction may be an internal transfer. Pick its matching inflow.
 Outflow: {out_desc!r} on {out_date}, amount {amount}
@@ -60,25 +62,42 @@ class TransferStats(BaseModel):
     review: int = 0
 
 
+@dataclass(frozen=True)
+class PairScore:
+    """A candidate pair's score in integer tenths, and whether a transfer keyword
+    appears in either leg's description."""
+
+    tenths: int
+    keyword: bool
+
+    @property
+    def auto_links(self) -> bool:
+        """A rule link needs a keyword match, whatever the score."""
+        return self.keyword and self.tenths >= _AUTO_LINK
+
+
+def score_pair(out: Transaction, inn: Transaction, out_type: AccountType) -> PairScore:
+    """Base 5; +2 when the legs post 0-1 days apart, else +1 at 2-3 days; +2 for a
+    transfer keyword; +1 when the outflow leaves a checking or savings account."""
+    tenths = 5
+    diff = abs((inn.posted_on - out.posted_on).days)
+    if diff <= 1:
+        tenths += 2
+    elif diff <= 3:
+        tenths += 1
+    keyword = bool(_TRANSFER_PAT.search(out.description) or _TRANSFER_PAT.search(inn.description))
+    if keyword:
+        tenths += 2
+    if out_type in (AccountType.checking, AccountType.savings):
+        tenths += 1
+    return PairScore(tenths, keyword)
+
+
 @dataclass
 class _Cand:
     outflow: Transaction
     inflow: Transaction
-    confidence: float
-
-
-def _confidence(out: Transaction, inn: Transaction, out_type: AccountType) -> float:
-    conf = 0.5
-    diff = abs((inn.posted_on - out.posted_on).days)
-    if diff <= 1:
-        conf += 0.2
-    elif diff <= 3:
-        conf += 0.1
-    if _TRANSFER_PAT.search(out.description) or _TRANSFER_PAT.search(inn.description):
-        conf += 0.2
-    if out_type in (AccountType.checking, AccountType.savings):
-        conf += 0.1
-    return conf
+    score: PairScore
 
 
 @dataclass(frozen=True)
@@ -207,15 +226,20 @@ async def link_transfers(session: AsyncSession, llm: Classifier | None) -> Trans
                 or abs((inn.posted_on - out.posted_on).days) > _MAX_DAYS
             ):
                 continue
-            conf = _confidence(
+            score = score_pair(
                 out, inn, logical.accounts[logical.account_roots[out.account_id]].type
             )
-            by_outflow.setdefault(out.id, []).append(_Cand(out, inn, conf))
+            by_outflow.setdefault(out.id, []).append(_Cand(out, inn, score))
 
+    # reviewed choices first, then the strongest group; equal scores are exact integer
+    # ties, which the lower outflow id breaks
     ordered = sorted(
         by_outflow.values(),
-        key=lambda cands: (cands[0].outflow.id in selected, max(c.confidence for c in cands)),
-        reverse=True,
+        key=lambda cands: (
+            cands[0].outflow.id not in selected,
+            -max(c.score.tenths for c in cands),
+            cands[0].outflow.id,
+        ),
     )
     used: set[int] = set()
     for original in ordered:
@@ -229,17 +253,17 @@ async def link_transfers(session: AsyncSession, llm: Classifier | None) -> Trans
             continue
         if out.id in selected:
             manual = choices[out.id].method == LinkMethod.manual
-            cands[0].confidence = 1.0 if manual else 0.9
-            _add_link(session, cands[0], LinkMethod.manual if manual else LinkMethod.llm, used)
+            method = LinkMethod.manual if manual else LinkMethod.llm
+            _add_link(session, cands[0], method, 10 if manual else 9, used)
             stats.linked += 1
             continue
-        if len(original) == 1 and cands[0].confidence >= _AUTO_LINK:
-            _add_link(session, cands[0], LinkMethod.rule, used)
+        if len(original) == 1 and cands[0].score.auto_links:
+            _add_link(session, cands[0], LinkMethod.rule, cands[0].score.tenths, used)
             stats.linked += 1
             continue
         picked = await _llm_pick(llm, cands) if llm else None
         if picked is not None:
-            _add_link(session, picked, LinkMethod.llm, used)
+            _add_link(session, picked, LinkMethod.llm, picked.score.tenths, used)
             stats.linked += 1
         else:
             _open_review(session, out, [c.inflow.id for c in cands], reviewed, stats)
@@ -247,12 +271,14 @@ async def link_transfers(session: AsyncSession, llm: Classifier | None) -> Trans
     return stats
 
 
-def _add_link(session: AsyncSession, cand: _Cand, method: LinkMethod, used: set[int]) -> None:
+def _add_link(
+    session: AsyncSession, cand: _Cand, method: LinkMethod, tenths: int, used: set[int]
+) -> None:
     session.add(
         TransferLink(
             outflow_id=cand.outflow.id,
             inflow_id=cand.inflow.id,
-            confidence=cand.confidence,
+            confidence=tenths / 10,
             method=method,
         )
     )

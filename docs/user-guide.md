@@ -392,6 +392,27 @@ The footer has two lines:
   claim any parity — a full-month view includes future-dated rows that `power` hasn't
   counted yet, and a past month has no "through today" concept at all.
 
+### How transfers are matched
+
+A transfer between two of your accounts (checking → savings, checking → a card payment)
+is linked, so neither leg counts as income or spend. A candidate is an outflow and an
+inflow of exactly opposite amounts, on two different accounts in the same currency,
+posted at most 6 days apart. Each candidate pair is scored in points:
+
+| Points | When |
+|---|---|
+| 5 | every candidate |
+| +2 | the legs post 0–1 days apart (+1 at 2–3 days; nothing at 4–6) |
+| +2 | either description has transfer wording: `payment`, `pymt`, `transfer`, `xfer`, `ach`, `autopay`, `epay`, `billpay` or `deposit` (any case) |
+| +1 | the outflow leaves a checking or savings account |
+
+An outflow with exactly one candidate links automatically when the pair scores 8 or more
+**and** has transfer wording. A same-amount pair with no transfer wording is as often a
+coincidence as a transfer, so it is never linked on points alone. Every other case goes
+to the LLM when one is configured, else to `moneta review` as a transfer question. When
+two outflows want the same inflow, the higher score wins and an equal score goes to the
+outflow Moneta stored first; the other outflow is asked about.
+
 ### `moneta networth`
 
 Liquid balances + **vested** holdings − liabilities. Unvested shares are listed separately as
