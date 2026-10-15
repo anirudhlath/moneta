@@ -258,9 +258,11 @@ async def test_a_failed_upgrade_changes_nothing_and_the_rerun_is_clean(
     rows = [(3, "TRN-3", None), (7, "TRN-7", 3), (12, "TRN-12", None)]
 
     event.listen(engine.sync_engine, "before_cursor_execute", _fail_on_drop_transactions)
-    with pytest.raises(_DiskFull):
-        await init_db(engine)
-    event.remove(engine.sync_engine, "before_cursor_execute", _fail_on_drop_transactions)
+    try:
+        with pytest.raises(_DiskFull):
+            await init_db(engine)
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _fail_on_drop_transactions)
 
     async with engine.connect() as conn:
         # 0008's ADD COLUMN must not outlive the failed run, or the rerun hits

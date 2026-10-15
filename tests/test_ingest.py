@@ -3,6 +3,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from loguru import logger
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -470,6 +471,26 @@ async def test_complete_replay_deletes_a_row_it_no_longer_returns(session: Async
     again = await ingest_snapshot(session, _replay(_row("t1", JUNE_1)))
     assert again.deleted_transactions == 0
     assert await _stored_ids(session) == {"t1"}
+
+
+async def test_a_deleted_row_is_logged_with_enough_to_restore_it(session: AsyncSession) -> None:
+    await ingest_snapshot(session, _replay(_row("t1", JUNE_1), _row("t2", JUNE_15)))
+    account = (await session.scalars(select(Account))).one()
+    messages: list[str] = []
+    sink_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="INFO")
+    try:
+        await ingest_snapshot(session, _replay(_row("t1", JUNE_1)))
+    finally:
+        logger.remove(sink_id)
+
+    (line,) = [m for m in messages if "deleted withdrawn" in m]
+    # the row's own provider id, the account it belongs to (both ids), when and how much
+    assert "transaction t2 " in line
+    assert f"account {account.id} " in line
+    assert "plaid-acme" in line
+    assert str(JUNE_15) in line
+    assert "-12000" in line
+    assert "CORNER CURRY ELMTON" in line
 
 
 async def test_incomplete_replay_deletes_nothing(session: AsyncSession) -> None:

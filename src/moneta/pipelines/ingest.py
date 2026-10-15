@@ -226,19 +226,28 @@ async def _delete_absent(session: AsyncSession, gone: set[int]) -> None:
                 Transaction.id,
                 Transaction.series_id,
                 Transaction.aggregator_id,
+                Transaction.account_id,
+                Account.aggregator_id,
                 Transaction.posted_on,
                 Transaction.amount_cents,
                 Transaction.description,
-            ).where(Transaction.id.in_(gone))
+            )
+            .join(Account, Account.id == Transaction.account_id)
+            .where(Transaction.id.in_(gone))
         )
     ).all()
     tags: dict[int, int | None] = {tid: sid for tid, sid, *_ in withdrawn}
-    for tid, _sid, aggregator_id, posted_on, cents, desc in sorted(withdrawn, key=lambda r: r[0]):
+    for tid, _sid, aggregator_id, acct_pk, acct_aggregator_id, posted_on, cents, desc in sorted(
+        withdrawn, key=lambda r: r[0]
+    ):
         # the store is the only copy of the history: keep enough to restore a wrong deletion
         logger.info(
-            "ingest: deleted withdrawn transaction {} (id {}) posted {} amount_cents {} {!r}",
+            "ingest: deleted withdrawn transaction {} (id {}) in account {} (provider id {})"
+            " posted {} amount_cents {} {!r}",
             aggregator_id,
             tid,
+            acct_pk,
+            acct_aggregator_id,
             posted_on,
             cents,
             desc,

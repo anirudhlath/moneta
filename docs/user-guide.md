@@ -143,13 +143,12 @@ deletes original provider observations.
 
 `moneta reconcile` rebuilds overlap, transfers, recurring estimates, and events from
 stored data. It fetches no providers, calls no LLM, and does not advance sync
-freshness. Use `moneta sync` to obtain upstream corrections: a changed amount/date
-can dissolve a former duplicate and invalid transfer links are revalidated; a Plaid
-transaction the bank stops reporting is deleted and its SimpleFIN duplicate becomes the
-counted copy. The
-original reviewed answers remain recorded. To correct an uncertain transaction
-match, use its numbered overlap question in `moneta review`; `0` explicitly chooses
-none, while Enter leaves it unanswered.
+freshness. Use `moneta sync` to obtain upstream corrections: a changed amount/date can
+dissolve a former duplicate and invalid transfer links are revalidated; a Plaid
+transaction the bank stops reporting is deleted and its SimpleFIN duplicate becomes
+the counted copy. The original reviewed answers remain recorded. To correct an
+uncertain transaction match, use its numbered overlap question in `moneta review`; `0`
+explicitly chooses none, while Enter leaves it unanswered.
 
 All aggregate views still use one primary currency; linking incompatible currencies
 is rejected and no conversion is inferred. Holdings use one source's available set
