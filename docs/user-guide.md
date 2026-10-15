@@ -516,6 +516,7 @@ moneta accounts --link-source <SOURCE_ID> --to <ROOT_ID>
 moneta accounts --unlink-source <SOURCE_ID>
 moneta accounts --set-type <ID> <TYPE>             # checking|savings|credit|brokerage|loan|unknown
 moneta accounts --set-promo <ID> YYYY-MM-DD        # promo expiry for a financing account
+moneta accounts --set-promo <ID> none              # clear the promo date (an empty value works too)
 moneta accounts --set-financing <ID> true|false    # mark a credit card as financing (loan semantics)
 ```
 
@@ -529,8 +530,9 @@ Metadata writes using a source alias ID update its logical root. Explicit financ
 choices, including `false`, are recorded and settle related open financing questions.
 An unconfigured root inherits a sole saved financing/promotion choice from its aliases;
 an explicit root choice takes precedence. Clearing financing with `false`, or clearing
-the promotion through an account PATCH with `{"promo_expires_on": null}`, remains
-effective on subsequent syncs. A promotion-only edit does not answer financing questions.
+the promotion with `--set-promo <ID> none` (an account PATCH with
+`{"promo_expires_on": null}`), remains effective on subsequent syncs. A promotion-only edit
+does not answer financing questions.
 Link/unlink cannot be combined with each other or metadata writes; `--link-source`
 and `--to` must appear together. Invalid IDs, types, financing values, dates, and
 conflicting flags fail before any request. Linking rejects cycles, incompatible

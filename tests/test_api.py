@@ -989,3 +989,16 @@ async def test_power_history_default_is_six_months(client: httpx.AsyncClient) ->
     r = await client.get("/power/history")
     assert r.status_code == 200
     assert len(r.json()) == 6
+
+
+async def test_patch_account_null_clears_promo(client: httpx.AsyncClient) -> None:
+    await client.post("/sync")
+    acct_id = (await client.get("/accounts")).json()[0]["id"]
+    await client.patch(f"/accounts/{acct_id}", json={"promo_expires_on": "2026-12-31"})
+
+    r = await client.patch(f"/accounts/{acct_id}", json={"promo_expires_on": None})
+
+    assert r.status_code == 200
+    assert (await client.get("/accounts")).json()[0]["promo_expires_on"] is None
+    await client.post("/sync")  # a re-sync must not bring the cleared date back
+    assert (await client.get("/accounts")).json()[0]["promo_expires_on"] is None

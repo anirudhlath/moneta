@@ -206,7 +206,7 @@ Unset = no LLM; ambiguous items go to `moneta review` instead.
 | `moneta obligations` | Loans/financing: payment, months left, promo-ends-before-payoff warnings |
 | `moneta review` | Resolve ambiguous classifications interactively |
 | `moneta digest [--json]` | Push new series events + financing warnings to ntfy.sh (cursor-tracked); cron with `moneta sync && moneta digest` |
-| `moneta accounts [--sources] [--set-type ID TYPE] [--set-promo ID DATE] [--set-financing ID true\|false]` | List logical accounts or original source records; set shared type / promo expiry / financing metadata |
+| `moneta accounts [--sources] [--set-type ID TYPE] [--set-promo ID DATE\|none] [--set-financing ID true\|false]` | List logical accounts or original source records; set shared type / promo expiry (`none` clears it) / financing metadata |
 | `moneta accounts --link-source ID --to ID` / `--unlink-source ID` | Confirm or reverse a shared account identity; refresh derived reports |
 | `moneta reconcile [--json]` | Reconcile stored provider overlap and rebuild estimates; no provider fetch |
 | `moneta import vesting <file.csv>` | Vesting data (`symbol,vested_quantity,unvested_quantity`) |

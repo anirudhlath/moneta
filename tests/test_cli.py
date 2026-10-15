@@ -1914,3 +1914,30 @@ def test_networth_renders_logical_vesting_warnings(
     assert result.exit_code == 0
     assert "Conflicting vesting" in result.output
     assert "requires review" in result.output
+
+
+@pytest.mark.parametrize(
+    ("value", "sent"),
+    [("2026-12-31", "2026-12-31"), ("none", None), ("None", None), (" NONE ", None), ("", None)],
+)
+def test_accounts_set_promo_sends_date_or_clears(
+    monkeypatch: pytest.MonkeyPatch, value: str, sent: str | None
+) -> None:
+    calls: list[tuple[str, str, Any]] = []
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        calls.append((method, path, json_body))
+        if method == "GET":
+            return []
+        return {"ok": True}
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["accounts", "--set-promo", "1", value])
+    assert result.exit_code == 0, result.output
+    assert ("PATCH", "/accounts/1", {"promo_expires_on": sent}) in calls
+    assert "Traceback" not in result.output
