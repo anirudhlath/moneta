@@ -30,6 +30,7 @@ from moneta.pipelines.review import (
     verify_series,
 )
 from moneta.pipelines.run import run_sync
+from moneta.views.power import power_report
 from tests.conftest import RecordingAdapter
 from tests.factories import make_account, make_price_change_item, make_series, make_txn
 
@@ -167,18 +168,85 @@ async def test_confident_recurring_answer_feeds_next_detection(session: AsyncSes
         await make_txn(session, acct, amount_cents=-30000, merchant="Odd Timing Co", posted_on=d)
     await detect_recurring(session, llm=None, today=date(2026, 7, 1))  # opens the review item
     assert len(await _open_items(session)) == 1
-    llm = ScriptedLLM({"Odd Timing Co": {"is_recurring": True, "confident": True}})
+    llm = ScriptedLLM({"Odd Timing Co": {"classification": "bill", "confident": True}})
     assert await autoreview_items(session, llm) == 1
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.resolution == {"is_recurring": True, "resolved_by": "llm"}  # a human's "b"
     # consumes the force map
     stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
     assert stats.new_series == 1
+    series = (await session.execute(select(RecurringSeries))).scalar_one()
+    assert series.discretionary is False
+
+
+async def test_confident_habit_answer_keeps_it_out_of_fixed_costs(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    # steady amounts at irregular, bill-like gaps (12 and 40 days): detection asks
+    for d in (date(2026, 4, 1), date(2026, 4, 13), date(2026, 5, 23)):
+        await make_txn(session, acct, amount_cents=-1800, merchant="Corner Curry", posted_on=d)
+    await detect_recurring(session, llm=None, today=date(2026, 6, 1))
+    llm = ScriptedLLM({"Corner Curry": {"classification": "habit", "confident": True}})
+
+    assert await autoreview_items(session, llm) == 1
+
+    (prompt,) = llm.prompts
+    assert '"habit"' in prompt and "restaurants" in prompt  # the shared three-way taxonomy
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.resolution == {  # exactly what a human's "h" writes
+        "is_recurring": True,
+        "discretionary": True,
+        "resolved_by": "llm",
+    }
+    await detect_recurring(session, llm=None, today=date(2026, 6, 1))
+    series = (await session.execute(select(RecurringSeries))).scalar_one()
+    assert series.discretionary is True and series.status == SeriesStatus.active
+    report = await power_report(session, today=date(2026, 6, 1))
+    assert report.fixed_costs == [] and report.total_fixed_cents == 0
+
+
+async def test_confident_not_recurring_answer_suppresses_the_group(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    for d in (date(2026, 4, 1), date(2026, 4, 11), date(2026, 5, 26)):
+        await make_txn(session, acct, amount_cents=-30000, merchant="Odd Timing Co", posted_on=d)
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    llm = ScriptedLLM({"Odd Timing Co": {"classification": "not_recurring", "confident": True}})
+
+    assert await autoreview_items(session, llm) == 1
+
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.resolution == {"is_recurring": False, "resolved_by": "llm"}  # a human's "n"
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.new_series == 0 and stats.review == 0
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"classification": "habit", "confident": False},
+        {"classification": "subscription", "confident": True},
+        {"is_recurring": True, "confident": True},  # the old yes/no shape
+    ],
+)
+async def test_unsure_or_unknown_classification_stays_open(
+    session: AsyncSession, answer: dict[str, Any]
+) -> None:
+    acct = await make_account(session)
+    for d in (date(2026, 4, 1), date(2026, 4, 11), date(2026, 5, 26)):
+        await make_txn(session, acct, amount_cents=-30000, merchant="Odd Timing Co", posted_on=d)
+    await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+
+    assert await autoreview_items(session, ScriptedLLM({"Odd Timing Co": answer})) == 0
+
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.status == ReviewStatus.open and item.resolution is None
+    assert "llm_flagged" not in item.payload  # still askable next sync
 
 
 async def test_llm_declined_detection_item_stays_human_only(session: AsyncSession) -> None:
     """The unstable-amount branch in detect_recurring consults the LLM; when it declines
     (anything but "bill"), the review item it opens must be llm_flagged — mirroring
-    verify_series's "LLM already looked" rule — so autoreview's binary is_recurring
-    prompt can never rubber-stamp it into a fixed cost on a later sync (the exact
+    verify_series's "LLM already looked" rule — so autoreview's recurring prompt can
+    never rubber-stamp it into a fixed cost on a later sync (the exact
     failure this wave exists to fix: architect finding, 2026-07-16, task 16)."""
     acct = await make_account(session)
     for d, cents in (
@@ -198,8 +266,10 @@ async def test_llm_declined_detection_item_stays_human_only(session: AsyncSessio
     assert item.status == ReviewStatus.open
     assert item.payload["llm_flagged"] is True
 
-    # next sync: autoreview must not even ask its old binary bill/one-off question
-    autoreview_llm = ScriptedLLM({"Neighborhood Bistro": {"is_recurring": True, "confident": True}})
+    # next sync: autoreview must not ask the LLM a second time
+    autoreview_llm = ScriptedLLM(
+        {"Neighborhood Bistro": {"classification": "bill", "confident": True}}
+    )
     resolved = await autoreview_items(session, autoreview_llm)
     assert resolved == 0
     assert autoreview_llm.prompts == []
@@ -333,7 +403,7 @@ async def test_autoreview_skips_llm_flagged_items(session: AsyncSession) -> None
         )
     )
     await session.flush()
-    llm = ScriptedLLM({"Costco": {"is_recurring": True, "confident": True}})
+    llm = ScriptedLLM({"Costco": {"classification": "bill", "confident": True}})
     assert await autoreview_items(session, llm) == 0
     assert llm.prompts == []  # the LLM already looked once; re-asking is circular
     assert len(await _open_items(session)) == 1

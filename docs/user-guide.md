@@ -604,8 +604,11 @@ llm_api_base = "http://localhost:8000/v1"
 
 With an LLM configured, sync auto-resolves review items it's confident about, double-checks
 newly detected recurring series, and gates price changes — anything it isn't sure of still
-comes to you. **The LLM only ever classifies; it never computes a money value.** Unset the
-variable and everything degrades gracefully to deterministic rules + your review queue.
+comes to you. A recurring question gets the same bill / habit / not-recurring choice you
+have, and a confident habit answer is recorded exactly like your `h`: the merchant is
+tracked as discretionary spending, not a fixed cost. **The LLM only ever classifies; it
+never computes a money value.** Unset the variable and everything degrades gracefully to
+deterministic rules + your review queue.
 
 ## RSU vesting import
 

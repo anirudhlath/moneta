@@ -308,8 +308,8 @@ async def _detect_bill(
             discretionary = True
         elif classification != "bill":
             # an actual (even malformed) LLM answer means the LLM already looked —
-            # mirror verify_series: human-only from here, autoreview must not re-ask
-            # the binary bill/one-off prompt and rubber-stamp it as a fixed cost.
+            # mirror verify_series: human-only from here, autoreview must not ask the
+            # LLM again and let a second answer overrule the first.
             # A classify_json failure (answer is None) never looked; leave it askable.
             _open_review(llm_flagged=answer is not None)
             return None
