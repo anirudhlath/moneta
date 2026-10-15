@@ -66,9 +66,9 @@ list[TxnRow]` — joins Account + outer-joins RecurringSeries, loads
 "internal" (never counted); outflow leg → "loan_payment" if
 `inflow_is_loan_like`, "cc_payment" if inflow credit, else "internal".
 `counted_in_spend` replicates power's rule exactly (outflow + spend account type
-+ primary currency + not linked + not tagged to an active non-discretionary
-series + in range); `excluded_because` gives the first matching reason
-("inflow", "transfer", "loan payment", "credit-card payment", "fixed cost
++ primary currency + not on a loan-like account + not linked + not tagged to an
+active non-discretionary series + in range); `excluded_because` gives the first
+matching reason ("inflow", "transfer", "loan payment", "credit-card payment", "fixed cost
 (series X)", "non-spend account", "financed purchase", "foreign currency";
 "financed purchase", added 2026-10-15, is an outflow on a loan-like account,
 whose payments are the fixed cost). Endpoint:
