@@ -164,6 +164,8 @@ class LoanPayment(BaseModel):
 # a payment above this multiple of the payments before it is a one-off extra, not the
 # new obligation
 _ONE_OFF_FACTOR = 1.5
+# ...and so is one below this fraction of them: a small extra, not a plan winding down
+_ONE_OFF_FLOOR = 0.5
 _PRIOR_PAYMENTS = 3  # the yardstick: up to this many payments before the newest
 
 
@@ -171,14 +173,15 @@ def _current_payment(amounts: list[int]) -> int:
     """What the account is paid now, from its in-run payment magnitudes (oldest first).
 
     The newest payment, so a plan winding down is not held at its old median — unless it
-    is more than _ONE_OFF_FACTOR x the median of the payments just before it, in which
-    case that median: a one-off extra must not set the obligation.
+    is more than _ONE_OFF_FACTOR x or less than _ONE_OFF_FLOOR x the median of the up to
+    _PRIOR_PAYMENTS payments before it, in which case that median (exactly 1.5x or exactly
+    half keeps the newest). A first payment has nothing before it, so it stands alone.
     """
     newest = amounts[-1]
     prior = amounts[-1 - _PRIOR_PAYMENTS : -1]
     if prior:
         typical = statistics.median(prior)
-        if newest > _ONE_OFF_FACTOR * typical:
+        if newest > _ONE_OFF_FACTOR * typical or newest < _ONE_OFF_FLOOR * typical:
             return round(typical)
     return newest
 

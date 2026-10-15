@@ -476,8 +476,11 @@ account keeps each obligation's amount and cadence correct.
 
 The payment is the account's **newest** payment, so a plan whose payments are winding down is
 judged by what you pay now rather than an older average. One exception: a payment more than
-1.5× the median of the (up to) three payments before it is a one-off extra — the obligation
-stays at that median. Payments to one account on the same day count as one payment, their sum.
+1.5× or less than half the median of the (up to) three payments before it is treated as a
+one-off, large or small, and the obligation stays at that median (exactly 1.5× or exactly half
+keeps the newest). Payments to one account on the same day count as one payment, their sum.
+A small first payment followed by larger regular ones therefore reads low until the third
+regular payment.
 
 ### Financing cards
 

@@ -158,6 +158,10 @@ def _monthly_links(account_id: int, amounts: list[int]) -> list[ClassifiedLink]:
         ([-20000, -20000, -20000, -8000, -8000, -8000, -13000], -8000),
         # the window is exactly 3: a window of 2 or 4 would read a median of 11000 and keep 13000
         ([-30000, -8000, -8000, -14000, -13000], -8000),
+        # a small extra doesn't set it either: below half the median is a one-off, too
+        ([-30000, -30000, -30000, -5000], -30000),
+        ([-30000, -30000, -30000, -15000], -15000),  # exactly half is not "less than half"
+        ([-30000, -30000, -30000, -14999], -30000),
     ],
 )
 def test_loan_payment_stats_expected_is_newest_unless_one_off(
@@ -167,6 +171,28 @@ def test_loan_payment_stats_expected_is_newest_unless_one_off(
 
     assert stats[40].expected_cents == expected
     assert stats[40].cadence == Cadence.monthly
+
+
+def test_loan_payment_stats_small_off_day_extra_does_not_set_the_payment() -> None:
+    """$300.00 on the 5th for four months, then a $50.00 extra on the 20th: the extra is
+    below half the median, so the obligation stays $300.00."""
+    payments = [(date(2026, month, 5), -30000) for month in (3, 4, 5, 6)]
+    payments.append((date(2026, 6, 20), -5000))
+    links = [
+        _link(
+            outflow_id=100 + i,
+            inflow_id=200 + i,
+            inflow_account_id=60,
+            outflow_amount_cents=amount,
+            outflow_posted_on=posted_on,
+            inflow_is_loan_like=True,
+        )
+        for i, (posted_on, amount) in enumerate(payments)
+    ]
+
+    stats = loan_payment_stats(links)
+
+    assert stats[60].expected_cents == -30000
 
 
 def test_loan_payment_stats_sums_payments_on_one_day() -> None:
