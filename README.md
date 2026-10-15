@@ -43,7 +43,8 @@ Existing apps (Origin, Copilot) fail in four specific ways that moneta is built 
   Stale series auto-end; a genuinely new charge at cadence revives them.
 - **Transfer dedup** — opposite-amount pairs up to 6 days apart, scored on date
   proximity, transfer wording and account type; a lone pair that scores high *and*
-  carries transfer wording auto-links, the rest escalate.
+  carries transfer wording auto-links, the rest escalate. Automatic links are
+  re-checked every sync and dropped when they no longer qualify.
   Human decisions remain effective across provider aliases and later automatic review.
 - **RSU-vesting-aware net worth** — liquid + *vested* holdings − liabilities;
   unvested reported separately, never summed in. Vesting quantities import via CSV

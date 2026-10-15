@@ -35,7 +35,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.llm import Classifier
-from moneta.logical import load_logical_data
+from moneta.logical import LogicalData, load_logical_data
 from moneta.models import (
     AccountType,
     LinkMethod,
@@ -72,6 +72,7 @@ Respond with JSON: {{"inflow_id": <id of the matching inflow, or null if none ma
 class TransferStats(BaseModel):
     linked: int = 0
     review: int = 0
+    unlinked: int = 0  # rule links dropped because they no longer auto-link
 
 
 @dataclass(frozen=True)
@@ -162,9 +163,36 @@ def effective_transfer_choices(
     return selected, conflicts
 
 
+async def _drop_stale_rule_links(session: AsyncSession, logical: LogicalData) -> int:
+    """Re-score every rule link and delete the ones that no longer auto-link, so a
+    link made under older scoring can't outlive it. Links a person or the LLM chose
+    are never touched. Endpoints are judged as their surviving occurrence, the same
+    transactions the linker scores; a link with a missing leg is left to reconcile."""
+    by_id = {t.id: t for t in logical.transactions}
+    dropped = 0
+    rule_links = await session.scalars(
+        select(TransferLink).where(TransferLink.method == LinkMethod.rule)
+    )
+    for link in list(rule_links):
+        out = by_id.get(logical.transaction_roots.get(link.outflow_id, link.outflow_id))
+        inn = by_id.get(logical.transaction_roots.get(link.inflow_id, link.inflow_id))
+        if out is None or inn is None:
+            continue
+        score = score_pair(out, inn, logical.accounts[logical.account_roots[out.account_id]].type)
+        if score.auto_links:
+            link.confidence = score.tenths / 10
+        else:
+            await session.delete(link)
+            dropped += 1
+    await session.flush()
+    return dropped
+
+
 async def link_transfers(session: AsyncSession, llm: Classifier | None) -> TransferStats:
     stats = TransferStats()
     logical = await load_logical_data(session)
+    # first, so legs freed here are matched again in this same run
+    stats.unlinked = await _drop_stale_rule_links(session, logical)
     linked_ids: set[int] = set()
     for link in (await session.execute(select(TransferLink))).scalars():
         linked_ids.update(

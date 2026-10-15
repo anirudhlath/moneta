@@ -439,3 +439,157 @@ async def test_p2p_inflow_does_not_link_to_a_wallet_top_up(session: AsyncSession
     assert (await session.execute(select(TransferLink))).scalar_one_or_none() is None
     item = (await session.execute(select(ReviewItem))).scalar_one()
     assert item.payload == {"outflow_id": out.id, "candidates": [inn.id]}
+
+
+async def _wallet_and_p2p(session: AsyncSession) -> tuple[Transaction, Transaction]:
+    """A card's wallet top-up and a friend's same-day, same-amount Zelle inflow."""
+    card = await make_account(session, type=AccountType.credit)
+    checking = await make_account(session, type=AccountType.checking)
+    out = await make_txn(
+        session,
+        card,
+        amount_cents=-30000,
+        posted_on=date(2026, 7, 10),
+        description="Acme Wallet: Add Money",
+    )
+    inn = await make_txn(
+        session,
+        checking,
+        amount_cents=30000,
+        posted_on=date(2026, 7, 10),
+        description="Zelle payment from JANE DOE 1234",
+    )
+    return out, inn
+
+
+async def test_stale_rule_link_is_dropped_and_asked_about(session: AsyncSession) -> None:
+    out, inn = await _wallet_and_p2p(session)
+    session.add(TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=0.9, method="rule"))
+    await session.flush()
+    stats = await link_transfers(session, llm=None)
+    assert (stats.linked, stats.review, stats.unlinked) == (0, 1, 1)
+    assert (await session.execute(select(TransferLink))).scalar_one_or_none() is None
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.payload == {"outflow_id": out.id, "candidates": [inn.id]}
+
+
+async def test_qualifying_rule_link_stays_and_is_restamped_in_tenths(
+    session: AsyncSession,
+) -> None:
+    checking = await make_account(session, type=AccountType.checking)
+    savings = await make_account(session, type=AccountType.savings)
+    out = await make_txn(
+        session,
+        checking,
+        amount_cents=-50000,
+        posted_on=date(2026, 7, 1),
+        description="ONLINE TRANSFER TO SAVINGS",
+    )
+    inn = await make_txn(
+        session,
+        savings,
+        amount_cents=50000,
+        posted_on=date(2026, 7, 1),
+        description="TRANSFER FROM CHECKING",
+    )
+    session.add(
+        TransferLink(
+            outflow_id=out.id, inflow_id=inn.id, confidence=0.9999999999999999, method="rule"
+        )
+    )
+    await session.flush()
+    stats = await link_transfers(session, llm=None)
+    assert (stats.linked, stats.review, stats.unlinked) == (0, 0, 0)
+    link = (await session.execute(select(TransferLink))).scalar_one()
+    assert (link.outflow_id, link.inflow_id, link.confidence) == (out.id, inn.id, 1.0)
+
+
+@pytest.mark.parametrize(("method", "confidence"), [("manual", 1.0), ("llm", 0.9)])
+async def test_human_and_llm_links_are_never_rescored(
+    session: AsyncSession, method: str, confidence: float
+) -> None:
+    out, inn = await _wallet_and_p2p(session)
+    session.add(
+        TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=confidence, method=method)
+    )
+    await session.flush()
+    stats = await link_transfers(session, llm=None)
+    assert (stats.linked, stats.review, stats.unlinked) == (0, 0, 0)
+    link = (await session.execute(select(TransferLink))).scalar_one()
+    assert (link.outflow_id, link.inflow_id, link.method) == (out.id, inn.id, method)
+
+
+async def test_freed_leg_re_pairs_in_the_same_run(session: AsyncSession) -> None:
+    """Dropping the stale link frees the inflow for a genuine same-day transfer from
+    savings, which links by rule in the same run; the wallet top-up loses that inflow
+    to the stronger pair and is asked about."""
+    out, inn = await _wallet_and_p2p(session)
+    savings = await make_account(session, type=AccountType.savings)
+    move = await make_txn(
+        session,
+        savings,
+        amount_cents=-30000,
+        posted_on=date(2026, 7, 10),
+        description="TRANSFER TO CHECKING",
+    )
+    session.add(TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=0.9, method="rule"))
+    await session.flush()
+    stats = await link_transfers(session, llm=None)
+    assert (stats.linked, stats.review, stats.unlinked) == (1, 1, 1)
+    link = (await session.execute(select(TransferLink))).scalar_one()
+    assert (link.outflow_id, link.inflow_id, link.method) == (move.id, inn.id, "rule")
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.payload == {"outflow_id": out.id, "candidates": [inn.id]}
+
+
+async def test_rescore_judges_a_duplicate_observation_as_its_survivor(
+    session: AsyncSession,
+) -> None:
+    """The stale link points at the second provider's copy of the Zelle inflow. The
+    re-score follows it to the surviving observation, the one the linker scores."""
+    card = await make_account(session, type=AccountType.credit, source="simplefin")
+    checking = await make_account(session, source="simplefin")
+    alias = await make_account(session, source="plaid", canonical_account_id=checking.id)
+    out = await make_txn(
+        session,
+        card,
+        amount_cents=-30000,
+        posted_on=date(2026, 7, 10),
+        description="Acme Wallet: Add Money",
+    )
+    inn = await make_txn(
+        session,
+        checking,
+        amount_cents=30000,
+        posted_on=date(2026, 7, 10),
+        description="Zelle payment from JANE DOE 1234",
+    )
+    copy = await make_txn(
+        session,
+        alias,
+        amount_cents=30000,
+        posted_on=date(2026, 7, 10),
+        description="ZELLE PAYMENT FROM JANE DOE",
+        duplicate_of_id=inn.id,
+    )
+    session.add(TransferLink(outflow_id=out.id, inflow_id=copy.id, confidence=0.9, method="rule"))
+    await session.flush()
+    stats = await link_transfers(session, llm=None)
+    assert (stats.linked, stats.review, stats.unlinked) == (0, 1, 1)
+    assert (await session.execute(select(TransferLink))).scalar_one_or_none() is None
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.payload == {"outflow_id": out.id, "candidates": [inn.id]}
+
+
+async def test_sync_drops_a_stale_link_before_spend_is_counted(session: AsyncSession) -> None:
+    """In a full sync the re-score runs inside the transfers stage, so the freed
+    wallet top-up counts as spend in the same sync's numbers."""
+    out, inn = await _wallet_and_p2p(session)
+    session.add(TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=0.9, method="rule"))
+    await session.commit()
+    report = await run_sync(session, [RecordingAdapter()], llm=None, today=TODAY)
+    assert (report.transfers.unlinked, report.transfers.linked) == (1, 0)
+    assert (await session.execute(select(TransferLink))).scalar_one_or_none() is None
+    assert (await power_report(session, TODAY)).spent_so_far_cents == 30000
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert (item.kind, item.status) == ("transfer_pair", "open")

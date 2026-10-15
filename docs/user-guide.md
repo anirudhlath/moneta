@@ -179,6 +179,11 @@ current fetch window (e.g. `Syncing… SimpleFIN: fetching 2026-05-01 – 2026-0
 first sync isn't a silent wait. Pointed at a remote server (`MONETA_API_URL` set) you only see
 the spinner — the fetch itself is happening on the server, out of the client's view.
 
+When a sync drops automatic transfer links that no longer qualify (see
+[How transfers are matched](#how-transfers-are-matched)), the summary adds a line such
+as `Dropped 1 stale transfer link.` The freed transactions are matched again, or asked
+about, in that same sync.
+
 Each configured source (SimpleFIN, Plaid, ...) syncs on its **own** incremental window,
 computed from that source's own newest stored transaction, including observations
 superseded by another provider — not a single global window. This
@@ -418,6 +423,14 @@ to the LLM when one is configured, else to `moneta review` as a transfer questio
 two outflows that both qualify for an automatic link want the same inflow, the higher
 score wins and an equal score goes to the outflow Moneta stored first; the other
 outflow is asked about.
+
+Every sync, and `moneta reconcile`, first re-scores each link it made automatically with
+the same `score_pair` and drops the ones that no longer auto-link, then matches the freed
+transactions again in the same run. A link made under older rules therefore can't keep
+a purchase out of spent-so-far. The re-check looks at the pair's score and transfer
+wording only; it does not repeat the single-candidate test, so an automatic link stays
+when a second same-amount inflow shows up later. Links you chose in `moneta review`,
+and links the LLM picked, are never re-checked.
 
 ### `moneta networth`
 

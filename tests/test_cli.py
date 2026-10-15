@@ -1909,3 +1909,38 @@ def test_networth_renders_logical_vesting_warnings(
     assert result.exit_code == 0
     assert "Conflicting vesting" in result.output
     assert "requires review" in result.output
+
+
+@pytest.mark.parametrize(
+    ("unlinked", "line"),
+    [(2, "Dropped 2 stale transfer links."), (1, "Dropped 1 stale transfer link."), (0, None)],
+)
+def test_sync_reports_dropped_transfer_links(  # type: ignore[no-untyped-def]
+    tmp_path: Path, monkeypatch, unlinked: int, line: str | None
+) -> None:
+    _isolate(monkeypatch, tmp_path)
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        if path == "/sync":
+            return {
+                "ingest": {"new_transactions": 0},
+                "transfers": {"linked": 0, "review": 0, "unlinked": unlinked},
+                "recurring": {"new_series": 0},
+                "events": 0,
+                "auto_resolved": 0,
+                "verify": {"verified": 0, "flagged": 0},
+            }
+        return []
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 0
+    if line is None:
+        assert "Dropped" not in result.output
+    else:
+        assert line in result.output

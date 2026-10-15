@@ -147,6 +147,8 @@ def sync(
         f"{report['recurring']['new_series']} new series, "
         f"{report['events']} events."
     )
+    if unlinked := report["transfers"].get("unlinked"):
+        console.print(f"Dropped {_plural(unlinked, 'stale transfer link')}.")
     if report["auto_resolved"]:
         console.print(f"LLM auto-resolved {report['auto_resolved']} review item(s).")
     verify = report["verify"]
