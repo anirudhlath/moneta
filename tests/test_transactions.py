@@ -425,6 +425,22 @@ async def test_financed_purchase_reason(session: AsyncSession) -> None:
     }
 
 
+async def test_inflow_on_a_loan_like_card_is_not_a_financed_purchase(
+    session: AsyncSession,
+) -> None:
+    """A refund on a financing card is an inflow, not a purchase: `financed purchase` is
+    for outflows only."""
+    card = await make_account(session, type=AccountType.credit, financing_mode=True)
+    await make_txn(
+        session, card, amount_cents=25000, merchant="Acme Furniture", posted_on=date(2026, 7, 9)
+    )
+    await session.flush()
+
+    [row] = await transactions_report(session, date(2026, 7, 1), date(2026, 7, 31))
+
+    assert (row.counted_in_spend, row.excluded_because) == (False, "inflow")
+
+
 async def test_open_financing_question_on_a_non_credit_account_is_not_loan_like(
     session: AsyncSession,
 ) -> None:

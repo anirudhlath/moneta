@@ -995,6 +995,7 @@ async def test_patch_account_null_clears_promo(client: httpx.AsyncClient) -> Non
     await client.post("/sync")
     acct_id = (await client.get("/accounts")).json()[0]["id"]
     await client.patch(f"/accounts/{acct_id}", json={"promo_expires_on": "2026-12-31"})
+    assert (await client.get("/accounts")).json()[0]["promo_expires_on"] == "2026-12-31"
 
     r = await client.patch(f"/accounts/{acct_id}", json={"promo_expires_on": None})
 

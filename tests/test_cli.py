@@ -1566,11 +1566,11 @@ def test_obligations_renders_promo_warning(tmp_path: Path, monkeypatch) -> None:
     assert result.exit_code == 0
     assert "Synchrony" in result.output  # rich may wrap the full name across cell lines
     # payoff ~9mo out > promo ~2mo out; rich wraps the line, so compare on collapsed whitespace
+    flat = " ".join(result.output.split())
     assert (
-        "interest applies to the remaining balance (back-dated on deferred-interest plans)"
-        in " ".join(result.output.split())
+        "interest applies to the remaining balance (back-dated on deferred-interest plans)" in flat
     )
-    assert "deferred interest risk" not in result.output  # a 0% plan may not be deferred
+    assert "deferred interest risk" not in flat  # a 0% plan may not be deferred
     assert "Traceback" not in result.output
 
 
