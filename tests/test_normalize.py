@@ -633,6 +633,22 @@ def test_one_hyphenated_name_is_not_a_code() -> None:
     assert merge_targets(["Corner-Sandwich", "Corner-Sandwich Elmton"]) == {}
 
 
+def test_a_charge_code_is_exactly_eight_letters() -> None:
+    # 7 or 9 letters are not codes, however many different ones there are
+    assert merge_targets(["Acmeapp-Qwertyu", "Acmeapp-Asdfghj"]) == {}
+    assert merge_targets(["Acmeapp-Qwertyuio", "Acmeapp-Asdfghjkl"]) == {}
+    # an 8-letter code beside a 7-letter one is one code, and one code is not enough
+    assert merge_targets(["Acmeapp-Qwertyui", "Acmeapp-Asdfghj"]) == {}
+
+
+def test_a_charge_code_needs_a_base_word_of_four_letters() -> None:
+    assert merge_targets(["Acme-Qwertyui", "Acme-Asdfghjk"]) == {
+        "Acme-Qwertyui": "Acme",
+        "Acme-Asdfghjk": "Acme",
+    }
+    assert merge_targets(["Abc-Qwertyui", "Abc-Asdfghjk"]) == {}
+
+
 async def test_per_charge_codes_form_one_subscription(session: AsyncSession) -> None:
     acct = await make_account(session)
     for month, code in ((4, "QWERTYUI"), (5, "ASDFGHJK"), (6, "ZXCVBNMQ")):

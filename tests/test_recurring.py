@@ -1375,9 +1375,15 @@ async def test_a_payment_plan_holds_across_a_month_with_only_a_deposit(
     await normalize_merchants(session, llm=None)
     await renormalize_merchants(session)
 
-    stats = await detect_recurring(session, llm=None, today=date(2026, 10, 20))
+    today = date(2026, 10, 20)
+    stats = await detect_recurring(session, llm=None, today=today)
+    await emit_series_events(session, llm=None, today=today)
+    # the next sync finds nothing new: the missed month is not announced twice
+    again = await detect_recurring(session, llm=None, today=today)
+    await emit_series_events(session, llm=None, today=today)
 
     assert (stats.new_series, stats.review) == (0, 0)
+    assert (again.new_series, again.updated, again.review, again.merged) == (0, 0, 0, 0)
     (series,) = await _series(session)
     assert (series.cadence, series.expected_cents, series.status) == (
         Cadence.monthly,

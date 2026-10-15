@@ -1,6 +1,6 @@
 from datetime import date, timedelta
 
-from moneta.cadence import match_across_a_miss
+from moneta.cadence import TOLERANCE, advance_expected_on, match_across_a_miss
 from moneta.models import Cadence, Transaction
 from moneta.pipelines.bills import amount_bands, concurrent_tracks, split_bills, whole_bill
 
@@ -186,6 +186,18 @@ def test_a_repriced_charge_in_the_due_window_does_not_split() -> None:
     assert split_bills(charges) is None
 
 
+def test_the_not_yet_due_window_closes_on_the_day_the_next_charge_is_nearly_due() -> None:
+    # the next installment is nearly due TOLERANCE days before its due date: a charge that
+    # day is judged by the run alone, one the day before it still sits beside the schedule
+    installments = _monthly(15, range(6, 9), -120000)
+    nearly_due = advance_expected_on(date(2026, 8, 15), Cadence.monthly) - timedelta(
+        days=TOLERANCE[Cadence.monthly]
+    )
+    day_before = nearly_due - timedelta(days=1)
+    assert split_bills([*installments, _t(day_before, -210000)]) == [installments]
+    assert split_bills([*installments, _t(nearly_due, -210000)]) is None
+
+
 def test_a_later_charge_closes_the_not_yet_due_window() -> None:
     # a purchase just after the newest charge, then the plan goes on at a new price: the
     # next charge came due, so the purchase is judged by the run alone, as before
@@ -203,6 +215,30 @@ def test_match_across_a_miss_bridges_exactly_one_missed_month() -> None:
     # two months in a row, or two separate months, are a pause, not one missed month
     assert match_across_a_miss([date(2026, 6, 15), date(2026, 7, 15), date(2026, 10, 15)]) is None
     assert match_across_a_miss([date(2026, 4, 15), date(2026, 6, 15), date(2026, 8, 15)]) is None
+
+
+def test_match_across_a_miss_needs_the_periods_to_median_about_a_month() -> None:
+    def after(*gaps: int) -> list[date]:
+        dates = [date(2026, 1, 1)]
+        for gap in gaps:
+            dates.append(dates[-1] + timedelta(days=gap))
+        return dates
+
+    # every gap passes the loose per-gap test; the periods (gap / 2 across the miss) then
+    # median 36 days, exactly TOLERANCE off a month, and 37 days is one day too far
+    assert match_across_a_miss(after(36, 36, 72)) == (
+        Cadence.monthly,
+        date(2026, 1, 1),
+        date(2026, 1, 1) + timedelta(days=72),
+    )
+    assert match_across_a_miss(after(37, 37, 72)) is None
+
+
+def test_a_one_bill_merchant_with_a_missed_month_stays_one_whole_bill() -> None:
+    # nothing else is charged, so the bridged schedule has no extra to split from
+    charges = [*_monthly(15, range(6, 9), -120000), _t(date(2026, 10, 15), -120000)]
+    assert split_bills(charges) is None
+    assert whole_bill(charges) == charges
 
 
 def test_a_schedule_holds_across_one_missed_month() -> None:
