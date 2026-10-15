@@ -9,7 +9,7 @@ and `power --history` income means the same thing as `power` income.
 > 1. History income counts income series active or ended, not "the same definition as `power`" (the Goal above and the Global Constraints below).
 > 2. The re-score re-uses `score_pair` but skips the linker's lone-candidate guard, so the docs do not say the linker and the re-score "can't disagree" (Task 3 docs text).
 > 3. Task 3's commit says `Refs #46`, not `Closes #46`: #46 closes after a real-data QA run.
-> 4. A "not recurring" answer untags its bill's charges, so those inflows count as Other inflows, never income (final fix wave).
+> 4. A "not recurring" answer ends the series at once; from the next sync its bill's charges are untagged, so those inflows count as Other inflows, never income (final fix wave).
 
 **Architecture:**
 - Transfer pairs are scored in integer tenths by a public `score_pair` → `PairScore`.

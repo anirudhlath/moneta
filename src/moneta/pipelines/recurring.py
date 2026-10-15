@@ -6,7 +6,7 @@ from datetime import date
 from typing import NamedTuple
 
 from pydantic import BaseModel
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.cadence import CADENCE_DAYS, GRACE_DAYS, TOLERANCE, advance_expected_on, match_cadence
@@ -266,9 +266,24 @@ async def _detect_bill(
     forced = _forced(ctx.resolved, ref, None if split else (min(newest), max(newest)))
     if forced is not None and forced.is_recurring is False:
         # user-resolved as not recurring — suppress silently, forever. The bill keeps no
-        # tagged charges: a tag would let an inflow read as income in power --history
+        # tagged charges (a tag would let an inflow read as income in power --history),
+        # and a series left owning none is ended here: the stale sweep leaves a tagless
+        # active series alone, so it would stay a fixed cost next to its own spend. A
+        # sibling bill's series that still owns charges stays as it is.
         for t in significant:
             t.series_id = None
+        for series_id in voted:
+            owner = await ctx.session.get(RecurringSeries, series_id)
+            if owner is None or owner.status != SeriesStatus.active:
+                continue
+            owned = await ctx.session.scalar(
+                select(func.count())
+                .select_from(Transaction)
+                .where(Transaction.series_id == series_id)
+            )
+            if not owned:
+                owner.status = SeriesStatus.ended
+                ctx.stats.updated += 1
         return None
     discretionary = forced.discretionary if forced is not None else False
     forced_recurring = forced is not None and forced.is_recurring

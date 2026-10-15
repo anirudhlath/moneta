@@ -264,8 +264,8 @@ async def test_not_recurring_answer_takes_its_inflows_out_of_income(
     session: AsyncSession,
 ) -> None:
     """#19: a person's monthly repayments formed an inflow series; the owner answered
-    "not recurring". The bill then owns no charges, so history reports the money as
-    other inflows, never income, right after the answer and after the next detection."""
+    "not recurring". The answer ends the series at once; from the next detection the bill
+    owns no charges, so history reports the money as other inflows, never income."""
     checking = await make_account(session, type=AccountType.checking)
     series = await make_series(
         session, merchant="Jane Doe", direction=Direction.inflow, expected_cents=30000
@@ -288,10 +288,9 @@ async def test_not_recurring_answer_takes_its_inflows_out_of_income(
     await session.flush()
     await apply_resolution(session, item, {"is_recurring": False}, resolved_by="manual")
 
-    expected = [("2026-07", 0, 30000, 0), ("2026-06", 0, 30000, 0), ("2026-05", 0, 30000, 0)]
     assert series.status == SeriesStatus.ended
-    assert await accrual_by_month(session, months=3, today=date(2026, 7, 20)) == expected
 
+    expected = [("2026-07", 0, 30000, 0), ("2026-06", 0, 30000, 0), ("2026-05", 0, 30000, 0)]
     await detect_recurring(session, None, date(2026, 7, 20))
     assert series.status == SeriesStatus.ended
     assert await accrual_by_month(session, months=3, today=date(2026, 7, 20)) == expected
