@@ -239,7 +239,8 @@ def power(
     history: Annotated[
         int | None,
         typer.Option(
-            "--history", help="Show the last N months' income/spend/net instead of this month."
+            "--history",
+            help="Show the last N months' income/other inflows/spend/net instead of this month.",
         ),
     ] = None,
     json_output: JsonOption = False,
@@ -249,11 +250,12 @@ def power(
         rows = request("GET", "/power/history", params={"months": history})
         if emit_json(rows, json_output):
             return
-        table = Table("Month", "Income", "Spend", "Net")
+        table = Table("Month", "Income", "Other inflows", "Spend", "Net")
         for m in rows:
             table.add_row(
                 m["month"],
                 fmt_money(m["income_cents"]),
+                fmt_money(m["other_inflows_cents"]),
                 fmt_outflow(m["spend_cents"]),
                 fmt_money(m["net_cents"]),
             )

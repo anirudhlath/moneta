@@ -905,7 +905,7 @@ def test_power_history_runs_in_process(tmp_path: Path, monkeypatch) -> None:  # 
     assert "Spending power" not in result.output  # --history replaces the normal view
 
 
-def test_power_history_table_renders_month_income_spend_net(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_power_history_table_renders_month_income_other_spend_net(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     def fake_request(
         method: str,
         path: str,
@@ -917,25 +917,34 @@ def test_power_history_table_renders_month_income_spend_net(monkeypatch) -> None
             {
                 "month": "2026-07",
                 "income_cents": 300000,
+                "other_inflows_cents": 12000,
                 "spend_cents": 5000,
                 "net_cents": 295000,
             },
             {
                 "month": "2026-06",
                 "income_cents": 250000,
+                "other_inflows_cents": 0,
                 "spend_cents": 260000,
                 "net_cents": -10000,
             },
-            {"month": "2026-05", "income_cents": 250000, "spend_cents": 4000, "net_cents": 246000},
+            {
+                "month": "2026-05",
+                "income_cents": 250000,
+                "other_inflows_cents": 0,
+                "spend_cents": 4000,
+                "net_cents": 246000,
+            },
         ]
 
     monkeypatch.setattr("moneta.cli.main.request", fake_request)
     result = runner.invoke(app, ["power", "--history", "3"])
     assert result.exit_code == 0
-    for header in ("Month", "Income", "Spend", "Net"):
+    for header in ("Month", "Income", "Other inflows", "Spend", "Net"):
         assert header in result.output
     assert "2026-07" in result.output
     assert "$3000.00" in result.output  # income: fmt_money
+    assert "$120.00" in result.output  # other inflows: fmt_money
     assert "-$50.00" in result.output  # spend: fmt_outflow(5000)
     assert "$2950.00" in result.output  # net: fmt_money, positive
     assert "-$100.00" in result.output  # net: fmt_money, negative month

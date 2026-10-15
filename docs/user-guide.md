@@ -345,10 +345,15 @@ The flagship view for the current month:
   is due before month-end.
 
 `moneta power --history N` (e.g. `--history 6`, 1-60 months) replaces the table above with a
-compact Month/Income/Spend/Net history instead. The newest row is the current, still-in-progress
-month; every row (including that one) reports *actual observed* income and spend for that
+compact Month/Income/Other inflows/Spend/Net history instead. The newest row is the current,
+still-in-progress month; every row (including that one) reports *actual observed* money for that
 calendar month — not today's recurring-series state — so a since-cancelled bill or an old raise
-still shows correctly even though no series reflects it anymore.
+still shows correctly even though no series reflects it anymore. **Income** counts inflows
+tagged to an income series: a recurring inflow series that isn't a habit (a paycheck), whether
+it is still active or has since ended, so a former employer's paychecks count in the months they
+paid. **Other inflows** is every other inflow that isn't a transfer — refunds, money from
+friends, one-off deposits — shown so nothing disappears, but not income. **Net** = income −
+spend; other inflows are left out of it.
 
 ### `moneta txns` — auditing the numbers
 
@@ -690,7 +695,7 @@ Fields split into three sign conventions, decided per field rather than globally
   `spent_so_far_cents`, `SeriesLine.monthly_cents`, `SeriesLine.expected_cents`,
   `UpcomingCharge.expected_cents`, `liabilities_cents`, `unvested_potential_cents`,
   `accrual_cents`, `cash_out_cents`, `balance_owed_cents`, `monthly_payment_cents`,
-  `PowerMonth.income_cents`, `PowerMonth.spend_cents`.
+  `PowerMonth.income_cents`, `PowerMonth.other_inflows_cents`, `PowerMonth.spend_cents`.
 
 New money fields document their sign here as they ship. The CLI never hand-negates a
 magnitude field — it calls `fmt_outflow(magnitude_cents)` (renders with the display minus)

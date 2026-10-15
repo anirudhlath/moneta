@@ -32,7 +32,7 @@ Existing apps (Origin, Copilot) fail in four specific ways that moneta is built 
   plus spent-so-far, remaining, safe-to-spend per day, and upcoming charges due later
   this month, for the current month. Accrual vs. cash-out accounting keeps "spent so
   far" honest when purchases go on credit. `--history N` shows a month-over-month
-  income/spend/net table instead.
+  income/other inflows/spend/net table instead, where income is detected income only.
 - **Transaction drill-down** (`moneta txns`) — every transaction in a date range,
   dimmed and labeled with the exact reason it isn't counted as spend (transfer, loan
   payment, credit-card payment, fixed-cost series, ...) when it isn't. The trust
@@ -200,7 +200,7 @@ Unset = no LLM; ambiguous items go to `moneta review` instead.
 | Command | What it does |
 |---|---|
 | `moneta sync [--full]` | Pull latest data and run all pipelines |
-| `moneta power [--history N]` | Income, fixed costs, spending power, spent so far, remaining, per-day, upcoming charges; `--history N` shows a month-over-month income/spend/net table instead |
+| `moneta power [--history N]` | Income, fixed costs, spending power, spent so far, remaining, per-day, upcoming charges; `--history N` shows a month-over-month income/other inflows/spend/net table instead |
 | `moneta networth` | Net worth (vested only); unvested listed as potential |
 | `moneta cashflow [--start D --end D]` | Accrual spend vs cash out for a range (default: this month) |
 | `moneta txns [--month M \| --start D --end D] [--account ID] [--merchant NAME] [--sources]` | Combined retained history; source audit includes superseded provider observations without counting them again |

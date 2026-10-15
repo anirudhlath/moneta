@@ -137,7 +137,8 @@ class CashflowReport(BaseModel):
 
 class PowerMonth(BaseModel):
     month: str  # "2026-07"
-    income_cents: int  # magnitude
+    income_cents: int  # magnitude: inflows tagged to an income series (active or ended)
+    other_inflows_cents: int  # magnitude: every other counted inflow
     spend_cents: int  # magnitude
     net_cents: int  # signed: income - spend
 
@@ -325,21 +326,26 @@ def create_app(
     async def power_history(
         session: Session, months: Annotated[int, Query(ge=1, le=60)] = 6
     ) -> list[PowerMonth]:
-        """Month-over-month income/spend, newest first (the newest row is the current,
-        still-in-progress month). Unlike GET /power, which reports today's recurring-
-        series state, past months here report actual *observed* flows for that
-        calendar month — accrual income/spend over the month's full date range — so
-        a since-cancelled bill or a past raise still shows correctly even though no
-        series reflects it anymore today."""
+        """Month-over-month income/other inflows/spend, newest first (the newest row is
+        the current, still-in-progress month). Unlike GET /power, which reports today's
+        recurring-series state, past months here report actual *observed* flows for that
+        calendar month, so a since-cancelled bill or a past raise still shows correctly.
+        Income is inflows tagged to an income series (non-discretionary inflow series,
+        active or ended); every other inflow is other_inflows_cents, and net is
+        income - spend."""
         today = date.today()
         links = await classified_links(session)
         primary = await primary_currency(session)
         rows = await accrual_by_month(session, months, today, links=links, primary=primary)
         return [
             PowerMonth(
-                month=month, income_cents=income, spend_cents=spend, net_cents=income - spend
+                month=row.month,
+                income_cents=row.income_cents,
+                other_inflows_cents=row.other_inflows_cents,
+                spend_cents=row.spend_cents,
+                net_cents=row.income_cents - row.spend_cents,
             )
-            for month, income, spend in rows
+            for row in rows
         ]
 
     @app.get("/networth")
