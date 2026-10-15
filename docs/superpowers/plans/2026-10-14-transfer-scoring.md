@@ -5,6 +5,12 @@
 **Goal:** Transfer links are made by exact, auditable rules that stale links can't outlive,
 and `power --history` income means the same thing as `power` income.
 
+> **Execution rulings (2026-10-15):** what execution changed from this plan.
+> 1. History income counts income series active or ended, not "the same definition as `power`" (the Goal above and the Global Constraints below).
+> 2. The re-score re-uses `score_pair` but skips the linker's lone-candidate guard, so the docs do not say the linker and the re-score "can't disagree" (Task 3 docs text).
+> 3. Task 3's commit says `Refs #46`, not `Closes #46`: #46 closes after a real-data QA run.
+> 4. A "not recurring" answer untags its bill's charges, so those inflows count as Other inflows, never income (final fix wave).
+
 **Architecture:**
 - Transfer pairs are scored in integer tenths by a public `score_pair` → `PairScore`.
   A rule link needs the threshold **and** a transfer keyword.
@@ -1616,7 +1622,7 @@ def test_power_history_table_renders_month_income_other_spend_net(monkeypatch) -
             {
                 "month": "2026-07",
                 "income_cents": 300000,
-                "other_inflows_cents": 12345,
+                "other_inflows_cents": 12000,
                 "spend_cents": 5000,
                 "net_cents": 295000,
             },
@@ -1643,7 +1649,7 @@ def test_power_history_table_renders_month_income_other_spend_net(monkeypatch) -
         assert header in result.output
     assert "2026-07" in result.output
     assert "$3000.00" in result.output  # income: fmt_money
-    assert "$123.45" in result.output  # other inflows: fmt_money
+    assert "$120.00" in result.output  # other inflows: fmt_money
     assert "-$50.00" in result.output  # spend: fmt_outflow(5000)
     assert "$2950.00" in result.output  # net: fmt_money, positive
     assert "-$100.00" in result.output  # net: fmt_money, negative month
