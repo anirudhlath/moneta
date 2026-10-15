@@ -427,10 +427,14 @@ glued onto the name folds the same way: `Acme Universityelmton` and
 name shows two different glued tails, while one longer word (`Corner Storehouse` beside
 `Corner Store`) stays its own merchant. A single-word brand absorbs only a trailing
 place, so `Streamco` and `Streamco Plus` stay apart. A prefix shared by many unrelated
-names, such as a payment rail (`Zelle Payment To …`), absorbs nothing. A merchant can
-also have several series: if a subscription has irregular purchases alongside it, or two
-subscriptions at the same price bill on different days, each schedule is its own series
-and the other charges are ordinary spending. A charge of at least a quarter of the bill's
+names, such as a payment rail (`Zelle Payment To …`), absorbs nothing. A per-charge code
+hyphenated onto a name's first word (`Acmeapp-Qwertyui`: a word of 4 or more letters, a
+hyphen, then exactly 8 letters) is dropped once two or more different codes appear for the
+merchant, so a subscription billed under a new code each month is one series; a lone code
+stays part of the name, and a code with a digit in it is stripped outright like any other
+reference number. A merchant can also have several series: if a subscription has
+irregular purchases alongside it, or two subscriptions at the same price bill on different
+days, each schedule is its own series and the other charges are ordinary spending. A charge of at least a quarter of the bill's
 amount that lands after a schedule's newest charge, while the next one is not yet nearly
 due (6 days short of its due date for a monthly bill), counts the same way: a term deposit
 beside a monthly payment-plan installment is ordinary spending, and the installment alone

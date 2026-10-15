@@ -183,7 +183,8 @@ def whole_bill(group: Sequence[Transaction]) -> list[Transaction]:
 
     "Small" is measured against the scheduled unit that declined to split (the one
     with the most dates; ties go to the larger charge), so a subscription's own size
-    sets the bar even when many small purchases drag the group median down. With no
+    sets the bar even when many small purchases drag the group median down. A unit that
+    holds across a missed month counts as scheduled, so it can set the bar too. With no
     scheduled unit the group's median is the bar.
     """
     scheduled, _ = _scheduled_units(group)

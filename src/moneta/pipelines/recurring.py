@@ -104,11 +104,11 @@ def _median_gap(dates: list[date]) -> float:
 def newest_run(
     charges: Sequence[Transaction], *, across_a_miss: bool = False
 ) -> tuple[Cadence | None, list[Transaction]]:
-    """A bill's cadence and its newest cadence run, oldest first — every charge when no
-    cadence holds. Shared with events.py, so both stages judge a bill on the same charges
-    (except a bridged split bill: only detection passes `across_a_miss`, letting the run
-    continue over one missed month, as a split bill's does; bills.py checked that the
-    month really was missed)."""
+    """A bill's cadence and its newest cadence run, oldest first, or every charge when no
+    cadence holds. Shared with events.py, so both stages judge a bill on the same charges,
+    with one exception. Only detection passes `across_a_miss=True`, and only for a split
+    bill: its run then continues over one missed month that bills.py already checked was
+    really missed."""
     ordered = sorted(charges, key=lambda t: (t.posted_on, t.id))
     dates = sorted({t.posted_on for t in ordered})
     match = match_cadence(dates)
