@@ -2,6 +2,14 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Execution rulings (2026-10-15):**
+> - F1: events and `verify_series` judge a bridged bill on all its tagged charges, not on detection's bridged run. Tagged charges are installments only, never deposits. Task 5's "events.py's and review.py's calls unchanged" design and its CLAUDE.md "same charges" sentence are superseded.
+> - F2: "no cadence changes" means `match_cadence` is unchanged. `cadence.py` gained helpers (`match_across_a_miss`).
+> - F3: Task 1's snippet takes the blank line `ruff format` adds after the nested `glued_target` def. Formatting only.
+> - F4: Task 4 Step 2's expected failure names only the four deposits as tagged. The fee is below `whole_bill`'s 25% floor and stays untagged.
+> - I1: the miss bridge also needs at most one real-size charge (at least `MINOR_FRACTION` of the unit's median) strictly inside the missed gap, so `_across_a_miss` takes the unit. A habit stays busy through the gap; a missed installment leaves the merchant quiet.
+> - M1: known limitation. An off-band charge more than `TOLERANCE` days early counts as an extra, so a bill whose amount changes and posts early may show a missed month. Widening the window would merge term deposits back, so it stays (user guide, Troubleshooting).
+
 **Goal:** A recurring bill gets detected even when its descriptor spellings differ or a
 per-charge code hides it, the LLM can call a frequent purchase a habit, not a bill, and a
 term deposit beside a monthly installment stays ordinary spending, even after a month the
