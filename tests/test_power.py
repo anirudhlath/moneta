@@ -12,6 +12,7 @@ from moneta.models import (
     Direction,
     ReviewItem,
     ReviewKind,
+    ReviewStatus,
     SeriesStatus,
     SyncRun,
     TransferLink,
@@ -528,6 +529,18 @@ def _financing_question(account: Account) -> ReviewItem:
     )
 
 
+async def _second_provider_copy(session: AsyncSession, card: Account) -> Account:
+    """The same card as a second provider reports it: an alias of the first record."""
+    return await make_account(
+        session,
+        type=AccountType.credit,
+        name="Acme Store Card",
+        balance_cents=-90000,
+        canonical_account_id=card.id,
+        source="second",
+    )
+
+
 _CARD_PAYMENT_LINE = SeriesLine(
     merchant="Acme Store Card — payment",
     cadence=Cadence.monthly,
@@ -585,19 +598,48 @@ async def test_financing_ruling_beats_an_open_question_on_an_alias(
     """Ruled 'not financing', then the same card reappears from a second provider with
     its own open question: the human's ruling stands."""
     card = await _card_paid_monthly(session)
-    alias = await make_account(
-        session,
-        type=AccountType.credit,
-        name="Acme Store Card",
-        balance_cents=-90000,
-        canonical_account_id=card.id,
-        source="second",
-    )
+    alias = await _second_provider_copy(session, card)
     ruled = _financing_question(card)
     session.add(ruled)
     await session.flush()
     await apply_resolution(session, ruled, {"financing": False})
     session.add(_financing_question(alias))
+    await session.flush()
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert report.fixed_costs == []
+
+
+async def test_open_financing_question_on_an_alias_makes_the_card_financing(
+    session: AsyncSession,
+) -> None:
+    """The question was opened against the second provider's copy of the card; the
+    card itself (the logical account the payments land in) counts as financing."""
+    card = await _card_paid_monthly(session)
+    alias = await _second_provider_copy(session, card)
+    session.add(_financing_question(alias))
+    await session.flush()
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert report.fixed_costs == [_CARD_PAYMENT_LINE]
+    assert report.total_fixed_cents == 10000
+
+
+async def test_financing_ruling_on_an_alias_beats_an_open_question_on_the_card(
+    session: AsyncSession,
+) -> None:
+    """'Not financing' was answered for the second provider's copy before the two were
+    linked; the card's own question is still open, and the ruling stands."""
+    card = await _card_paid_monthly(session)
+    alias = await _second_provider_copy(session, card)
+    session.add(_financing_question(card))
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.financing_account,
+            question="'Acme Store Card' looks like promo financing being paid down?",
+            payload={"account_id": alias.id},
+            status=ReviewStatus.resolved,
+            resolution={"financing": False, "resolved_by": "manual"},
+        )
+    )
     await session.flush()
     report = await power_report(session, today=date(2026, 7, 7))
     assert report.fixed_costs == []

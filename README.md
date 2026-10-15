@@ -51,7 +51,8 @@ Existing apps (Origin, Copilot) fail in four specific ways that moneta is built 
   Conflicting alias annotations without a root annotation exclude that holding's
   value from totals with a provisional-coverage warning until reviewed.
 - **Financing obligations** — derived, not entered: any loan or financing-mode
-  account's monthly payment is derived per-account from its transfer-linked
+  account's monthly payment (a card whose financing question is still open
+  counts too, until you answer) is derived per-account from its transfer-linked
   payments (not merchant-string grouping, so shared bank descriptors across
   cards can't blend or drop a payment), giving balance ÷ payment = months
   left, and a warning when payoff lands after `promo_expires_on` (the one

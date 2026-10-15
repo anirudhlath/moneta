@@ -464,12 +464,13 @@ off in time. A promo ending today with a balance left warns too. In `--json` and
 warning is the `deferred_interest_risk` field — the name is kept for compatibility and means
 only "payoff lands after `promo_expires_on`", not that the plan is deferred-interest.
 
-The monthly payment is derived **per loan/financing account** from its transfer-linked
-payments, grouped by which account the money lands in — not by the bank's payment
-descriptor. This matters because banks often collapse several different cards' payments
-into one shared descriptor (e.g. `"Synchrony Bank Payment Web Id"` for three unrelated
-store cards); grouping by descriptor would blend or lose individual payments, but grouping
-by the linked account keeps each obligation's amount and cadence correct.
+The monthly payment is derived **per loan/financing account** (a credit card whose
+financing check is still unanswered counts as one) from its transfer-linked payments,
+grouped by which account the money lands in — not by the bank's payment descriptor. This
+matters because banks often collapse several different cards' payments into one shared
+descriptor (e.g. `"Synchrony Bank Payment Web Id"` for three unrelated store cards);
+grouping by descriptor would blend or lose individual payments, but grouping by the linked
+account keeps each obligation's amount and cadence correct.
 
 The payment is the account's **newest** payment, so a plan whose payments are winding down is
 judged by what you pay now rather than an older average. One exception: a payment more than
@@ -502,8 +503,8 @@ moneta accounts --set-financing <ID> true|false
 
 Once a card counts as financing — an open question, a `y` answer, or `--set-financing
 true` — any old credit-payment series over it is replaced by the derived per-account
-payment line on the next `moneta sync` — numbers self-heal automatically, with no double-counting in
-the interim.
+payment line on the next `moneta sync` — numbers self-heal automatically, with no
+double-counting in the interim.
 
 **Limitation:** a *hybrid* card — one carrying both everyday spending and a promo
 financing plan at the same time — can't be split apart from transaction data alone, so
@@ -527,8 +528,9 @@ moneta accounts --set-financing <ID> true|false    # mark a credit card as finan
 
 Type overrides survive re-syncs. `--set-promo` and `--set-financing` are manual fields —
 promo powers the promo-ends-before-payoff warning; financing-mode gives a credit account loan
-semantics (its payments count as fixed costs instead of its purchases) without waiting on
-the `financing_account` review prompt. A financing-mode account shows as `credit (financing)`
+semantics (its payments count as fixed costs instead of its purchases) and settles the
+`financing_account` review prompt instead of leaving it open (an open prompt already counts
+the card the same way until answered). A financing-mode account shows as `credit (financing)`
 in the Type column.
 
 Metadata writes using a source alias ID update its logical root. Explicit financing
