@@ -7,12 +7,12 @@ from alembic.operations import Operations
 from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, select
 from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 import moneta.db
 from moneta.db import init_db, make_sessionmaker
 from moneta.models import Account, Base
-from tests.factories import make_series
+from tests.factories import make_account, make_series, make_txn
 
 
 def _script_directory() -> ScriptDirectory:
@@ -60,6 +60,26 @@ _INSERT_ACCOUNT = (
     " balance_date) VALUES ('ACT-1', 'Everyday Checking', 'Acme Bank', 'checking', 'USD',"
     " 10000, '2026-07-01')"
 )
+
+
+def _downgrade_to(conn: Connection, revision: str) -> None:
+    command.downgrade(_alembic_config(conn), revision)
+
+
+def _autoincrement_tables(conn: Connection) -> set[str]:
+    rows = conn.exec_driver_sql("SELECT name, sql FROM sqlite_master WHERE type = 'table'").all()
+    return {name for name, sql in rows if "AUTOINCREMENT" in (sql or "")}
+
+
+def _constraints(conn: Connection) -> tuple[object, ...]:
+    """What a table rebuild must keep: constraints, indexes, column order and defaults."""
+    insp = inspect(conn)
+    return (
+        insp.get_unique_constraints("transactions"),
+        sorted(insp.get_foreign_keys("transactions"), key=lambda fk: fk["constrained_columns"]),
+        insp.get_indexes("transactions"),
+        [(c["name"], c["default"]) for c in insp.get_columns("transactions")],
+    )
 
 
 async def test_migrations_match_create_all_schema() -> None:
@@ -120,4 +140,75 @@ async def test_0008_gives_existing_accounts_an_empty_raw() -> None:
     async with sm() as session:
         account = (await session.scalars(select(Account))).one()
         assert account.raw == {}
+    await engine.dispose()
+
+
+async def test_transactions_autoincrement_matches_the_models() -> None:
+    via_models, _ = make_sessionmaker("sqlite+aiosqlite://")
+    async with via_models.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    via_migrations, _ = make_sessionmaker("sqlite+aiosqlite://")
+    await init_db(via_migrations)
+    for engine in (via_models, via_migrations):
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_autoincrement_tables) == {"transactions"}
+        await engine.dispose()
+
+
+async def test_a_deleted_transaction_id_is_never_reused(session: AsyncSession) -> None:
+    account = await make_account(session)
+    await make_txn(session, account)
+    newest = await make_txn(session, account)
+    deleted_id = newest.id
+    await session.delete(newest)
+    await session.flush()
+    again = await make_txn(session, account)
+    assert again.id > deleted_id  # without AUTOINCREMENT SQLite hands out deleted_id again
+
+
+async def test_0009_keeps_rows_ids_and_constraints() -> None:
+    engine, _ = make_sessionmaker("sqlite+aiosqlite://")
+    async with engine.begin() as conn:
+        await conn.run_sync(_upgrade_to, "0007")
+        await conn.exec_driver_sql(_INSERT_ACCOUNT)
+        for txn_id, duplicate_of in ((3, None), (7, 3), (12, None)):
+            await conn.exec_driver_sql(
+                "INSERT INTO transactions (id, account_id, aggregator_id, posted_on,"
+                " amount_cents, description, raw, duplicate_of_id)"
+                " VALUES (?, 1, ?, '2026-07-01', -12000, 'CORNER CURRY ELMTON', '{}', ?)",
+                (txn_id, f"TRN-{txn_id}", duplicate_of),
+            )
+        before = await conn.run_sync(_constraints)
+    await init_db(engine)  # 0007 -> 0008 -> 0009
+    async with engine.connect() as conn:
+        rows = await conn.exec_driver_sql(
+            "SELECT id, aggregator_id, duplicate_of_id FROM transactions ORDER BY id"
+        )
+        assert [tuple(r) for r in rows] == [
+            (3, "TRN-3", None),
+            (7, "TRN-7", 3),
+            (12, "TRN-12", None),
+        ]
+        assert await conn.run_sync(_constraints) == before
+        seq = await conn.exec_driver_sql(
+            "SELECT seq FROM sqlite_sequence WHERE name = 'transactions'"
+        )
+        assert seq.scalar_one() == 12  # new ids land above every id the table holds
+    await engine.dispose()
+
+
+async def test_0009_downgrade_restores_the_plain_table() -> None:
+    engine, _ = make_sessionmaker("sqlite+aiosqlite://")
+    await init_db(engine)
+    async with engine.begin() as conn:
+        await conn.exec_driver_sql(_INSERT_ACCOUNT)
+        await conn.exec_driver_sql(
+            "INSERT INTO transactions (account_id, aggregator_id, posted_on, amount_cents,"
+            " description, raw)"
+            " VALUES (1, 'TRN-1', '2026-07-01', -12000, 'CORNER CURRY ELMTON', '{}')"
+        )
+        await conn.run_sync(_downgrade_to, "0008")
+        assert await conn.run_sync(_autoincrement_tables) == set()
+        ids = await conn.exec_driver_sql("SELECT id FROM transactions")
+        assert list(ids.scalars()) == [1]
     await engine.dispose()
