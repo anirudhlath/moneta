@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.aggregator.base import AccountDTO, Snapshot, TransactionDTO, concat_snapshots
+from moneta.logical import load_logical_data
 from moneta.models import (
     Account,
     RecurringSeries,
@@ -16,6 +17,7 @@ from moneta.models import (
     TransferLink,
 )
 from moneta.pipelines.run import RESYNC_OVERLAP_DAYS, _sync_since, run_sync
+from moneta.pipelines.transaction_overlap import set_transaction_duplicate
 from tests.conftest import FakeAdapter, RecordingAdapter
 from tests.factories import make_account, make_txn
 
@@ -332,3 +334,91 @@ def test_concat_snapshots_keeps_each_accounts_earliest_floor() -> None:
         ]
     )
     assert merged.complete_replays == {"acc-a": date(2026, 5, 1), "acc-b": date(2026, 6, 9)}
+
+
+def _acme_plaid() -> AccountDTO:
+    return AccountDTO(
+        id="plaid-acme",
+        name="Everyday Checking",
+        org_name="Acme Bank",
+        currency="USD",
+        balance=Decimal("100.00"),
+        balance_date=date(2026, 7, 9),
+        source="plaid",
+    )
+
+
+def _curry(txn_id: str, posted_on: date) -> TransactionDTO:
+    return TransactionDTO(
+        id=txn_id,
+        account_id="plaid-acme",
+        posted_on=posted_on,
+        amount=Decimal("-12.00"),
+        description="CORNER CURRY ELMTON",
+        raw={},
+    )
+
+
+async def test_sync_report_counts_rows_a_complete_replay_dropped(session: AsyncSession) -> None:
+    t1, t2 = _curry("t1", date(2026, 6, 1)), _curry("t2", date(2026, 6, 15))
+    adapter = FakeAdapter(
+        Snapshot(accounts=[_acme_plaid()], transactions=[t1, t2], holdings=[]), source="plaid"
+    )
+    await run_sync(session, [adapter], llm=None, today=date(2026, 7, 9))
+    adapter.snapshot = Snapshot(
+        accounts=[_acme_plaid()],
+        transactions=[t1],
+        holdings=[],
+        complete_replays={"plaid-acme": t1.posted_on},
+    )
+    report = await run_sync(session, [adapter], llm=None, today=date(2026, 7, 9))
+    assert report.ingest.deleted_transactions == 1
+    runs = list(await session.scalars(select(SyncRun).order_by(SyncRun.id)))
+    assert runs[-1].report is not None
+    assert runs[-1].report["ingest"]["deleted_transactions"] == 1
+
+
+async def test_simplefin_copy_is_counted_after_plaid_drops_its_own(session: AsyncSession) -> None:
+    plaid = await make_account(
+        session, aggregator_id="plaid-acme", name="Everyday Checking", source="plaid"
+    )
+    simplefin = await make_account(session, source="simplefin", canonical_account_id=plaid.id)
+    await make_txn(
+        session,
+        plaid,
+        aggregator_id="keep",
+        posted_on=date(2026, 6, 1),
+        amount_cents=-1200,
+        description="CORNER CURRY ELMTON",
+    )
+    gone = await make_txn(
+        session,
+        plaid,
+        aggregator_id="gone",
+        posted_on=date(2026, 6, 15),
+        amount_cents=-4500,
+        description="ELMTON GROCER",
+    )
+    copy = await make_txn(
+        session,
+        simplefin,
+        aggregator_id="s1",
+        posted_on=date(2026, 6, 15),
+        amount_cents=-4500,
+        description="ELMTON GROCER",
+    )
+    # a human confirmed the SimpleFIN row duplicates the Plaid one
+    await set_transaction_duplicate(session, copy.id, gone.id)
+    await session.commit()
+    replay = Snapshot(
+        accounts=[_acme_plaid()],
+        transactions=[_curry("keep", date(2026, 6, 1))],
+        holdings=[],
+        complete_replays={"plaid-acme": date(2026, 6, 1)},
+    )
+    report = await run_sync(
+        session, [FakeAdapter(replay, source="plaid")], llm=None, today=date(2026, 7, 9)
+    )
+    assert report.ingest.deleted_transactions == 1
+    logical = await load_logical_data(session)
+    assert {t.aggregator_id for t in logical.transactions} == {"keep", "s1"}

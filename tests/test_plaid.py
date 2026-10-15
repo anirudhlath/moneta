@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.aggregator.plaid import (
     PlaidAdapter,
@@ -20,7 +22,8 @@ from moneta.aggregator.plaid import (
     poll_link_result,
     save_items,
 )
-from moneta.models import AccountType
+from moneta.models import AccountType, Transaction
+from moneta.pipelines.ingest import ingest_snapshot
 
 
 def _plaid_client(handler: Callable[[httpx.Request], httpx.Response]) -> PlaidClient:
@@ -659,3 +662,30 @@ async def test_accounts_keep_plaids_account_object_as_raw() -> None:
     expected = json.loads(json.dumps(_ACCOUNTS_PAYLOAD["accounts"]))
     assert [a.raw for a in snap.accounts] == expected
     assert "access-1" not in json.dumps([a.raw for a in snap.accounts])  # no credentials
+
+
+@pytest.mark.parametrize(
+    ("second_sync", "expected"),
+    [("complete", {"t1"}), ("not_ready", {"t1", "t2"}), ("failed_mid_paging", {"t1", "t2"})],
+)
+async def test_replay_drops_reach_the_database_only_when_complete(
+    session: AsyncSession, second_sync: str, expected: set[str]
+) -> None:
+    june_1, june_15 = date(2026, 6, 1), date(2026, 6, 15)
+    first = [
+        httpx.Response(200, json=_sync_page([_dated("t1", june_1), _dated("t2", june_15)], False))
+    ]
+    second = {
+        "complete": [httpx.Response(200, json=_sync_page([_dated("t1", june_1)], False))],
+        "not_ready": [
+            httpx.Response(200, json=_sync_page([_dated("t1", june_1)], False, status="NOT_READY"))
+        ],
+        "failed_mid_paging": [
+            httpx.Response(200, json=_sync_page([_dated("t1", june_1)], True)),
+            _plaid_error("ITEM_ERROR", "ITEM_LOGIN_REQUIRED", "re-link"),
+        ],
+    }[second_sync]
+    for pages in (first, second):
+        adapter = PlaidAdapter(_plaid_client(_accounts_then_sync(pages)), [_item(["transactions"])])
+        await ingest_snapshot(session, await adapter.fetch())
+    assert set(await session.scalars(select(Transaction.aggregator_id))) == expected

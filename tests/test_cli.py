@@ -1223,6 +1223,35 @@ def test_sync_omits_warnings_section_when_healthy(tmp_path: Path, monkeypatch) -
     assert "⚠" not in result.output
 
 
+@pytest.mark.parametrize("deleted", [2, 0])
+def test_sync_reports_rows_removed_upstream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, deleted: int
+) -> None:
+    _isolate(monkeypatch, tmp_path)
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        if path == "/sync":
+            return {
+                "ingest": {"new_transactions": 0, "deleted_transactions": deleted},
+                "transfers": {"linked": 0},
+                "recurring": {"new_series": 0},
+                "events": 0,
+                "auto_resolved": 0,
+                "verify": {"verified": 0, "flagged": 0},
+            }
+        return []
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 0
+    assert ("2 transaction(s) removed upstream." in result.output) is (deleted == 2)
+
+
 def _seed_price_change_review(tmp_path: Path) -> None:
     async def _seed() -> None:
         engine, sessionmaker = make_sessionmaker(f"sqlite+aiosqlite:///{tmp_path / 'moneta.db'}")
