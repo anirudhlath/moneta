@@ -14,6 +14,7 @@ This guide covers day-to-day usage. For what the product is and why, see the [PR
 - [Syncing](#syncing)
   - [`moneta status`](#moneta-status)
   - [Staleness footers](#staleness-footers)
+  - [Coverage notes](#coverage-notes)
   - [`moneta digest` — notifications](#moneta-digest--notifications)
 - [Reading the numbers](#reading-the-numbers)
 - [The review queue](#the-review-queue)
@@ -240,6 +241,7 @@ Last sync: 2026-07-16T06:00:03 → ok
   12 new txns, 1 new series, 0 events
 Accounts: 8  ·  Open review items: 2
 Aggregators: simplefin, plaid  ·  LLM: configured
+Coverage: Acme Card ··1234 has no transactions since 2026-07-02 (usually posts ~4 days a week) — recent spending on it may be missing.
 ```
 
 The first two lines come from the most recent sync run (as before): timestamp, outcome
@@ -247,17 +249,18 @@ The first two lines come from the most recent sync run (as before): timestamp, o
 mid-sync), and a one-line summary of what changed. The last two lines are new: total
 accounts, open review-queue items, which sources are configured (`aggregators`, from
 `AggregatorAdapter.source` — `simplefin` and/or `plaid`), and whether an LLM is configured.
-These are booleans/counts only — never credentials. On a fresh database with no sync yet,
+These are booleans/counts only — never credentials. Below them comes one yellow `Coverage:` line for each account whose feed has gone quiet (see [Coverage notes](#coverage-notes)); none when every feed looks alive. On a fresh database with no sync yet,
 you still see the accounts/reviews/aggregators/LLM summary; only the "Last sync" line is
 replaced with "No sync has run yet."
 
 `moneta status --json` merges both API calls into one object: the `/status` fields
-(`last_sync_at`, `last_sync_ok`, `accounts`, `open_reviews`, `aggregators`, `llm_configured`)
+(`last_sync_at`, `last_sync_ok`, `accounts`, `open_reviews`, `aggregators`, `llm_configured`, `stale_accounts`)
 plus a `last_sync` key holding the full `/sync/last` detail (`null` if no sync has ever run):
 
 ```json
 {"last_sync_at": "2026-07-16T06:00:03", "last_sync_ok": true, "accounts": 8,
  "open_reviews": 2, "aggregators": ["simplefin", "plaid"], "llm_configured": true,
+ "stale_accounts": [],
  "last_sync": {"status": "ok", "started_at": "...", "finished_at": "...",
                "success": true, "error": null, "report": {...}}}
 ```
@@ -280,6 +283,35 @@ no successful sync yet — run moneta sync
 
 The footer is silent (nothing printed) once you've synced within the last 24 hours — it only
 speaks up when the numbers you're looking at might be stale.
+
+### Coverage notes
+
+The staleness footer only knows when the last sync ran. A sync can succeed while one
+account's feed has stalled — or while a bank holds that card's transactions back for a
+monthly batch — so `moneta power` and `moneta status` also judge every account on its own
+and print a yellow line for each one that has gone quiet:
+
+```
+Coverage: Acme Card ··1234 has no transactions since 2026-07-02 (usually posts ~4 days a week) — recent spending on it may be missing.
+```
+
+An account is noted when its newest transaction is at least 7 days old **and**, at its usual
+rate — distinct posting days over the last 365 days — you'd have expected at least 5 posting
+days since then. A card you use every day is noted after a week of silence, one you use a few
+days a week after about ten days, a weekly account after about six weeks, and an account that
+posts once or twice a month never is. An account linked across providers is judged once, and
+a transaction from either provider counts. Accounts with no transactions in the last year are
+skipped.
+
+It's a note, not an error: nothing is dropped from the numbers, but spending you made on that
+account recently may not be in them yet. Run `moneta sync`; if the note stays, fix the
+account's connection at its provider, then run `moneta sync --full` to backfill. moneta has no
+closed-account flag, so a card you closed can keep its note for up to a year after its last
+transaction.
+
+The same list is `stale_accounts` in `GET /power`, `GET /status` and their `--json` output —
+`account_id`, `name`, `mask`, `newest_posted_on`, `posting_days` (distinct posting days in the
+last 365) and the `note` text.
 
 ### `moneta digest` — notifications
 
@@ -550,7 +582,7 @@ raw API response to stdout with no rich markup, ready to pipe into `jq` or a
 script, and returns before any table is built. `moneta status --json` merges
 `GET /status` and `GET /sync/last` into one object — the `/status` fields
 (`last_sync_at`, `last_sync_ok`, `accounts`, `open_reviews`, `aggregators`,
-`llm_configured`) plus a `last_sync` key holding the full `/sync/last` payload,
+`llm_configured`, `stale_accounts`) plus a `last_sync` key holding the full `/sync/last` payload,
 which is `null` when no sync has ever run (the rest of the object is still
 populated). Combining `--json` with a write flag
 (`recurring --end/--not-a-bill/--habit/--re-review/--reactivate`,
@@ -750,6 +782,8 @@ Files in the config dir (all owner-only, dir is 0700):
 | A bill whose amount varies shows an odd expected amount | A variable bill (newest 12 charges more than 20% apart) is expected at the charge that repeats most often among them, or their median when nothing repeats, recomputed every sync. One-off extras at the same merchant don't move it, and it never gets price-change events or questions. |
 | Numbers exclude an account | Foreign-currency accounts are excluded from aggregates by design and reported in `networth`. |
 | `power`/`networth` show a dim "data as of ..." line | The newest successful sync is more than 24h old (or there's never been one) — run `moneta sync`. See [Staleness footers](#staleness-footers). |
+| `power`/`status` print a yellow `Coverage:` line | That account's feed has been quiet for longer than its usual posting rate explains, so its recent spending may be missing. Run `moneta sync`; if it persists, fix the account's connection at its provider, then `moneta sync --full`. See [Coverage notes](#coverage-notes). |
+| A `Coverage:` line for an account I closed | moneta has no "closed" flag for accounts, so a card or account that used to post often is judged like any other. Its line stays until its last posting days age out of the 365-day window — or until its usual rate, recomputed over that window every day, no longer predicts 5 posting days since. Nothing is wrong with the numbers; there is nothing to fix at the provider. |
 | `Error: could not reach ...` on any command | Remote mode: the server at `MONETA_API_URL` is down or unreachable — check it's running and the URL/port are right. In-process mode: the aggregator itself (e.g. SimpleFIN) couldn't be reached — check your network. Either way this is a clean exit, not a traceback. |
 | Remote CLI gets 401 | `MONETA_API_TOKEN` on the client must match the server's. |
 | Sync says "setup simplefin or setup plaid" | No source is configured — see [Connecting data sources](#connecting-data-sources). |

@@ -19,6 +19,7 @@ from moneta.cadence import month_bounds
 from moneta.config import Settings
 from moneta.db import init_db, make_sessionmaker
 from moneta.models import (
+    AccountType,
     EventKind,
     RecurringSeries,
     ReviewItem,
@@ -614,6 +615,7 @@ async def test_status_endpoint_fresh_db(client: httpx.AsyncClient) -> None:
         "open_reviews": 0,
         "aggregators": ["fake"],  # the client fixture's FakeAdapter source
         "llm_configured": False,
+        "stale_accounts": [],
     }
 
 
@@ -989,3 +991,30 @@ async def test_power_history_default_is_six_months(client: httpx.AsyncClient) ->
     r = await client.get("/power/history")
     assert r.status_code == 200
     assert len(r.json()) == 6
+
+
+async def test_status_and_power_list_accounts_whose_feed_went_quiet(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    client: httpx.AsyncClient,
+) -> None:
+    async with sessionmaker() as session:
+        card = await make_account(session, name="Acme Card", mask="1234", type=AccountType.credit)
+        for days_ago in range(14, 201):
+            await make_txn(session, card, posted_on=_TODAY - timedelta(days=days_ago))
+        await session.commit()
+    quiet_since = (_TODAY - timedelta(days=14)).isoformat()
+    expected = [
+        {
+            "account_id": card.id,
+            "name": "Acme Card",
+            "mask": "1234",
+            "newest_posted_on": quiet_since,
+            "posting_days": 187,
+            "note": (
+                f"Acme Card ··1234 has no transactions since {quiet_since} "
+                "(usually posts ~4 days a week) — recent spending on it may be missing."
+            ),
+        }
+    ]
+    assert (await client.get("/status")).json()["stale_accounts"] == expected
+    assert (await client.get("/power")).json()["stale_accounts"] == expected
