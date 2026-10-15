@@ -156,6 +156,8 @@ def _monthly_links(account_id: int, amounts: list[int]) -> list[ClassifiedLink]:
         ([-10000, -10000, -10000, -15001], -10000),
         # only the 3 payments before the newest are the yardstick, not older history
         ([-20000, -20000, -20000, -8000, -8000, -8000, -13000], -8000),
+        # the window is exactly 3: a window of 2 or 4 would read a median of 11000 and keep 13000
+        ([-30000, -8000, -8000, -14000, -13000], -8000),
     ],
 )
 def test_loan_payment_stats_expected_is_newest_unless_one_off(
