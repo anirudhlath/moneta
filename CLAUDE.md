@@ -44,7 +44,7 @@ Pure-internal refactors with zero behavior change may skip this, but state that 
 
 ## Layout
 
-- `aggregator/` — adapter protocol (`AggregatorAdapter`: `source: str` property + `fetch`) + SimpleFIN + Plaid; `run_sync` iterates the configured adapters itself, no merging layer; DTOs stop at `pipelines/ingest.py`
+- `aggregator/` — adapter protocol (`AggregatorAdapter`: `source: str` property + `fetch`) + SimpleFIN + Plaid; `run_sync` iterates the configured adapters itself, no merging layer; DTOs stop at `pipelines/ingest.py`, which keeps each account's latest provider record in `Account.raw` (Plaid's account object; SimpleFIN's account minus `transactions`/`holdings`; latest observation only)
 - `cadence.py` — pure cadence math (gap matching, monthlyizing, tolerances); no I/O, shared by `queries.py` and `pipelines/recurring.py`
 - `logical.py` — read-only account/transaction/holdings projections; `account_metadata.py` — durable field-level metadata choices, including sole-alias fallback when the root is uninformed
 - `pipelines/` — ingest, normalize, account/transaction overlap and reconciliation, transfers, financing (deterministic financing-mode fingerprint + one-time review question), review (LLM auto-review + `verify_series`), recurring, events, run (orchestrator)

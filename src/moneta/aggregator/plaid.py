@@ -203,6 +203,7 @@ def _parse_account(acct: dict[str, Any], org_name: str) -> AccountDTO:
         type_hint=_map_type(acct.get("type", ""), acct.get("subtype")),
         source="plaid",
         mask=acct.get("mask"),
+        raw=acct,
     )
 
 

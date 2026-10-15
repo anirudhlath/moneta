@@ -24,6 +24,9 @@ _MAX_EMPTY_WINDOWS = 9
 # The bridge refreshes institutions live, so a single request routinely outlasts
 # httpx's 5 s default; a sync is a background pull, so wait rather than fail it.
 _TIMEOUT = httpx.Timeout(60.0)
+# stored as their own rows; the rest of a bridge account is its raw record (it holds no
+# credentials: org.sfin-url is the server root, the access URL's auth lives in config)
+_NOT_ACCOUNT_FIELDS = frozenset({"transactions", "holdings"})
 
 
 def _split_auth(access_url: str) -> tuple[str, tuple[str, str]]:
@@ -141,6 +144,7 @@ def _parse_snapshot(data: dict[str, Any]) -> Snapshot:
                 balance_date=_ts_to_date(acct["balance-date"]),
                 source="simplefin",
                 mask=infer_mask(acct["name"]),
+                raw={k: v for k, v in acct.items() if k not in _NOT_ACCOUNT_FIELDS},
             )
         )
         for txn in acct.get("transactions", []):

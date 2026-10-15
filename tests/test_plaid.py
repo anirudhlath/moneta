@@ -649,3 +649,13 @@ def test_save_items_leaves_no_tmp_file(tmp_path: Path) -> None:
     path = items_path(tmp_path)
     save_items(path, [PlaidItem(item_id="it-1", access_token="a")])
     assert [p.name for p in tmp_path.iterdir()] == ["plaid_items.json"]
+
+
+async def test_accounts_keep_plaids_account_object_as_raw() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_ACCOUNTS_PAYLOAD)
+
+    snap = await PlaidAdapter(_plaid_client(handle), [_item()]).fetch()
+    expected = json.loads(json.dumps(_ACCOUNTS_PAYLOAD["accounts"]))
+    assert [a.raw for a in snap.accounts] == expected
+    assert "access-1" not in json.dumps([a.raw for a in snap.accounts])  # no credentials

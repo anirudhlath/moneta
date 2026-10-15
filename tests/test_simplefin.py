@@ -429,3 +429,40 @@ async def test_owned_clients_allow_a_slow_bridge(monkeypatch: pytest.MonkeyPatch
     await claim_setup_token(token)
     assert len(timeouts) == 3
     assert all(t["read"] is not None and t["read"] >= 60 for t in timeouts)
+
+
+async def test_accounts_keep_the_bridge_record_without_transactions_as_raw() -> None:
+    account = {
+        "org": {
+            "domain": "acme.example",
+            "name": "Acme Bank",
+            "sfin-url": "https://bridge.example/simplefin",
+        },
+        "id": "ACT-9",
+        "name": "Everyday Checking",
+        "currency": "USD",
+        "balance": "100.00",
+        "available-balance": "100.00",
+        "balance-date": 1751328000,
+        "transactions": [
+            {
+                "id": "TRN-9",
+                "posted": 1751328000,
+                "amount": "-12.00",
+                "description": "CORNER CURRY ELMTON",
+            }
+        ],
+        "holdings": [],
+    }
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"errors": [], "accounts": [account]})
+
+    adapter = SimpleFINAdapter(
+        "https://jane:s3cret-token@bridge.example/simplefin",
+        client=_mock_client(httpx.MockTransport(handle)),
+    )
+    snap = await adapter.fetch()
+    expected = {k: v for k, v in account.items() if k not in ("transactions", "holdings")}
+    assert snap.accounts[0].raw == expected
+    assert "s3cret-token" not in json.dumps(snap.accounts[0].raw)  # no credentials

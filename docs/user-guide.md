@@ -718,7 +718,7 @@ file values. The `setup` commands write the file for you.
 Files in the config dir (all owner-only, dir is 0700):
 
 - `config.toml` — settings, including credentials
-- `moneta.db` — the database
+- `moneta.db` — the database (it also keeps each account's latest raw provider record)
 - `plaid_items.json` — linked Plaid banks (item ids + access tokens)
 - `moneta.log` — rotating log file
 
