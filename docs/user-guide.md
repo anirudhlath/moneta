@@ -346,15 +346,19 @@ The flagship view for the current month:
 
 `moneta power --history N` (e.g. `--history 6`, 1-60 months) replaces the table above with a
 compact Month/Income/Other inflows/Spend/Net history instead. The newest row is the current,
-still-in-progress month; every row (including that one) reports *actual observed* money for that
-calendar month — not today's recurring-series state — so a since-cancelled bill or an old raise
-still shows correctly even though no series reflects it anymore. **Income** counts inflows
-tagged to an income series: a recurring inflow series that isn't a habit (a paycheck), whether
-it is still active or has since ended, so a former employer's paychecks count in the months they
-paid. A series you answered "not recurring" keeps no tagged charges, so its inflows count as
-Other inflows, never income. **Other inflows** is every other inflow that isn't a transfer —
-refunds, money from friends, one-off deposits — shown so nothing disappears, but not income. **Net** = income −
-spend; other inflows are left out of it.
+still-in-progress month; every row (including that one) reports the *observed* money for that
+calendar month, so a since-cancelled bill or an old raise still shows correctly even though no
+series reflects it anymore. Today's series tags only decide which inflow column a month's money
+lands in: marking a paycheck series a habit today moves its past paychecks to Other inflows.
+**Income** counts inflows tagged to an income series: a recurring inflow series that isn't a
+habit (a paycheck), whether it is still active or has since ended, so a former employer's
+paychecks count in the months they paid. A series you answered "not recurring" keeps no tagged
+charges, so its inflows count as Other inflows, never income. **Other inflows** is every other
+inflow that is counted at all — refunds, money from friends, one-off deposits — shown so nothing
+disappears, but not income. Three kinds of transaction are left out of every column: a leg of a
+transfer link, a transaction on an account that isn't checking, savings or credit (a loan or
+brokerage account, say), and one in a currency other than your primary currency. **Net** =
+income − spend; other inflows are left out of it.
 
 ### `moneta txns` — auditing the numbers
 
@@ -418,7 +422,8 @@ posted at most 6 days apart. Each candidate pair is scored in points:
 | +1 | the outflow leaves a checking or savings account |
 
 Payment-app rail wording doesn't count as transfer wording: `Zelle payment from`/`to`,
-`Venmo payment` and `PayPal Inst Xfer` (any case or spacing) name a person, not one of
+`Venmo payment` and `PayPal Inst Xfer` (any case, with whitespace between the words; a
+glued `VENMOPAYMENT` doesn't match) name a person, not one of
 your accounts, so that phrase is ignored before the search. Other words in the same
 description still count.
 

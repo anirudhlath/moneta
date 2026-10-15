@@ -32,7 +32,9 @@ Existing apps (Origin, Copilot) fail in four specific ways that moneta is built 
   plus spent-so-far, remaining, safe-to-spend per day, and upcoming charges due later
   this month, for the current month. Accrual vs. cash-out accounting keeps "spent so
   far" honest when purchases go on credit. `--history N` shows a month-over-month
-  income/other inflows/spend/net table instead, where income is detected income only.
+  income/other inflows/spend/net table instead, where income is detected income only: inflows
+  tagged to an income series, whether that series is still active or has since ended (unlike
+  `power`, which counts active series only).
 - **Transaction drill-down** (`moneta txns`) — every transaction in a date range,
   dimmed and labeled with the exact reason it isn't counted as spend (transfer, loan
   payment, credit-card payment, fixed-cost series, ...) when it isn't. The trust
