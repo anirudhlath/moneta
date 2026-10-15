@@ -69,7 +69,9 @@ list[TxnRow]` — joins Account + outer-joins RecurringSeries, loads
 + primary currency + not linked + not tagged to an active non-discretionary
 series + in range); `excluded_because` gives the first matching reason
 ("inflow", "transfer", "loan payment", "credit-card payment", "fixed cost
-(series X)", "non-spend account", "foreign currency"). Endpoint:
+(series X)", "non-spend account", "financed purchase", "foreign currency";
+"financed purchase", added 2026-10-15, is an outflow on a loan-like account,
+whose payments are the fixed cost). Endpoint:
 `GET /transactions?start&end&account_id&merchant` (defaults: current month;
 merchant is a case-insensitive substring match). Ordered newest first.
 

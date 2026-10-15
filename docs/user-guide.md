@@ -331,7 +331,8 @@ The flagship view for the current month:
   `$2500.00 every 2 weeks ≈ $5416.67/mo` — monthly rows stay a bare amount.
 - **Spending power** = income − fixed costs.
 - **Spent so far / remaining** — discretionary spend this month (accrual: credit purchases
-  count when made, not when the card is paid).
+  count when made, not when the card is paid). A financing card's purchases don't count:
+  its payments are a fixed cost instead (`financed purchase` in `moneta txns`).
 - **Per day (N days left)** — `remaining ÷ days left in month` (today through month-end,
   inclusive; the last day of the month shows 1 day left). Negative remaining shows a negative
   per-day figure — no clamping to zero.
@@ -371,6 +372,7 @@ excluded rows render dim with the reason in the same column — one of:
 | `credit-card payment` | Outflow leg of a transfer paying a credit card (the underlying purchases are counted instead) |
 | `fixed cost (series X)` | Tagged to an active, non-discretionary recurring series (counted in `power`'s fixed costs instead) |
 | `non-spend account` | Posted to an account type that isn't spend-eligible (e.g. a loan or brokerage account) |
+| `financed purchase` | A purchase, interest charge or fee on a financing card — `financing_mode`, or a card whose financing question is still open. Its payments count as a fixed cost in `power` instead, so the purchase isn't counted twice. Known gap: a new financed purchase shows in no `power` figure until the card's first payment is linked (`moneta obligations` lists the balance meanwhile) |
 | `foreign currency` | Posted to a non-primary-currency account (excluded from all aggregates) |
 
 `excluded_because` is the *first* matching reason in that order — a row only ever gets one.

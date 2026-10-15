@@ -174,6 +174,7 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
         if spend_reason(
             txn.amount_cents,
             account.type,
+            account.loan_like,
             account.currency,
             primary,
             link_field(txn.id, by_outflow, inflow_ids),

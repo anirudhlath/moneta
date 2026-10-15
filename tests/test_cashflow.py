@@ -1,11 +1,12 @@
 from datetime import date
 
 import httpx
+import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from moneta.api import create_app
 from moneta.cadence import month_bounds
-from moneta.models import Account, AccountType, TransferLink
+from moneta.models import Account, AccountType, ReviewItem, ReviewKind, TransferLink
 from moneta.views.cashflow import accrual_by_month, accrual_income, accrual_spend, cash_out
 from tests.factories import make_account, make_txn
 
@@ -207,3 +208,42 @@ async def test_accrual_by_month_year_boundary_and_equivalence(session: AsyncSess
         start, end = month_bounds(date(int(year_s), int(month_s), 1))
         assert await accrual_income(session, start, end) == income_cents
         assert await accrual_spend(session, start, end) == spend_cents
+
+
+@pytest.mark.parametrize(
+    ("state", "spend"), [("financing mode", 0), ("open question", 0), ("plain card", 100000)]
+)
+async def test_accrual_excludes_financed_purchase(
+    session: AsyncSession, state: str, spend: int
+) -> None:
+    """History and `cashflow` agree with `power`: a financing card's purchase is paid by
+    its fixed-cost payments, so it is not spend; a plain card's purchase still is."""
+    checking = await make_account(session, type=AccountType.checking)
+    card = await make_account(
+        session, type=AccountType.credit, financing_mode=state == "financing mode"
+    )
+    if state == "open question":
+        session.add(
+            ReviewItem(
+                kind=ReviewKind.financing_account, question="q", payload={"account_id": card.id}
+            )
+        )
+    await make_txn(
+        session,
+        card,
+        amount_cents=-100000,
+        posted_on=date(2026, 7, 2),
+        description="ACME FURNITURE",
+    )
+    out = await make_txn(
+        session, checking, amount_cents=-10000, posted_on=date(2026, 7, 5), description="ACME PMT"
+    )
+    inn = await make_txn(
+        session, card, amount_cents=10000, posted_on=date(2026, 7, 5), description="ACME PMT"
+    )
+    session.add(TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule"))
+    await session.flush()
+    assert await accrual_spend(session, date(2026, 7, 1), date(2026, 7, 31)) == spend
+    assert await accrual_by_month(session, months=1, today=date(2026, 7, 20)) == [
+        ("2026-07", 0, spend)
+    ]

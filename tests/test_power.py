@@ -643,3 +643,47 @@ async def test_financing_ruling_on_an_alias_beats_an_open_question_on_the_card(
     await session.flush()
     report = await power_report(session, today=date(2026, 7, 7))
     assert report.fixed_costs == []
+
+
+@pytest.mark.parametrize(
+    ("state", "fixed", "spent"),
+    [
+        ("financing mode", [_CARD_PAYMENT_LINE], 0),
+        ("open question", [_CARD_PAYMENT_LINE], 0),
+        ("plain card", [], 100000),
+    ],
+)
+async def test_financed_purchase_is_not_also_spend(
+    session: AsyncSession, state: str, fixed: list[SeriesLine], spent: int
+) -> None:
+    """A $1,000.00 financed purchase is paid off by the card's $100.00/mo payments, and
+    those are the fixed cost: counting the purchase as spend too would count it twice.
+    A plain card's purchase is spend, and its payment is a transfer."""
+    checking = await make_account(session, type=AccountType.checking)
+    card = await make_account(
+        session,
+        type=AccountType.credit,
+        name="Acme Store Card",
+        balance_cents=-90000,
+        financing_mode=state == "financing mode",
+    )
+    if state == "open question":
+        session.add(_financing_question(card))
+    await make_txn(
+        session, card, amount_cents=-100000, merchant="Acme Furniture", posted_on=date(2026, 7, 2)
+    )
+    out = await make_txn(
+        session,
+        checking,
+        amount_cents=-10000,
+        merchant="Acme Card Payment",
+        posted_on=date(2026, 7, 5),
+    )
+    inn = await make_txn(
+        session, card, amount_cents=10000, merchant="Acme Card Payment", posted_on=date(2026, 7, 5)
+    )
+    session.add(TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule"))
+    await session.flush()
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert report.fixed_costs == fixed
+    assert report.spent_so_far_cents == spent

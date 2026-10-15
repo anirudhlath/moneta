@@ -4,7 +4,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from moneta.api import create_app
-from moneta.models import AccountType, SeriesStatus, TransferLink
+from moneta.models import AccountType, ReviewItem, ReviewKind, SeriesStatus, TransferLink
 from moneta.views.power import power_report
 from moneta.views.transactions import transactions_report
 from tests.factories import make_account, make_series, make_txn
@@ -391,3 +391,34 @@ async def test_power_and_transactions_agree_on_spent_so_far(
 
     assert power.spent_so_far_cents == 2500  # only the plain checking spend
     assert body["through_today_cents"] == power.spent_so_far_cents
+
+
+async def test_financed_purchase_reason(session: AsyncSession) -> None:
+    """A loan-like card's own purchase is paid off by its payments (the fixed cost), so it
+    isn't spend; a plain card's purchase is, and a loan account keeps its own reason."""
+    financing = await make_account(session, type=AccountType.credit, financing_mode=True)
+    pending = await make_account(session, type=AccountType.credit)
+    plain = await make_account(session, type=AccountType.credit)
+    loan = await make_account(session, type=AccountType.loan)
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.financing_account, question="q", payload={"account_id": pending.id}
+        )
+    )
+    for account, merchant in (
+        (financing, "Acme Furniture"),
+        (pending, "Acme Mattress"),
+        (plain, "Corner Curry"),
+        (loan, "Acme Loan Fee"),
+    ):
+        await make_txn(
+            session, account, amount_cents=-100000, merchant=merchant, posted_on=date(2026, 7, 2)
+        )
+    await session.flush()
+    rows = await transactions_report(session, date(2026, 7, 1), date(2026, 7, 31))
+    assert {r.merchant: (r.counted_in_spend, r.excluded_because) for r in rows} == {
+        "Acme Furniture": (False, "financed purchase"),
+        "Acme Mattress": (False, "financed purchase"),
+        "Corner Curry": (True, None),
+        "Acme Loan Fee": (False, "non-spend account"),
+    }

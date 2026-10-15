@@ -55,6 +55,7 @@ def link_field(
 def spend_reason(
     txn_amount_cents: int,
     account_type: str,
+    account_loan_like: bool,
     currency: str,
     primary: str,
     link: str | None,
@@ -66,7 +67,10 @@ def spend_reason(
     `series_status`/`series_discretionary` describe the txn's owning series, or None
     when it isn't tagged to one. Shared by transactions._excluded_because (which adds
     the series' merchant name to the "fixed cost" reason) and power.spent_so_far, so
-    the two views can never quietly diverge on what counts as spend."""
+    the two views can never quietly diverge on what counts as spend.
+    `account_loan_like` is the txn's logical account's `loan_like`: that account's own
+    outflows (purchases, interest, fees) are paid off by the payments `power` counts as
+    its fixed cost, so counting them as spend too would count them twice."""
     if txn_amount_cents >= 0:
         return "inflow"
     if link == "loan_payment":
@@ -79,6 +83,8 @@ def spend_reason(
         return "fixed cost"
     if account_type not in SPEND_ACCOUNT_TYPES:
         return "non-spend account"
+    if account_loan_like:
+        return "financed purchase"
     if currency != primary:
         return "foreign currency"
     return None
@@ -96,6 +102,7 @@ def _excluded_because(
     reason = spend_reason(
         txn.amount_cents,
         account.type,
+        account.loan_like,
         account.currency,
         primary,
         link,

@@ -35,7 +35,7 @@ Existing apps (Origin, Copilot) fail in four specific ways that moneta is built 
   income/spend/net table instead.
 - **Transaction drill-down** (`moneta txns`) — every transaction in a date range,
   dimmed and labeled with the exact reason it isn't counted as spend (transfer, loan
-  payment, credit-card payment, fixed-cost series, ...) when it isn't. The trust
+  payment, credit-card payment, financed purchase, fixed-cost series, ...) when it isn't. The trust
   companion to spending power: "why is spent-so-far $X?" always has an answer.
 - **Recurring detection** — cadence (weekly/biweekly/monthly/annual) and
   amount-stability analysis over normalized merchants, for outflows (bills) *and*
