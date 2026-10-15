@@ -181,8 +181,8 @@ the spinner — the fetch itself is happening on the server, out of the client's
 
 When a sync drops automatic transfer links that no longer qualify (see
 [How transfers are matched](#how-transfers-are-matched)), the summary adds a line such
-as `Dropped 1 stale transfer link.` The freed transactions are matched again, or asked
-about, in that same sync.
+as `Dropped 1 stale transfer link.` The freed transactions are matched again in that same
+sync, and an outflow left without a match gets a transfer question unless it already had one.
 
 Each configured source (SimpleFIN, Plaid, ...) syncs on its **own** incremental window,
 computed from that source's own newest stored transaction, including observations
@@ -424,13 +424,14 @@ two outflows that both qualify for an automatic link want the same inflow, the h
 score wins and an equal score goes to the outflow Moneta stored first; the other
 outflow is asked about.
 
-Every sync, and `moneta reconcile`, first re-scores each link it made automatically with
-the same `score_pair` and drops the ones that no longer auto-link, then matches the freed
-transactions again in the same run. A link made under older rules therefore can't keep
-a purchase out of spent-so-far. The re-check looks at the pair's score and transfer
-wording only; it does not repeat the single-candidate test, so an automatic link stays
-when a second same-amount inflow shows up later. Links you chose in `moneta review`,
-and links the LLM picked, are never re-checked.
+Every sync, and `moneta reconcile`, first re-scores each link it made automatically,
+with the same pair score a new match gets (the points above; `score_pair` in the code),
+and drops the ones that no longer reach 8 or no longer have transfer wording. It then
+matches the freed transactions again in the same run, so an old link that no longer
+holds up is removed instead of keeping its purchase out of spent-so-far. The re-check looks at
+the pair's score and transfer wording only; it does not repeat the single-candidate
+test, so an automatic link stays when a second same-amount inflow shows up later. Links
+you chose in `moneta review`, and links the LLM picked, are never re-checked.
 
 ### `moneta networth`
 
