@@ -249,9 +249,10 @@ def merge_targets(names: Iterable[str], targets_only: Iterable[str] = ()) -> dic
     with 3+ different non-place tails absorbs only its place variants. A name whose last
     word is a shorter name's last word with a place glued on ("Acme Universityriverton")
     merges into it when the glued tail is a place, or when a multi-word name shows 2+
-    different glued tails. A per-charge code ("Acmeapp-Qwertyui") is dropped once 2+
-    different codes share the merchant. Names in `targets_only` can absorb others but
-    never merge themselves and teach no places.
+    different glued tails, unless that name is a generic prefix (3+ different non-place
+    tails), where only a place folds. A per-charge code ("Acmeapp-Qwertyui") is dropped
+    once 2+ different codes share the merchant. Names in `targets_only` can absorb others
+    but never merge themselves and teach no places.
     """
     sources = set(names)
     coded = _charge_codes(sources)
