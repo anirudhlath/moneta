@@ -3,7 +3,7 @@ from datetime import date
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.models import Account, AccountType, Cadence, TransferLink
+from moneta.models import Account, AccountType, Cadence, ReviewItem, ReviewKind, TransferLink
 from moneta.queries import ClassifiedLink, classified_links, loan_payment_stats
 from tests.factories import make_account, make_txn
 
@@ -187,3 +187,25 @@ def test_loan_payment_stats_sums_payments_on_one_day() -> None:
     assert stats[50].expected_cents == -10000
     assert stats[50].cadence == Cadence.monthly
     assert stats[50].last_paid_on == date(2026, 6, 1)
+
+
+async def test_classified_links_open_financing_question_is_loan_like(
+    session: AsyncSession,
+) -> None:
+    checking = await make_account(session, type=AccountType.checking)
+    card = await make_account(session, type=AccountType.credit, balance_cents=-90000)
+    out = await make_txn(session, checking, amount_cents=-10000, posted_on=date(2026, 7, 1))
+    inn = await make_txn(session, card, amount_cents=10000, posted_on=date(2026, 7, 1))
+    session.add(TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule"))
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.financing_account,
+            question="q",
+            payload={"account_id": card.id},
+        )
+    )
+    await session.flush()
+
+    [link] = await classified_links(session)
+
+    assert link.inflow_is_loan_like is True

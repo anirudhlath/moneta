@@ -141,8 +141,7 @@ async def classified_links(session: AsyncSession) -> list[ClassifiedLink]:
                 outflow_series_id=out.series_id,
                 outflow_posted_on=out.posted_on,
                 outflow_amount_cents=out.amount_cents,
-                inflow_is_loan_like=in_account.type == AccountType.loan
-                or in_account.financing_mode,
+                inflow_is_loan_like=in_account.loan_like,
             )
         )
     return result

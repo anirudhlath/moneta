@@ -487,7 +487,12 @@ first payment is fine) — looks like financing in use. The first time this fing
 fires for an account, `moneta review` asks a one-time financing-check question (`y`/`n`);
 the answer is remembered and never asked again for that account. Answering `y` sets
 `financing_mode`, which gives the account loan semantics: its payments count as fixed
-costs (instead of its purchases), and it appears in `moneta obligations`.
+costs (instead of its purchases), and it appears in `moneta obligations`. Until you
+answer, moneta already treats the card this way — the auto-review LLM never answers this
+question, and a card that fits the fingerprint shouldn't drop out of fixed costs while it
+waits. Answering `n` makes it a plain credit card again. If you already answered for this
+card through another provider's record of it, that answer stands and a question still
+open on the other record changes nothing.
 
 You can also set or clear this manually, bypassing the detection question:
 
@@ -495,9 +500,9 @@ You can also set or clear this manually, bypassing the detection question:
 moneta accounts --set-financing <ID> true|false
 ```
 
-After confirming financing this way (review answer or `--set-financing`), any old
-credit-payment series over that card is replaced by the derived per-account payment line
-on the next `moneta sync` — numbers self-heal automatically, with no double-counting in
+Once a card counts as financing — an open question, a `y` answer, or `--set-financing
+true` — any old credit-payment series over it is replaced by the derived per-account
+payment line on the next `moneta sync` — numbers self-heal automatically, with no double-counting in
 the interim.
 
 **Limitation:** a *hybrid* card — one carrying both everyday spending and a promo

@@ -2,7 +2,7 @@ from datetime import date
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.models import AccountType, Transaction, TransferLink
+from moneta.models import AccountType, ReviewItem, ReviewKind, Transaction, TransferLink
 from moneta.views.financing import compute_obligations
 from tests.factories import make_account, make_txn
 
@@ -223,3 +223,41 @@ async def test_promo_ending_today_with_a_balance_left_warns(session: AsyncSessio
 
     assert obs[0].payoff_estimate == date(2026, 10, 5)  # today + 3 * 30 days
     assert obs[0].deferred_interest_risk is True
+
+
+async def test_open_financing_question_gets_obligation(session: AsyncSession) -> None:
+    """Until someone answers the financing question, the card is an obligation."""
+    checking = await make_account(session, type=AccountType.checking)
+    card = await make_account(
+        session, type=AccountType.credit, name="Acme Store Card", balance_cents=-90000
+    )
+    for month in (5, 6, 7):
+        out = await make_txn(
+            session,
+            checking,
+            amount_cents=-30000,
+            merchant="Acme Card Payment",
+            posted_on=date(2026, month, 5),
+        )
+        inn = await make_txn(
+            session,
+            card,
+            amount_cents=30000,
+            merchant="Acme Card Payment",
+            posted_on=date(2026, month, 5),
+        )
+        await _link(session, out, inn)
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.financing_account,
+            question="'Acme Store Card' looks like promo financing being paid down?",
+            payload={"account_id": card.id},
+        )
+    )
+    await session.flush()
+
+    obs = await compute_obligations(session, today=date(2026, 7, 7))
+
+    assert [(ob.account_id, ob.monthly_payment_cents, ob.months_left) for ob in obs] == [
+        (card.id, 30000, 3)
+    ]
