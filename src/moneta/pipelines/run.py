@@ -19,7 +19,8 @@ from moneta.pipelines.transfers import TransferStats, link_transfers
 
 # SimpleFIN's default window when start-date is omitted is server-chosen (~1 day), so an
 # explicit since is always sent: the epoch on first/full sync (each institution returns
-# whatever history it retains), overlap from the newest stored txn otherwise.
+# whatever history it retains), otherwise the newest stored txn of the source's
+# most-behind active account minus the overlap (see _sync_since).
 _EPOCH = date(1970, 1, 1)
 RESYNC_OVERLAP_DAYS = 7
 # An account whose newest txn sits more than this many days behind its source's

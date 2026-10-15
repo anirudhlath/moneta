@@ -185,8 +185,8 @@ of the source's most-behind active account (observations superseded by another p
 count), so a card that delivers a month of back-dated transactions at statement time gets
 them on the next sync even when another account at the same source posted yesterday. An
 account counts as active while its newest transaction is within 90 days of the source's
-newest; a closed account stops holding the window back. This
-means a SimpleFIN outage, or a bank that's been silently failing for weeks, self-heals on the
+newest; a closed account stops holding the window back. Because each source has its own
+window, a SimpleFIN outage, or a bank that's been silently failing for weeks, self-heals on the
 next successful sync instead of staying masked by Plaid's daily full-history replay. The
 tradeoff: a brand-new source's first-ever sync on an already-populated database inherits the
 existing global newest date as its starting point rather than pulling full history — run
@@ -203,9 +203,10 @@ Synced: 12 new transactions, 1 transfers linked, 0 new series, 0 events.
 
 SimpleFIN requests wait up to 60 seconds for the bridge, which refreshes your
 institutions live. A `⚠ simplefin: ReadTimeout` therefore means the bridge was stalled,
-not just slow; the next sync retries from SimpleFIN's own newest transaction.
+not just slow; the next sync retries from where SimpleFIN's accounts left off (a week before
+the newest transaction of its most-behind active account).
 
-(A real example: a Plaid item losing its login shows `⚠ Plaid item Apple Card skipped
+(A real example: a Plaid item losing its login shows `⚠ Plaid item Acme Card skipped
 (ITEM_LOGIN_REQUIRED) — repair with: moneta setup plaid-relink <item-id>` — previously this
 only reached the log file; now it's visible in the sync summary the moment it happens, and
 the hint points at the update-mode repair, not a duplicate-account-risking re-link.) Only when
