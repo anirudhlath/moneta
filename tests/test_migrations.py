@@ -1,16 +1,17 @@
 from pathlib import Path
 
+from alembic import command
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from alembic.script import ScriptDirectory
-from sqlalchemy import inspect
+from sqlalchemy import inspect, select
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 import moneta.db
 from moneta.db import init_db, make_sessionmaker
-from moneta.models import Base
+from moneta.models import Account, Base
 from tests.factories import make_series
 
 
@@ -38,6 +39,27 @@ def _schema(conn: Connection) -> dict[str, list[tuple[str, str, bool]]]:
 async def _schema_of(engine: AsyncEngine) -> dict[str, list[tuple[str, str, bool]]]:
     async with engine.connect() as conn:
         return await conn.run_sync(_schema)
+
+
+def _alembic_config(conn: Connection) -> Config:
+    """A config that runs the real migrations on `conn` (env.py requires the connection)."""
+    cfg = Config()
+    cfg.set_main_option("script_location", str(Path(moneta.db.__file__).parent / "migrations"))
+    cfg.attributes["connection"] = conn
+    return cfg
+
+
+def _upgrade_to(conn: Connection, revision: str) -> None:
+    """Stop at `revision`, unlike init_db, which always goes to head."""
+    command.upgrade(_alembic_config(conn), revision)
+
+
+# an account row with only the columns every revision since 0001 requires
+_INSERT_ACCOUNT = (
+    "INSERT INTO accounts (aggregator_id, name, org_name, type, currency, balance_cents,"
+    " balance_date) VALUES ('ACT-1', 'Everyday Checking', 'Acme Bank', 'checking', 'USD',"
+    " 10000, '2026-07-01')"
+)
 
 
 async def test_migrations_match_create_all_schema() -> None:
@@ -86,4 +108,16 @@ async def test_0007_allows_several_series_per_merchant() -> None:
         await make_series(session, merchant="Acme Fitness", expected_cents=-999)
         await make_series(session, merchant="Acme Fitness", expected_cents=-4999)
         await session.commit()
+    await engine.dispose()
+
+
+async def test_0008_gives_existing_accounts_an_empty_raw() -> None:
+    engine, sm = make_sessionmaker("sqlite+aiosqlite://")
+    async with engine.begin() as conn:
+        await conn.run_sync(_upgrade_to, "0007")
+        await conn.exec_driver_sql(_INSERT_ACCOUNT)
+    await init_db(engine)  # 0007 -> 0008
+    async with sm() as session:
+        account = (await session.scalars(select(Account))).one()
+        assert account.raw == {}
     await engine.dispose()

@@ -372,3 +372,25 @@ async def test_correction_invalidates_affected_duplicate_relationships(
         "TEST",
         {},
     )
+
+
+async def test_account_keeps_only_its_latest_raw_record(session: AsyncSession) -> None:
+    def snap(seen: int) -> Snapshot:
+        account = AccountDTO(
+            id="plaid-raw",
+            name="Everyday Checking",
+            org_name="Acme Bank",
+            currency="USD",
+            balance=Decimal("100.00"),
+            balance_date=date(2026, 7, 1),
+            source="plaid",
+            raw={"subtype": "checking", "seen": seen},
+        )
+        return Snapshot(accounts=[account], transactions=[], holdings=[])
+
+    await ingest_snapshot(session, snap(1))
+    account = (await session.scalars(select(Account))).one()
+    assert account.raw == {"subtype": "checking", "seen": 1}
+    await ingest_snapshot(session, snap(2))
+    await session.refresh(account)
+    assert account.raw == {"subtype": "checking", "seen": 2}

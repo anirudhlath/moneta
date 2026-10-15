@@ -19,6 +19,7 @@ class AccountDTO(BaseModel):
     type_hint: AccountType | None = None
     source: str = ""
     mask: str | None = None
+    raw: dict[str, Any] = Field(default_factory=dict)  # the provider's account record
 
 
 class TransactionDTO(BaseModel):

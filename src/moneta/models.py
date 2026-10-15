@@ -171,6 +171,8 @@ class Account(Base):
     canonical_account_id: Mapped[int | None] = mapped_column(
         ForeignKey("accounts.id"), default=None
     )
+    # the provider's latest account record as fetched; latest observation only
+    raw: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
 class Transaction(Base):
