@@ -11,7 +11,13 @@ import statistics
 from collections.abc import Sequence
 from datetime import date, timedelta
 
-from moneta.cadence import TOLERANCE, advance_expected_on, match_cadence
+from moneta.cadence import (
+    CADENCE_DAYS,
+    TOLERANCE,
+    advance_expected_on,
+    match_across_a_miss,
+    match_cadence,
+)
 from moneta.models import BILL_TOLERANCE, Cadence, Transaction
 
 _MIN_TRACK_DATES = 3
@@ -96,6 +102,24 @@ def concurrent_tracks(band: Sequence[Transaction]) -> list[list[Transaction]] | 
     return None
 
 
+def _across_a_miss(dates: list[date], group: Sequence[Transaction]) -> tuple[Cadence, date] | None:
+    """A unit's monthly schedule across one missed month (an installment paid from an
+    account that isn't linked). Not when the merchant charged anything around the missed
+    due date: that is the month's bill at another size. Not when the unit charges twice
+    within a month: a habit that repeats a price is not a schedule."""
+    bridged = match_across_a_miss(dates)
+    if bridged is None:
+        return None
+    cadence, start, before = bridged
+    missed_on = advance_expected_on(before, cadence)
+    if any(abs((t.posted_on - missed_on).days) <= TOLERANCE[cadence] for t in group):
+        return None
+    shortest = CADENCE_DAYS[cadence] - 2 * TOLERANCE[cadence]
+    if any((b - a).days < shortest for a, b in itertools.pairwise(dates)):
+        return None
+    return cadence, start
+
+
 def _scheduled_units(
     group: Sequence[Transaction],
 ) -> tuple[list[list[Transaction]], bool]:
@@ -103,7 +127,8 @@ def _scheduled_units(
 
     Splits when two same-price subscriptions run side by side, or when a charge of
     real size (not an adjustment) sits inside a unit's schedule without belonging to it:
-    within its newest run, or after it while the next charge is not due yet.
+    within its newest run, or after it while the next charge is not due yet. A run holds
+    across one missed month (`_across_a_miss`).
     """
     units: list[list[Transaction]] = []
     concurrent = False
@@ -118,7 +143,7 @@ def _scheduled_units(
     extras = False
     for unit in units:
         dates = _dates(unit)
-        match = match_cadence(dates)
+        match = match_cadence(dates) or _across_a_miss(dates, group)
         if match is None:
             continue
         scheduled.append(unit)

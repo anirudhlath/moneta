@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 
-from moneta.models import Transaction
+from moneta.cadence import match_across_a_miss
+from moneta.models import Cadence, Transaction
 from moneta.pipelines.bills import amount_bands, concurrent_tracks, split_bills, whole_bill
 
 _ids = iter(range(1, 10_000))
@@ -192,5 +193,41 @@ def test_a_later_charge_closes_the_not_yet_due_window() -> None:
         *_monthly(9, range(3, 7), -4000),
         _t(date(2026, 6, 12), -30000),
         *_monthly(9, range(7, 10), -8000),
+    ]
+    assert split_bills(charges) is None
+
+
+def test_match_across_a_miss_bridges_exactly_one_missed_month() -> None:
+    dates = [date(2026, 6, 15), date(2026, 7, 15), date(2026, 8, 15), date(2026, 10, 15)]
+    assert match_across_a_miss(dates) == (Cadence.monthly, date(2026, 6, 15), date(2026, 8, 15))
+    # two months in a row, or two separate months, are a pause, not one missed month
+    assert match_across_a_miss([date(2026, 6, 15), date(2026, 7, 15), date(2026, 10, 15)]) is None
+    assert match_across_a_miss([date(2026, 4, 15), date(2026, 6, 15), date(2026, 8, 15)]) is None
+
+
+def test_a_schedule_holds_across_one_missed_month() -> None:
+    # September's installment was paid from elsewhere: only the deposit posted that month
+    installments = [*_monthly(15, range(6, 9), -120000), _t(date(2026, 10, 15), -120000)]
+    assert split_bills([*installments, _t(date(2026, 9, 1), -210000)]) == [installments]
+
+
+def test_a_charge_on_the_missed_due_date_is_that_month_not_a_miss() -> None:
+    # a variable bill whose July charge fell into another amount band: July was billed
+    charges = [
+        _t(date(2026, 6, 30), -9000),
+        _t(date(2026, 7, 31), -6000),
+        _t(date(2026, 8, 31), -8500),
+        _t(date(2026, 9, 30), -10500),
+    ]
+    assert split_bills(charges) is None
+
+
+def test_a_habit_that_repeats_a_price_is_no_schedule_across_a_miss() -> None:
+    # the same dish some days or weeks apart, nothing at that price in August
+    dish = [(5, 24), (6, 8), (6, 12), (6, 15), (7, 13), (9, 21)]
+    charges = [
+        *(_t(date(2026, month, day), -4000) for month, day in dish),
+        _t(date(2026, 8, 1), -5500),
+        _t(date(2026, 8, 23), -10000),
     ]
     assert split_bills(charges) is None

@@ -9,7 +9,14 @@ from pydantic import BaseModel
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.cadence import CADENCE_DAYS, GRACE_DAYS, TOLERANCE, advance_expected_on, match_cadence
+from moneta.cadence import (
+    CADENCE_DAYS,
+    GRACE_DAYS,
+    TOLERANCE,
+    advance_expected_on,
+    match_across_a_miss,
+    match_cadence,
+)
 from moneta.llm import CLASSIFICATION_TAXONOMY, Classifier
 from moneta.logical import LogicalData, load_logical_data
 from moneta.models import (
@@ -94,11 +101,20 @@ def _median_gap(dates: list[date]) -> float:
     return float(statistics.median(gaps))
 
 
-def newest_run(charges: Sequence[Transaction]) -> tuple[Cadence | None, list[Transaction]]:
+def newest_run(
+    charges: Sequence[Transaction], *, across_a_miss: bool = False
+) -> tuple[Cadence | None, list[Transaction]]:
     """A bill's cadence and its newest cadence run, oldest first — every charge when no
-    cadence holds. Shared with events.py, so both stages judge a bill on the same charges."""
+    cadence holds. Shared with events.py, so both stages judge a bill on the same charges
+    (except a bridged split bill: only detection passes `across_a_miss`, letting the run
+    continue over one missed month, as a split bill's does; bills.py checked that the
+    month really was missed)."""
     ordered = sorted(charges, key=lambda t: (t.posted_on, t.id))
-    match = match_cadence(sorted({t.posted_on for t in ordered}))
+    dates = sorted({t.posted_on for t in ordered})
+    match = match_cadence(dates)
+    if match is None and across_a_miss:
+        bridged = match_across_a_miss(dates)
+        match = None if bridged is None else bridged[:2]
     if match is None:
         return None, ordered
     cadence, run_start = match
@@ -252,7 +268,7 @@ async def _detect_bill(
     voted = {t.series_id for t in significant if t.series_id is not None}
     dates = sorted({t.posted_on for t in significant})  # dedup: double-posts aren't 0-day gaps
     # stats come from the newest cadence-run so ancient price epochs don't skew them
-    cadence, recent = newest_run(significant)
+    cadence, recent = newest_run(significant, across_a_miss=split)
     amounts = [abs(t.amount_cents) for t in recent]
     med = statistics.median(amounts)
     stable = all(abs(a - med) <= med * _AMOUNT_TOLERANCE for a in amounts)

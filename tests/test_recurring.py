@@ -1356,3 +1356,41 @@ async def test_a_merchant_level_bill_ruling_never_tags_the_deposits(session: Asy
     assert series.expected_cents == -120000 and series.discretionary is False
     txns = (await session.execute(select(Transaction))).scalars().all()
     assert sorted(t.posted_on for t in txns if t.series_id == series.id) == list(_INSTALLMENTS)
+
+
+async def test_a_payment_plan_holds_across_a_month_with_only_a_deposit(
+    session: AsyncSession,
+) -> None:
+    """September's installment was paid from an account that isn't linked, so only the
+    deposit posted that month: October's installment continues the plan."""
+    cards = await _payment_plan(session)
+    await detect_recurring(session, llm=None, today=date(2026, 9, 10))
+    await make_txn(
+        session,
+        cards[1],
+        amount_cents=-120000,
+        description="ACME UNIVERSITY CA",
+        posted_on=date(2026, 10, 15),
+    )
+    await normalize_merchants(session, llm=None)
+    await renormalize_merchants(session)
+
+    stats = await detect_recurring(session, llm=None, today=date(2026, 10, 20))
+
+    assert (stats.new_series, stats.review) == (0, 0)
+    (series,) = await _series(session)
+    assert (series.cadence, series.expected_cents, series.status) == (
+        Cadence.monthly,
+        -120000,
+        SeriesStatus.active,
+    )
+    txns = (await session.execute(select(Transaction))).scalars().all()
+    assert sorted(t.posted_on for t in txns if t.series_id == series.id) == [
+        *_INSTALLMENTS,
+        date(2026, 10, 15),
+    ]
+    items = (await session.execute(select(ReviewItem))).scalars().all()
+    assert [i for i in items if i.status == ReviewStatus.open] == []
+    events = (await session.execute(select(SeriesEvent))).scalars().all()
+    # nothing posted around September's due date: one missed event, as for any bill
+    assert [e.occurred_on for e in events if e.kind == EventKind.missed] == [date(2026, 9, 14)]
