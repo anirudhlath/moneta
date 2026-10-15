@@ -260,7 +260,9 @@ plus a `last_sync` key holding the full `/sync/last` detail (`null` if no sync h
 ```json
 {"last_sync_at": "2026-07-16T06:00:03", "last_sync_ok": true, "accounts": 8,
  "open_reviews": 2, "aggregators": ["simplefin", "plaid"], "llm_configured": true,
- "stale_accounts": [],
+ "stale_accounts": [{"account_id": 3, "name": "Acme Card", "mask": "1234",
+                     "newest_posted_on": "2026-07-02", "posting_days": 187,
+                     "note": "Acme Card ··1234 has no transactions since 2026-07-02 (usually posts ~4 days a week) — recent spending on it may be missing."}],
  "last_sync": {"status": "ok", "started_at": "...", "finished_at": "...",
                "success": true, "error": null, "report": {...}}}
 ```
@@ -298,10 +300,11 @@ Coverage: Acme Card ··1234 has no transactions since 2026-07-02 (usually posts
 An account is noted when its newest transaction is at least 7 days old **and**, at its usual
 rate — distinct posting days over the last 365 days — you'd have expected at least 5 posting
 days since then. A card you use every day is noted after a week of silence, one you use a few
-days a week after about ten days, a weekly account after about six weeks, and an account that
-posts once or twice a month never is. An account linked across providers is judged once, and
-a transaction from either provider counts. Accounts with no transactions in the last year are
-skipped.
+days a week after about ten days, and a weekly account after about six weeks. An account that
+posts twice a month is noted only after three to four months of silence, and one that posts about
+once a month (roughly 18 posting days a year or fewer, spread through the year) never is. An
+account linked across providers is judged once, and a transaction from either provider counts.
+Accounts with no transactions in the last year are skipped.
 
 It's a note, not an error: nothing is dropped from the numbers, but spending you made on that
 account recently may not be in them yet. Run `moneta sync`; if the note stays, fix the
