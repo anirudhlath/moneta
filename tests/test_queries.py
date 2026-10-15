@@ -249,6 +249,40 @@ async def test_txns_only_older_than_the_window_never_flag(session: AsyncSession)
     assert await stale_accounts(session, await load_logical_data(session), _TODAY) == []
 
 
+async def _quiet_account_with_one_more_day(
+    session: AsyncSession, extra_days_ago: int
+) -> list[StaleAccount]:
+    """24 posting days (newest 73 back) plus one more `extra_days_ago`; with that day
+    counted the account sits exactly on the 25 x 73 = 1825 boundary and is flagged."""
+    card = await make_account(session, name="Acme Card", mask="1234")
+    await _post_on(session, card, [*range(73, 97), extra_days_ago])
+    return await stale_accounts(session, await load_logical_data(session), _TODAY)
+
+
+async def test_a_posting_day_exactly_a_year_back_is_outside_the_window(
+    session: AsyncSession,
+) -> None:
+    """The window is (today - 365, today]: 365 days ago is out, so 24 posting days."""
+    assert await _quiet_account_with_one_more_day(session, 365) == []
+
+
+async def test_a_posting_day_just_inside_the_window_counts(session: AsyncSession) -> None:
+    """364 days ago is the oldest counted day: 25 posting days, exactly on the boundary."""
+    stale = await _quiet_account_with_one_more_day(session, 364)
+    assert [(s.name, s.posting_days) for s in stale] == [("Acme Card", 25)]
+
+
+async def test_a_future_dated_txn_proves_the_feed_is_alive(session: AsyncSession) -> None:
+    """A pending post dated tomorrow is the newest observation, so it is not a quiet feed."""
+    card = await make_account(session, name="Acme Card", mask="1234")
+    await _post_on(session, card, range(73, 98))  # 25 posting days, newest 73 back: flagged
+    logical = await load_logical_data(session)
+    assert [s.account_id for s in await stale_accounts(session, logical, _TODAY)] == [card.id]
+    await make_txn(session, card, posted_on=_TODAY + timedelta(days=1))
+    logical = await load_logical_data(session)
+    assert await stale_accounts(session, logical, _TODAY) == []
+
+
 async def test_single_txn_account_never_flags(session: AsyncSession) -> None:
     for days_ago in (7, 30, 200, 364):
         account = await make_account(session)
