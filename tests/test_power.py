@@ -325,14 +325,38 @@ async def test_upcoming_includes_series_inside_window_excludes_outside(
     await make_series(
         session, merchant="Insurance", expected_cents=-30000, next_expected_on=date(2026, 8, 1)
     )
-    # boundary: next_expected_on == today itself is not "upcoming" (window is exclusive of today)
+    # boundaries: due today (not yet charged) and due on the month's last day are both
+    # upcoming — the window is [today, month_end]
     await make_series(
         session, merchant="Today Charge", expected_cents=-500, next_expected_on=date(2026, 7, 7)
     )
+    await make_series(
+        session, merchant="Month End", expected_cents=-2000, next_expected_on=date(2026, 7, 31)
+    )
     report = await power_report(session, today=date(2026, 7, 7))
-    assert [u.merchant for u in report.upcoming] == ["Rent"]
-    assert report.upcoming[0].expected_on == date(2026, 7, 15)
-    assert report.upcoming[0].expected_cents == 140000
+    assert report.upcoming == [
+        UpcomingCharge(merchant="Today Charge", expected_on=date(2026, 7, 7), expected_cents=500),
+        UpcomingCharge(merchant="Rent", expected_on=date(2026, 7, 15), expected_cents=140000),
+        UpcomingCharge(merchant="Month End", expected_on=date(2026, 7, 31), expected_cents=2000),
+    ]
+
+
+async def test_bill_charged_today_is_not_also_upcoming(session: AsyncSession) -> None:
+    """Paid today = counted once, as a fixed cost: detection moves the bill's next date
+    a period forward, so it never also shows as still to come."""
+    checking = await make_account(session, type=AccountType.checking)
+    for month in (5, 6, 7):
+        await make_txn(
+            session,
+            checking,
+            amount_cents=-5000,
+            merchant="Corner Gym",
+            posted_on=date(2026, month, 7),
+        )
+    await detect_recurring(session, llm=None, today=date(2026, 7, 7))
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert [line.merchant for line in report.fixed_costs] == ["Corner Gym"]
+    assert report.upcoming == []
 
 
 async def test_upcoming_excludes_discretionary_and_cc_payment_series(
@@ -393,6 +417,29 @@ async def test_upcoming_includes_loan_payment_projected_date(session: AsyncSessi
     assert report.upcoming == [
         UpcomingCharge(
             merchant="Car Loan — payment", expected_on=date(2026, 7, 15), expected_cents=13500
+        )
+    ]
+
+
+async def test_upcoming_loan_payment_due_today_but_not_one_paid_today(
+    session: AsyncSession,
+) -> None:
+    checking = await make_account(session, type=AccountType.checking)
+    due = await make_account(session, type=AccountType.loan, name="Acme Car Loan")
+    paid = await make_account(session, type=AccountType.loan, name="Acme Boat Loan")
+    for loan, day in ((due, date(2026, 6, 7)), (paid, date(2026, 6, 7)), (paid, date(2026, 7, 7))):
+        out = await make_txn(
+            session, checking, amount_cents=-13500, merchant="Acme Bank", posted_on=day
+        )
+        inn = await make_txn(session, loan, amount_cents=13500, merchant="Acme Bank", posted_on=day)
+        session.add(
+            TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule")
+        )
+    await session.flush()
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert report.upcoming == [
+        UpcomingCharge(
+            merchant="Acme Car Loan — payment", expected_on=date(2026, 7, 7), expected_cents=13500
         )
     ]
 

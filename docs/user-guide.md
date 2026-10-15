@@ -336,9 +336,9 @@ The flagship view for the current month:
   inclusive; the last day of the month shows 1 day left). Negative remaining shows a negative
   per-day figure — no clamping to zero.
 - **Upcoming this month** — a dim line under the table listing active, non-discretionary,
-  non-credit-card-payment fixed costs (plus derived loan payments) due later this month, e.g.
+  non-credit-card-payment fixed costs (plus derived loan payments) due from today through month-end, e.g.
   `Upcoming this month: Rent $1400.00 (Jul 15) · Netflix $15.99 (Jul 28)`. Omitted when nothing
-  is due before month-end.
+  is due by month-end. A bill due today shows until its charge syncs.
 
 `moneta power --history N` (e.g. `--history 6`, 1-60 months) replaces the table above with a
 compact Month/Income/Spend/Net history instead. The newest row is the current, still-in-progress

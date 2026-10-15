@@ -103,7 +103,10 @@ calendars). CLI row: `Per day (22 days left)  $60.12` right after Remaining.
 
 `PowerReport.upcoming: list[UpcomingCharge]` — `{merchant: str, expected_on:
 date, expected_cents: int (magnitude)}` for active, non-discretionary,
-non-cc-payment outflow series with `next_expected_on` in `(today, month_end]`,
+non-cc-payment outflow series with `next_expected_on` in `[today, month_end]`
+(amended 2026-10-15 from `(today, month_end]`: a bill due today and not yet charged
+is still to come, and a synced charge moves `next_expected_on` a period forward, so a
+paid bill never shows twice),
 PLUS derived loan payments whose projected next date
 (`advance_expected_on(last_paid_on, cadence)`) falls in the window (labeled
 `{account} — payment`). Sorted by date. CLI: a dim block under the table,

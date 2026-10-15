@@ -29,8 +29,8 @@ Existing apps (Origin, Copilot) fail in four specific ways that moneta is built 
 ## Features
 
 - **Spending power** (`moneta power`) — detected income minus detected fixed costs,
-  plus spent-so-far, remaining, safe-to-spend per day, and upcoming charges due later
-  this month, for the current month. Accrual vs. cash-out accounting keeps "spent so
+  plus spent-so-far, remaining, safe-to-spend per day, and upcoming charges due from
+  today through month-end, for the current month. Accrual vs. cash-out accounting keeps "spent so
   far" honest when purchases go on credit. `--history N` shows a month-over-month
   income/spend/net table instead.
 - **Transaction drill-down** (`moneta txns`) — every transaction in a date range,

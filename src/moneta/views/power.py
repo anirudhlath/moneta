@@ -111,7 +111,9 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
             expected_cents=abs(s.expected_cents),
         )
         for s in fixed_series
-        if today < s.next_expected_on <= month_end
+        # due today counts: a bill charged today has already moved next_expected_on a
+        # period forward (detect_recurring), so only unpaid ones land here
+        if today <= s.next_expected_on <= month_end
     ]
 
     # A loan-like account already represented by an active series in `fixed` must not
@@ -140,7 +142,7 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
             fixed.append(line)
             total_fixed += line.monthly_cents
             projected = advance_expected_on(lp.last_paid_on, lp.cadence)
-            if today < projected <= month_end:
+            if today <= projected <= month_end:
                 upcoming.append(
                     UpcomingCharge(
                         merchant=merchant,
