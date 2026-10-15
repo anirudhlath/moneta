@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from moneta.aggregator.base import AccountDTO, Snapshot, TransactionDTO
 from moneta.models import (
     Account,
+    AccountType,
     RecurringSeries,
     ReviewItem,
     SeriesEvent,
@@ -15,7 +16,7 @@ from moneta.models import (
     Transaction,
     TransferLink,
 )
-from moneta.pipelines.run import RESYNC_OVERLAP_DAYS, _sync_since, run_sync
+from moneta.pipelines.run import ACTIVE_ACCOUNT_DAYS, RESYNC_OVERLAP_DAYS, _sync_since, run_sync
 from tests.conftest import FakeAdapter, RecordingAdapter
 from tests.factories import make_account, make_txn
 
@@ -83,6 +84,83 @@ async def test_sync_since_falls_back_to_global_max_when_source_has_no_accounts_y
     await make_txn(session, acct, posted_on=date(2026, 6, 15))
     since = await _sync_since(session, full=False, source="simplefin")
     assert since == date(2026, 6, 15) - timedelta(days=RESYNC_OVERLAP_DAYS)
+
+
+async def test_resync_reaches_back_to_the_most_behind_active_account(
+    session: AsyncSession,
+) -> None:
+    """A card that delivers a month of back-dated rows at statement time must not
+    lose them behind a sibling account at the same source that posted yesterday."""
+    today = date(2026, 7, 9)
+    daily = await make_account(session, source="simplefin")
+    await make_txn(session, daily, posted_on=today - timedelta(days=1))
+    batched = await make_account(session, source="simplefin")
+    await make_txn(session, batched, posted_on=today - timedelta(days=33))
+    simplefin = RecordingAdapter(source="simplefin")
+    await run_sync(session, [simplefin], llm=None, today=today)
+    assert simplefin.since == today - timedelta(days=33 + RESYNC_OVERLAP_DAYS)
+
+
+async def test_dormant_account_does_not_hold_the_window_back(session: AsyncSession) -> None:
+    newest = date(2026, 7, 8)
+    active = await make_account(session, source="simplefin")
+    await make_txn(session, active, posted_on=newest)
+    closed = await make_account(session, source="simplefin")
+    await make_txn(session, closed, posted_on=newest - timedelta(days=ACTIVE_ACCOUNT_DAYS + 1))
+    since = await _sync_since(session, full=False, source="simplefin")
+    assert since == newest - timedelta(days=RESYNC_OVERLAP_DAYS)
+
+
+async def test_account_exactly_at_the_dormancy_horizon_still_counts(
+    session: AsyncSession,
+) -> None:
+    newest = date(2026, 7, 8)
+    active = await make_account(session, source="simplefin")
+    await make_txn(session, active, posted_on=newest)
+    quiet = await make_account(session, source="simplefin")
+    await make_txn(session, quiet, posted_on=newest - timedelta(days=ACTIVE_ACCOUNT_DAYS))
+    since = await _sync_since(session, full=False, source="simplefin")
+    assert since == newest - timedelta(days=ACTIVE_ACCOUNT_DAYS + RESYNC_OVERLAP_DAYS)
+
+
+async def test_dormancy_is_judged_from_the_sources_own_newest_txn(
+    session: AsyncSession,
+) -> None:
+    """A whole source stalled for months: every account is far behind today, but the
+    late-batch account is only weeks behind its sibling, so it still sets the window
+    and the outage heals without skipping its rows."""
+    daily = await make_account(session, source="simplefin")
+    await make_txn(session, daily, posted_on=date(2026, 3, 1))
+    batched = await make_account(session, source="simplefin")
+    await make_txn(session, batched, posted_on=date(2026, 2, 1))
+    simplefin = RecordingAdapter(source="simplefin")
+    await run_sync(session, [simplefin], llm=None, today=date(2026, 7, 9))
+    assert simplefin.since == date(2026, 2, 1) - timedelta(days=RESYNC_OVERLAP_DAYS)
+
+
+async def test_suppressed_duplicate_sets_its_accounts_newest(session: AsyncSession) -> None:
+    """Each account's newest physical observation counts, including a row suppressed
+    as another provider's duplicate."""
+    plaid_root = await make_account(session, source="plaid")
+    sf_alias = await make_account(session, source="simplefin", canonical_account_id=plaid_root.id)
+    sf_daily = await make_account(session, source="simplefin")
+    survivor = await make_txn(session, plaid_root, posted_on=date(2026, 6, 6))
+    await make_txn(session, sf_alias, posted_on=date(2026, 6, 6), duplicate_of_id=survivor.id)
+    await make_txn(session, sf_daily, posted_on=date(2026, 7, 8))
+    since = await _sync_since(session, full=False, source="simplefin")
+    assert since == date(2026, 6, 6) - timedelta(days=RESYNC_OVERLAP_DAYS)
+
+
+async def test_account_without_transactions_does_not_reset_the_window(
+    session: AsyncSession,
+) -> None:
+    """A holdings-only brokerage account (or one linked moments ago) has no newest
+    txn; it must not drag the window back to the epoch on every sync."""
+    checking = await make_account(session, source="simplefin")
+    await make_txn(session, checking, posted_on=date(2026, 7, 5))
+    await make_account(session, source="simplefin", type=AccountType.brokerage)
+    since = await _sync_since(session, full=False, source="simplefin")
+    assert since == date(2026, 7, 5) - timedelta(days=RESYNC_OVERLAP_DAYS)
 
 
 async def test_run_sync_autoreview_resolves_before_detection(session: AsyncSession) -> None:

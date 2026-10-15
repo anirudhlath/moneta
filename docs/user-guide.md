@@ -164,7 +164,7 @@ backups, credentials, financial fixtures, and generated reports outside git.
 ## Syncing
 
 ```bash
-moneta sync            # incremental: resumes from your newest transaction (with overlap)
+moneta sync            # incremental: resumes where each source's accounts left off (with overlap)
 moneta sync --full     # re-pull all history — use after linking a new source
 moneta status          # is data fresh? did the last sync work? what changed
 ```
@@ -179,9 +179,13 @@ current fetch window (e.g. `Syncing… SimpleFIN: fetching 2026-05-01 – 2026-0
 first sync isn't a silent wait. Pointed at a remote server (`MONETA_API_URL` set) you only see
 the spinner — the fetch itself is happening on the server, out of the client's view.
 
-Each configured source (SimpleFIN, Plaid, ...) syncs on its **own** incremental window,
-computed from that source's own newest stored transaction, including observations
-superseded by another provider — not a single global window. This
+Each configured source (SimpleFIN, Plaid, ...) syncs on its **own** incremental window —
+not a single global window. The window starts a week before the newest stored transaction
+of the source's most-behind active account (observations superseded by another provider
+count), so a card that delivers a month of back-dated transactions at statement time gets
+them on the next sync even when another account at the same source posted yesterday. An
+account counts as active while its newest transaction is within 90 days of the source's
+newest; a closed account stops holding the window back. This
 means a SimpleFIN outage, or a bank that's been silently failing for weeks, self-heals on the
 next successful sync instead of staying masked by Plaid's daily full-history replay. The
 tradeoff: a brand-new source's first-ever sync on an already-populated database inherits the
@@ -729,7 +733,7 @@ Files in the config dir (all owner-only, dir is 0700):
 | "Did my sync run last night?" | `moneta status` — shows the last run, success/failure, and the error if it failed. |
 | Sync failed | `moneta status` for the error; details in `~/.config/moneta/moneta.log`. Failures never corrupt data — fix the cause and re-sync. |
 | One source failed but the sync "succeeded" | That's by design when at least one other source is configured and healthy — check the `⚠` warning line the sync prints (or `moneta status`/the log) for which source and why; a source only fails the whole sync when it's the only one configured, or every configured source fails together. |
-| A bank's history is missing | `moneta sync --full` re-pulls everything the institution retains for every configured source (needed after adding a new source, or after an outage longer than the 7-day overlap). |
+| A bank's history is missing | `moneta sync --full` re-pulls everything the institution retains for every configured source. It's needed after adding a new source or linking a new account at an existing one, and after an account was quiet for more than 90 days while others at its source kept posting. An outage, or a card whose transactions arrive in late batches, heals on the next plain `moneta sync`. |
 | Account has the wrong type | `moneta accounts --set-type <ID> <TYPE>` — sticks across syncs. |
 | A shared bank appears twice | Inspect `moneta accounts --sources` and account overlap questions in `moneta review`; confirm identity only with corroborating evidence, then link or reconcile. |
 | A provider match is wrong | Reverse an account link with `moneta accounts --unlink-source <ID>` to restore its observations. For an uncertain match with an open transaction overlap question, choose none in that review. Automatic matches do not necessarily have open questions; there is no separate public transaction-unlink endpoint. |

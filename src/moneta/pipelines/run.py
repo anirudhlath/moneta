@@ -22,6 +22,9 @@ from moneta.pipelines.transfers import TransferStats, link_transfers
 # whatever history it retains), overlap from the newest stored txn otherwise.
 _EPOCH = date(1970, 1, 1)
 RESYNC_OVERLAP_DAYS = 7
+# An account whose newest txn sits more than this many days behind its source's
+# newest txn is dormant (closed, paid off): it no longer holds the window back.
+ACTIVE_ACCOUNT_DAYS = 90
 
 
 async def _sync_since(session: AsyncSession, full: bool, source: str) -> date:
@@ -32,16 +35,25 @@ async def _sync_since(session: AsyncSession, full: bool, source: str) -> date:
             select(func.count()).select_from(Account).where(Account.source == source)
         )
     ).scalar_one()
+    newest: date | None
     if has_source:
-        # this source's own newest txn — the per-source window that lets a
-        # SimpleFIN outage self-heal without Plaid's daily replay masking it
-        newest = (
-            await session.execute(
+        # Resume from this source's most-behind ACTIVE account, never from the source's
+        # newest txn: a card that delivers a month of back-dated rows at statement time
+        # must not lose them behind a sibling account that posted yesterday. Each
+        # account's newest physical observation counts, suppressed duplicates included;
+        # an account with no transactions has no row here and never moves the window.
+        per_account = list(
+            await session.scalars(
                 select(func.max(Transaction.posted_on))
                 .join(Account, Transaction.account_id == Account.id)
                 .where(Account.source == source)
+                .group_by(Transaction.account_id)
             )
-        ).scalar_one_or_none()
+        )
+        # dormancy is measured from the source's own newest txn, not today, so a whole
+        # source stalled for months still resumes from its most-behind account
+        horizon = max(per_account, default=_EPOCH) - timedelta(days=ACTIVE_ACCOUNT_DAYS)
+        newest = min((d for d in per_account if d >= horizon), default=None)
     else:
         # no accounts carry this source yet (first run after upgrading onto
         # source-attributed accounts) — fall back to the global max so a
