@@ -100,8 +100,8 @@ async def test_two_payments_monthly_fallback(session: AsyncSession) -> None:
 
 async def test_financing_mode_account_gets_obligation(session: AsyncSession) -> None:
     """A financing-mode credit card (type stays `credit`) must still get an
-    obligations row, sourced from its linked payments, with deferred-interest
-    risk computed against its promo expiry."""
+    obligations row, sourced from its linked payments, with the promo-before-payoff
+    flag computed against its promo expiry."""
     checking = await make_account(session, type=AccountType.checking)
     card = await make_account(
         session,

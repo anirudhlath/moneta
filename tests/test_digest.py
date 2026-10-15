@@ -10,6 +10,8 @@ from moneta.models import Account, AccountType, DigestState, TransferLink
 from moneta.pipelines.digest import run_digest
 from tests.factories import make_account, make_series, make_series_event, make_txn
 
+CLAUSE = "interest applies to the remaining balance (back-dated on deferred-interest plans)"
+
 
 def _fake_client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -133,6 +135,7 @@ async def test_warned_set_adds_new_risk_and_suppresses_repeat(session: AsyncSess
     result = await run_digest(session, "https://ntfy.sh/x", today=date(2026, 7, 7), client=client)
     assert result.model_dump() == {"sent": True, "events": 0, "warnings": 1}
     assert "Promo ends before payoff" in seen[0].content.decode()
+    assert CLAUSE in seen[0].content.decode()
     assert "Deferred-interest risk" not in seen[0].content.decode()
 
     state = await session.get(DigestState, 1)
@@ -215,6 +218,7 @@ async def test_first_run_still_warns_despite_history_baseline(session: AsyncSess
     assert result.model_dump() == {"sent": True, "events": 0, "warnings": 1}
     body = seen[0].content.decode()
     assert "Promo ends before payoff" in body
+    assert CLAUSE in body
     assert "Missed payment" not in body
 
     state = await session.get(DigestState, 1)

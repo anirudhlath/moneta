@@ -1565,7 +1565,11 @@ def test_obligations_renders_promo_warning(tmp_path: Path, monkeypatch) -> None:
     result = runner.invoke(app, ["obligations"])
     assert result.exit_code == 0
     assert "Synchrony" in result.output  # rich may wrap the full name across cell lines
-    assert "promo ends" in result.output  # payoff ~9mo out > promo ~2mo out
+    # payoff ~9mo out > promo ~2mo out; rich wraps the line, so compare on collapsed whitespace
+    assert (
+        "interest applies to the remaining balance (back-dated on deferred-interest plans)"
+        in " ".join(result.output.split())
+    )
     assert "deferred interest risk" not in result.output  # a 0% plan may not be deferred
     assert "Traceback" not in result.output
 
