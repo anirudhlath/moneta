@@ -47,7 +47,7 @@ Existing apps (Origin, Copilot) fail in four specific ways that moneta is built 
 - **RSU-vesting-aware net worth** — liquid + *vested* holdings − liabilities;
   unvested reported separately, never summed in. Vesting quantities import via CSV
   (`symbol,vested_quantity,unvested_quantity`; a direct Fidelity NetBenefits
-  export mapping is tracked in `docs/backlog/high/`).
+  export mapping is tracked in [#24](https://github.com/anirudhlath/moneta/issues/24)).
   Conflicting alias annotations without a root annotation exclude that holding's
   value from totals with a provisional-coverage warning until reviewed.
 - **Financing obligations** — derived, not entered: any loan or financing-mode
@@ -253,8 +253,8 @@ LLM — no network, no real accounts.
   history, roadmap
 - [Design doc](docs/superpowers/specs/2026-07-07-moneta-design.md) — problem,
   architecture decisions, data model, pipeline specs, LLM usage rules
-- [Backlog](docs/backlog/) and [QA backlog](docs/qa-backlog/) — deferred work and
-  manual test cases, one file per item
+- [Issues](https://github.com/anirudhlath/moneta/issues) — deferred work and
+  manual test cases (label `qa`), one issue per item
 
 ## License
 

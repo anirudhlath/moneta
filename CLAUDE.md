@@ -16,7 +16,7 @@ Run it: `uv run moneta --help` (CLI, no server needed — in-process ASGI) or `u
 
 Before ending any session that changed behavior — code, CLI surface, config keys, defaults, or feature semantics — update the affected docs in the same commit/PR:
 
-- `docs/PRD.md` — feature tables, feature history, and roadmap (move shipped backlog items out; new capabilities in)
+- `docs/PRD.md` — feature tables, feature history, and roadmap (drop shipped items from the roadmap and close their issues; new capabilities in)
 - `docs/user-guide.md` — commands, flags, config reference, workflows, troubleshooting
 - `README.md` — quickstart and command table, if the user-facing surface moved
 
@@ -59,4 +59,4 @@ Pure-internal refactors with zero behavior change may skip this, but state that 
 - `httpx.ASGITransport` never fires FastAPI lifespan — the CLI's in-process path drives the app's own lifespan manually around each request (`app.router.lifespan_context`, cli/client.py), so `init_db` and engine disposal happen exactly where a real `moneta serve` would run them.
 - Endpoints resolve `date.today()` at request time; test data must be date-relative (see tests/test_e2e.py's anchoring comment).
 - SimpleFIN gives no account types — they're inferred from name/org keywords (`pipelines/ingest.py`); Plaid supplies real types via `AccountDTO.type_hint`, which beats inference; user overrides via `moneta accounts --set-type` survive re-sync.
-- Backlog convention: `docs/backlog/<priority>/<kebab-case>.md`; QA items in `docs/qa-backlog/`.
+- Backlog lives in GitHub issues (anirudhlath/moneta): one issue per ticket with a `priority: critical|high|medium|low` label, plus `qa` for manual test cases against real data/APIs. The repo is public — never put live financial data in an issue (institution or merchant names from the owner's accounts, balances, amounts, account suffixes); describe the shape of the data instead.

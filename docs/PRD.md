@@ -165,14 +165,17 @@ Rich tables with stable IDs everywhere a follow-up action exists (`recurring --e
 
 ## 8. Roadmap
 
-Sourced from `docs/backlog/` (one file per ticket — see each for context and acceptance criteria).
+Tracked in [GitHub issues](https://github.com/anirudhlath/moneta/issues) (one issue per ticket — see each for context and acceptance criteria; manual real-data checks carry the `qa` label).
 
 **High**
-- Brokerage accounts without holdings are invisible to net worth.
-- Fidelity NetBenefits CSV mapping (direct export → vesting import).
+- Brokerage accounts without holdings are invisible to net worth (#23).
+- Fidelity NetBenefits CSV mapping (direct export → vesting import) (#24).
+
+**Medium**
+- First-class bill/habit/not-recurring classification type (#29).
 
 **Low**
-- Transaction categorization; Plaid cursor-based incremental sync; vesting source adapter seam; test-coverage gaps.
+- LLM habit classification not sticky across runs (#25); Plaid cursor-based incremental sync (#26); transaction categorization (#27); vesting source adapter seam (#28).
 
 ## 9. Risks & open questions
 
