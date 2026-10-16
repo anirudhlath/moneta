@@ -22,7 +22,7 @@ from moneta.pipelines.account_overlap import set_account_link
 from moneta.pipelines.reconcile import rebuild_logical_derived, reconcile_provider_overlap
 from moneta.pipelines.review import apply_resolution
 from moneta.pipelines.run import run_sync
-from moneta.views.cashflow import accrual_income, accrual_spend
+from moneta.views.cashflow import accrual_inflows, accrual_spend
 from moneta.views.financing import compute_obligations
 from moneta.views.networth import net_worth_report
 from tests.conftest import RecordingAdapter
@@ -146,7 +146,7 @@ async def test_automatic_resolution_boundary_preserves_human_but_allows_new_huma
             for link in await session.scalars(select(TransferLink))
         ] == ([] if accepts else [(out.id, inn.id, "manual")])
         assert await accrual_spend(session, date(2026, 7, 1), TODAY) == (1000 if accepts else 0)
-        assert await accrual_income(session, date(2026, 7, 1), TODAY) == (1000 if accepts else 0)
+        assert await accrual_inflows(session, date(2026, 7, 1), TODAY) == (1000 if accepts else 0)
         assert [(i.payload, i.resolution) for i in [first, second]] == originals
         assert [
             (t.id, t.account_id, t.aggregator_id, t.posted_on, t.amount_cents, t.description, t.raw)
@@ -214,7 +214,7 @@ async def test_adjudication_does_not_resurrect_older_physical_answer_during_matc
         assert [t.id for t in logical.transactions] == [out.id, inn.id]
         assert logical.transaction_roots[copy.id] == out.id
         assert await accrual_spend(session, date(2026, 7, 1), TODAY) == 1000
-        assert await accrual_income(session, date(2026, 7, 1), TODAY) == 1000
+        assert await accrual_inflows(session, date(2026, 7, 1), TODAY) == 1000
         assert list(await session.scalars(select(TransferLink))) == []
         selected, conflicts = effective_transfer_choices(
             list(reversed(history)), logical.transaction_roots

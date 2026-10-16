@@ -10,7 +10,7 @@ re-scan TransferLink and rebuild their own txn->account/type/series maps.
 import statistics
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -25,6 +25,7 @@ from moneta.models import (
     ReviewItem,
     ReviewKind,
     SyncRun,
+    Transaction,
     TransferLink,
     bill_ref,
 )
@@ -107,6 +108,91 @@ async def latest_successful_sync_at(session: AsyncSession) -> datetime | None:
             select(func.max(SyncRun.finished_at)).where(SyncRun.success.is_(True))
         )
     ).scalar_one_or_none()
+
+
+# Coverage rule (stale feeds): a logical account is flagged once its newest txn is at
+# least STALE_MIN_DAYS old AND its usual rate — distinct posting days over the trailing
+# COVERAGE_WINDOW_DAYS — predicts at least STALE_EXPECTED_POSTING_DAYS posting days since.
+COVERAGE_WINDOW_DAYS = 365
+STALE_MIN_DAYS = 7
+STALE_EXPECTED_POSTING_DAYS = 5
+
+
+class StaleAccount(BaseModel):
+    """A logical account whose feed went quiet for longer than its usual posting rate
+    explains — a coverage note, not an error. `note` is the full user-facing sentence."""
+
+    account_id: int
+    name: str
+    mask: str | None
+    newest_posted_on: date
+    posting_days: int  # distinct posting days in the trailing COVERAGE_WINDOW_DAYS
+    note: str
+
+
+def feed_is_stale(posting_days: int, days_since: int) -> bool:
+    """`posting_days / 365 * days_since >= 5`, in integers so the boundary is exact."""
+    return (
+        days_since >= STALE_MIN_DAYS
+        and posting_days * days_since >= STALE_EXPECTED_POSTING_DAYS * COVERAGE_WINDOW_DAYS
+    )
+
+
+def _posting_rate_phrase(posting_days: int) -> str:
+    # integer posting_days can never land on a .5 here, so round() has no ties to break
+    per_week = round(posting_days * 7 / COVERAGE_WINDOW_DAYS)
+    if per_week >= 1:
+        return f"~{per_week} day{'' if per_week == 1 else 's'} a week"
+    per_month = max(1, round(posting_days * 30 / COVERAGE_WINDOW_DAYS))
+    return f"~{per_month} day{'' if per_month == 1 else 's'} a month"
+
+
+async def stale_accounts(
+    session: AsyncSession, logical: LogicalData, today: date
+) -> list[StaleAccount]:
+    """Logical accounts whose feed looks stalled, each judged on its own history.
+
+    Newest is the newest *physical* observation in the logical account — suppressed
+    duplicates included — so an account fresh via either provider is fresh. Posting
+    days count survivors only, so one purchase seen by both providers days apart is one
+    posting day. Accounts without a transaction in the window are skipped.
+    """
+    newest: dict[int, date] = {}
+    rows = await session.execute(
+        select(Transaction.account_id, func.max(Transaction.posted_on)).group_by(
+            Transaction.account_id
+        )
+    )
+    for account_id, posted_on in rows.tuples():
+        root = logical.account_roots[account_id]
+        newest[root] = max(newest.get(root, posted_on), posted_on)
+    window_start = today - timedelta(days=COVERAGE_WINDOW_DAYS)
+    posting: dict[int, set[date]] = {}
+    for txn in logical.transactions:
+        if window_start < txn.posted_on <= today:
+            posting.setdefault(logical.account_roots[txn.account_id], set()).add(txn.posted_on)
+    stale: list[StaleAccount] = []
+    for root_id, days in sorted(posting.items()):
+        last = newest[root_id]
+        if not feed_is_stale(len(days), (today - last).days):
+            continue
+        account = logical.accounts[root_id]
+        label = f"{account.name} ··{account.mask}" if account.mask else account.name
+        stale.append(
+            StaleAccount(
+                account_id=root_id,
+                name=account.name,
+                mask=account.mask,
+                newest_posted_on=last,
+                posting_days=len(days),
+                note=(
+                    f"{label} has no transactions since {last.isoformat()} "
+                    f"(usually posts {_posting_rate_phrase(len(days))}) — "
+                    "recent spending on it may be missing."
+                ),
+            )
+        )
+    return stale
 
 
 async def account_type_map(session: AsyncSession) -> dict[int, AccountType]:

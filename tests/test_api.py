@@ -19,6 +19,7 @@ from moneta.cadence import month_bounds
 from moneta.config import Settings
 from moneta.db import init_db, make_sessionmaker
 from moneta.models import (
+    AccountType,
     EventKind,
     RecurringSeries,
     ReviewItem,
@@ -614,6 +615,7 @@ async def test_status_endpoint_fresh_db(client: httpx.AsyncClient) -> None:
         "open_reviews": 0,
         "aggregators": ["fake"],  # the client fixture's FakeAdapter source
         "llm_configured": False,
+        "stale_accounts": [],
     }
 
 
@@ -935,7 +937,7 @@ async def test_power_history_months_out_of_range_is_422(client: httpx.AsyncClien
 async def test_power_history_multi_month_rows_newest_first(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    from moneta.models import AccountType
+    from moneta.models import AccountType, Direction
 
     today = date.today()
     this_month_start = _months_back(today, 0)
@@ -944,9 +946,24 @@ async def test_power_history_multi_month_rows_newest_first(
 
     async with sessionmaker() as session:
         checking = await make_account(session, type=AccountType.checking)
-        # this (current, partial) month: one paycheck, one purchase
+        payroll = await make_series(
+            session, merchant="Acme Payroll", direction=Direction.inflow, expected_cents=300000
+        )
+        # this (current, partial) month: one paycheck, a friend's Zelle, one purchase
         await make_txn(
-            session, checking, amount_cents=300000, posted_on=today, description="PAYROLL"
+            session,
+            checking,
+            amount_cents=300000,
+            posted_on=today,
+            description="PAYROLL",
+            series_id=payroll.id,
+        )
+        await make_txn(
+            session,
+            checking,
+            amount_cents=30000,
+            posted_on=today,
+            description="Zelle payment from JANE DOE 1234",
         )
         await make_txn(
             session, checking, amount_cents=-5000, posted_on=today, description="GROCERY"
@@ -958,6 +975,7 @@ async def test_power_history_multi_month_rows_newest_first(
             amount_cents=250000,
             posted_on=last_month_start,
             description="PAYROLL",
+            series_id=payroll.id,
         )
         await make_txn(
             session,
@@ -976,11 +994,13 @@ async def test_power_history_multi_month_rows_newest_first(
 
     assert rows[0]["month"] == f"{this_month_start.year:04d}-{this_month_start.month:02d}"
     assert rows[0]["income_cents"] == 300000
+    assert rows[0]["other_inflows_cents"] == 30000  # shown, but not income
     assert rows[0]["spend_cents"] == 5000
     assert rows[0]["net_cents"] == 295000
 
     assert rows[1]["month"] == f"{last_month_start.year:04d}-{last_month_start.month:02d}"
     assert rows[1]["income_cents"] == 250000
+    assert rows[1]["other_inflows_cents"] == 0
     assert rows[1]["spend_cents"] == 4000
     assert rows[1]["net_cents"] == 246000
 
@@ -1003,3 +1023,30 @@ async def test_patch_account_null_clears_promo(client: httpx.AsyncClient) -> Non
     assert (await client.get("/accounts")).json()[0]["promo_expires_on"] is None
     await client.post("/sync")  # a re-sync must not bring the cleared date back
     assert (await client.get("/accounts")).json()[0]["promo_expires_on"] is None
+
+
+async def test_status_and_power_list_accounts_whose_feed_went_quiet(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    client: httpx.AsyncClient,
+) -> None:
+    async with sessionmaker() as session:
+        card = await make_account(session, name="Acme Card", mask="1234", type=AccountType.credit)
+        for days_ago in range(14, 201):
+            await make_txn(session, card, posted_on=_TODAY - timedelta(days=days_ago))
+        await session.commit()
+    quiet_since = (_TODAY - timedelta(days=14)).isoformat()
+    expected = [
+        {
+            "account_id": card.id,
+            "name": "Acme Card",
+            "mask": "1234",
+            "newest_posted_on": quiet_since,
+            "posting_days": 187,
+            "note": (
+                f"Acme Card ··1234 has no transactions since {quiet_since} "
+                "(usually posts ~4 days a week) — recent spending on it may be missing."
+            ),
+        }
+    ]
+    assert (await client.get("/status")).json()["stale_accounts"] == expected
+    assert (await client.get("/power")).json()["stale_accounts"] == expected

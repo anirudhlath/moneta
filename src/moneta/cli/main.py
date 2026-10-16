@@ -65,6 +65,13 @@ def _staleness_footer(data_as_of: str | None) -> str | None:
     return None
 
 
+def _print_coverage(payload: dict[str, Any]) -> None:
+    """One yellow line per account the server judged stale — a coverage note, not an
+    error. `.get`: an older server in remote mode sends no `stale_accounts`."""
+    for account in payload.get("stale_accounts", []):
+        console.print(f"[yellow]Coverage: {escape(account['note'])}[/yellow]")
+
+
 def _series_line_amount(line: dict[str, Any]) -> str:
     """Amount cell for a power-table series row (design 2026-07-16 §3): non-monthly
     cadences show the per-cycle amount alongside the monthly equivalent; monthly
@@ -147,6 +154,8 @@ def sync(
         f"{report['recurring']['new_series']} new series, "
         f"{report['events']} events."
     )
+    if unlinked := report["transfers"].get("unlinked"):
+        console.print(f"Dropped {_plural(unlinked, 'stale transfer link')}.")
     if report["auto_resolved"]:
         console.print(f"LLM auto-resolved {report['auto_resolved']} review item(s).")
     verify = report["verify"]
@@ -230,6 +239,7 @@ def status(json_output: JsonOption = False) -> None:
         f"Aggregators: {aggregators}  ·  "
         f"LLM: {'configured' if st['llm_configured'] else 'not configured'}"
     )
+    _print_coverage(st)
 
 
 @app.command()
@@ -237,7 +247,8 @@ def power(
     history: Annotated[
         int | None,
         typer.Option(
-            "--history", help="Show the last N months' income/spend/net instead of this month."
+            "--history",
+            help="Show the last N months' income/other inflows/spend/net instead of this month.",
         ),
     ] = None,
     json_output: JsonOption = False,
@@ -247,11 +258,12 @@ def power(
         rows = request("GET", "/power/history", params={"months": history})
         if emit_json(rows, json_output):
             return
-        table = Table("Month", "Income", "Spend", "Net")
+        table = Table("Month", "Income", "Other inflows", "Spend", "Net")
         for m in rows:
             table.add_row(
                 m["month"],
                 fmt_money(m["income_cents"]),
+                fmt_money(m["other_inflows_cents"]),
                 fmt_outflow(m["spend_cents"]),
                 fmt_money(m["net_cents"]),
             )
@@ -281,6 +293,7 @@ def power(
             for u in r["upcoming"]
         ]
         console.print(f"[dim]Upcoming this month: {' · '.join(parts)}[/dim]")
+    _print_coverage(r)
     if footer := _staleness_footer(r.get("data_as_of")):
         console.print(f"[dim]{footer}[/dim]")
 

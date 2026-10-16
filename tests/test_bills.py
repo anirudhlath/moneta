@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 
-from moneta.models import Transaction
+from moneta.cadence import TOLERANCE, advance_expected_on, match_across_a_miss
+from moneta.models import Cadence, Transaction
 from moneta.pipelines.bills import amount_bands, concurrent_tracks, split_bills, whole_bill
 
 _ids = iter(range(1, 10_000))
@@ -171,3 +172,131 @@ def test_same_day_collision_follows_expectation() -> None:
     assert sorted([t.posted_on for t in tr] for tr in tracks) == sorted(
         [[t.posted_on for t in early], [t.posted_on for t in late]]
     )
+
+
+def test_a_charge_after_the_schedule_before_it_is_due_splits_it() -> None:
+    # three installments, then a deposit before the next installment is due
+    installments = _monthly(15, range(6, 9), -120000)
+    assert split_bills([*installments, _t(date(2026, 9, 1), -210000)]) == [installments]
+
+
+def test_a_repriced_charge_in_the_due_window_does_not_split() -> None:
+    # the next charge at a new price is that charge, not an extra: one bill, as before
+    charges = [*_monthly(15, range(5, 8), -1500), _t(date(2026, 8, 12), -2000)]
+    assert split_bills(charges) is None
+
+
+def test_the_not_yet_due_window_closes_on_the_day_the_next_charge_is_nearly_due() -> None:
+    # the next installment is nearly due TOLERANCE days before its due date: a charge that
+    # day is judged by the run alone, one the day before it still sits beside the schedule
+    installments = _monthly(15, range(6, 9), -120000)
+    nearly_due = advance_expected_on(date(2026, 8, 15), Cadence.monthly) - timedelta(
+        days=TOLERANCE[Cadence.monthly]
+    )
+    day_before = nearly_due - timedelta(days=1)
+    assert split_bills([*installments, _t(day_before, -210000)]) == [installments]
+    assert split_bills([*installments, _t(nearly_due, -210000)]) is None
+
+
+def test_a_later_charge_closes_the_not_yet_due_window() -> None:
+    # a purchase just after the newest charge, then the plan goes on at a new price: the
+    # next charge came due, so the purchase is judged by the run alone, as before
+    charges = [
+        *_monthly(9, range(3, 7), -4000),
+        _t(date(2026, 6, 12), -30000),
+        *_monthly(9, range(7, 10), -8000),
+    ]
+    assert split_bills(charges) is None
+
+
+def test_match_across_a_miss_bridges_exactly_one_missed_month() -> None:
+    dates = [date(2026, 6, 15), date(2026, 7, 15), date(2026, 8, 15), date(2026, 10, 15)]
+    assert match_across_a_miss(dates) == (Cadence.monthly, date(2026, 6, 15), date(2026, 8, 15))
+    # two months in a row, or two separate months, are a pause, not one missed month
+    assert match_across_a_miss([date(2026, 6, 15), date(2026, 7, 15), date(2026, 10, 15)]) is None
+    assert match_across_a_miss([date(2026, 4, 15), date(2026, 6, 15), date(2026, 8, 15)]) is None
+
+
+def test_match_across_a_miss_needs_the_periods_to_median_about_a_month() -> None:
+    def after(*gaps: int) -> list[date]:
+        dates = [date(2026, 1, 1)]
+        for gap in gaps:
+            dates.append(dates[-1] + timedelta(days=gap))
+        return dates
+
+    # every gap passes the loose per-gap test; the periods (gap / 2 across the miss) then
+    # median 36 days, exactly TOLERANCE off a month, and 37 days is one day too far
+    assert match_across_a_miss(after(36, 36, 72)) == (
+        Cadence.monthly,
+        date(2026, 1, 1),
+        date(2026, 1, 1) + timedelta(days=72),
+    )
+    assert match_across_a_miss(after(37, 37, 72)) is None
+
+
+def test_a_one_bill_merchant_with_a_missed_month_stays_one_whole_bill() -> None:
+    # nothing else is charged, so the bridged schedule has no extra to split from
+    charges = [*_monthly(15, range(6, 9), -120000), _t(date(2026, 10, 15), -120000)]
+    assert split_bills(charges) is None
+    assert whole_bill(charges) == charges
+
+
+def test_a_schedule_holds_across_one_missed_month() -> None:
+    # September's installment was paid from elsewhere: only the deposit posted that month
+    installments = [*_monthly(15, range(6, 9), -120000), _t(date(2026, 10, 15), -120000)]
+    assert split_bills([*installments, _t(date(2026, 9, 1), -210000)]) == [installments]
+
+
+def test_a_charge_on_the_missed_due_date_is_that_month_not_a_miss() -> None:
+    # a variable bill whose July charge fell into another amount band: July was billed
+    charges = [
+        _t(date(2026, 6, 30), -9000),
+        _t(date(2026, 7, 31), -6000),
+        _t(date(2026, 8, 31), -8500),
+        _t(date(2026, 9, 30), -10500),
+    ]
+    assert split_bills(charges) is None
+
+
+def test_a_habit_that_repeats_a_price_is_no_schedule_across_a_miss() -> None:
+    # the same dish some days or weeks apart, nothing at that price in August
+    dish = [(5, 24), (6, 8), (6, 12), (6, 15), (7, 13), (9, 21)]
+    charges = [
+        *(_t(date(2026, month, day), -4000) for month, day in dish),
+        _t(date(2026, 8, 1), -5500),
+        _t(date(2026, 8, 23), -10000),
+    ]
+    assert split_bills(charges) is None
+
+
+def test_a_habit_busy_across_the_gap_is_no_missed_month() -> None:
+    # one price 33 and 52 days apart reads as a schedule with a skipped month, but the
+    # merchant kept charging at real size through the gap: a habit, not a skipped installment
+    first = date(2026, 3, 1)
+    price = [first, first + timedelta(days=33), first + timedelta(days=85)]
+    busy = [first + timedelta(days=33 + 9), first + timedelta(days=33 + 17)]
+    charges = [
+        *(_t(d, -4000) for d in price),
+        _t(busy[0], -9000),
+        _t(busy[1], -13000),
+    ]
+    assert match_across_a_miss(price) is not None  # the dates alone would bridge
+    assert split_bills(charges) is None
+
+
+def test_one_real_size_charge_in_the_gap_still_bridges_and_two_do_not() -> None:
+    installments = [*_monthly(15, range(6, 9), -120000), _t(date(2026, 10, 15), -120000)]
+    deposit = _t(date(2026, 9, 1), -210000)
+    assert split_bills([*installments, deposit]) == [installments]
+    assert split_bills([*installments, deposit, _t(date(2026, 9, 3), -90000)]) is None
+
+
+def test_small_charges_in_the_gap_do_not_count_as_the_merchant_being_busy() -> None:
+    # fees under a quarter of the installment are adjustments, so the merchant stayed quiet
+    installments = [*_monthly(15, range(6, 9), -120000), _t(date(2026, 10, 15), -120000)]
+    gap = [
+        _t(date(2026, 9, 1), -210000),
+        _t(date(2026, 9, 2), -14000),
+        _t(date(2026, 9, 4), -20000),
+    ]
+    assert split_bills([*installments, *gap]) == [installments]

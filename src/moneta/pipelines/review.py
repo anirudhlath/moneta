@@ -19,6 +19,7 @@ from moneta.logical import load_logical_data
 from moneta.models import (
     Account,
     AliasSource,
+    Direction,
     LinkMethod,
     MerchantAlias,
     RecurringSeries,
@@ -73,11 +74,15 @@ Respond with JSON: {{"inflow_id": <id> | null, "confident": true/false}}
 Set confident=true ONLY if exactly one candidate clearly matches (same money movement).
 Use inflow_id=null with confident=true if you are sure NONE match."""
 
-_RECURRING_PROMPT = """You are auto-resolving a personal-finance review question.
-Is this one recurring bill/subscription/income stream (vs. one-off spending)?
-Merchant: {merchant!r}; direction: {direction}; recent charges: {samples}
-Respond with JSON: {{"is_recurring": true/false, "confident": true/false}}
-Set confident=true ONLY if the pattern is clear."""
+_RECURRING_PROMPT = (
+    "You are auto-resolving a personal-finance review question.\n"
+    "Classify this merchant's transactions.\n"
+    f"{CLASSIFICATION_TAXONOMY}\n"
+    "Merchant: {merchant!r}; direction: {direction}; recent charges: {samples}\n"
+    'Respond with JSON: {{"classification": "bill" | "habit" | "not_recurring", '
+    '"confident": true/false}}\n'
+    "Set confident=true ONLY if the pattern is clear."
+)
 
 _VERIFY_PROMPT = (
     "You are double-checking automatic recurring-bill detection.\n"
@@ -89,6 +94,22 @@ _VERIFY_PROMPT = (
     '"confident": true/false}}\n'
     "Set confident=true ONLY if you are sure either way."
 )
+
+
+_CLASSIFICATIONS = ("bill", "habit", "not_recurring")
+
+
+def _classification(answer: dict[str, Any] | None) -> str | None:
+    """A three-way recurring answer's label; None when it is missing or malformed."""
+    label = answer.get("classification") if answer else None
+    return label if label in _CLASSIFICATIONS else None
+
+
+def _cluster_resolution(label: str) -> dict[str, Any]:
+    """The resolution `moneta review`'s b/h/n answer writes for one label."""
+    if label == "habit":
+        return {"is_recurring": True, "discretionary": True}
+    return {"is_recurring": label == "bill"}
 
 
 def _sample(txn: Transaction) -> dict[str, Any]:
@@ -497,13 +518,10 @@ def _validated(item: ReviewItem, answer: dict[str, Any]) -> dict[str, Any] | Non
             return {"inflow_id": inflow_id}
         return None
     if item.kind == ReviewKind.recurring_cluster:
-        is_recurring = answer.get("is_recurring")
-        if not isinstance(is_recurring, bool):
-            return None
-        resolution: dict[str, Any] = {"is_recurring": is_recurring}
-        if isinstance(answer.get("discretionary"), bool):
-            resolution["discretionary"] = answer["discretionary"]
-        return resolution
+        label = _classification(answer)
+        if label == "habit" and item.payload.get("direction") == Direction.inflow:
+            return None  # habit is spending only: it would silently drop income from power
+        return None if label is None else _cluster_resolution(label)
     return None
 
 
@@ -687,9 +705,7 @@ async def verify_series(session: AsyncSession, llm: Classifier | None) -> Verify
         amount = await bill_amount(session, series)
         item = recurring_cluster_item(series.merchant, series.direction, amount)
         seen.append((series.merchant, str(series.direction), amount))
-        classification = answer.get("classification") if answer else None
-        if classification not in ("bill", "habit", "not_recurring"):
-            classification = None
+        classification = _classification(answer)
         confident = bool(answer and answer.get("confident") is True)
         if classification == "bill" and confident:
             item.status = ReviewStatus.resolved

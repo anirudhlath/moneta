@@ -22,7 +22,9 @@ from moneta.models import (
     recurring_cluster_item,
 )
 from moneta.pipelines.events import emit_series_events
+from moneta.pipelines.normalize import normalize_merchants, renormalize_merchants
 from moneta.pipelines.recurring import detect_recurring
+from moneta.views.power import power_report
 from tests.factories import make_account, make_series, make_txn
 
 
@@ -1307,3 +1309,160 @@ async def test_lone_steady_bill_ignores_a_decision_outside_its_charges(
     await session.commit()
     await detect_recurring(session, llm=None, today=date(2026, 7, 1))
     assert len(await _series(session)) == 1
+
+
+# a payment plan charged from two cards under three spellings: a monthly installment
+# (December and May paid from elsewhere), a larger deposit at each term start, and a fee
+# beside the newest deposit
+_INSTALLMENTS = (
+    date(2025, 10, 15),
+    date(2025, 11, 14),
+    date(2026, 1, 15),
+    date(2026, 2, 16),
+    date(2026, 3, 16),
+    date(2026, 4, 15),
+    date(2026, 6, 15),
+    date(2026, 7, 15),
+    date(2026, 8, 14),
+)
+_DEPOSITS = (date(2025, 9, 2), date(2026, 1, 5), date(2026, 5, 4), date(2026, 9, 1))
+
+
+async def _payment_plan(session: AsyncSession) -> list[Account]:
+    cards = [await make_account(session, type=AccountType.credit) for _ in range(2)]
+    for i, posted_on in enumerate(_INSTALLMENTS):
+        raw = ("ACME UNIVERSITY CA", "ACME UNIVERSITYELMTON CA")[i % 2]
+        await make_txn(
+            session, cards[i % 2], amount_cents=-120000, description=raw, posted_on=posted_on
+        )
+    for cents, posted_on in [(-210000, d) for d in _DEPOSITS] + [(-14000, _DEPOSITS[-1])]:
+        await make_txn(
+            session,
+            cards[0],
+            amount_cents=cents,
+            description="ACME UNIVERSITYRIVERTON CA",
+            posted_on=posted_on,
+        )
+    await normalize_merchants(session, llm=None)
+    await renormalize_merchants(session)
+    return cards
+
+
+async def test_term_deposits_stay_out_of_a_monthly_payment_plan(session: AsyncSession) -> None:
+    """The deposit after the newest installment, before the next one is due, sits beside
+    the schedule: the installment is the bill, and every deposit is ordinary spending."""
+    await _payment_plan(session)
+    today = date(2026, 9, 10)
+
+    stats = await detect_recurring(session, llm=None, today=today)
+
+    assert stats.new_series == 1 and stats.review == 0
+    series = (await _series(session))[0]
+    assert (series.merchant, series.cadence, series.expected_cents) == (
+        "Acme University",
+        Cadence.monthly,
+        -120000,
+    )
+    assert series.status == SeriesStatus.active and series.discretionary is False
+    txns = (await session.execute(select(Transaction))).scalars().all()
+    assert sorted(t.posted_on for t in txns if t.series_id == series.id) == list(_INSTALLMENTS)
+    report = await power_report(session, today=today)
+    assert [(line.merchant, line.monthly_cents) for line in report.fixed_costs] == [
+        ("Acme University", 120000)
+    ]
+    assert report.spent_so_far_cents == 224000  # the newest deposit and its fee
+
+    stats = await detect_recurring(session, llm=None, today=today)
+
+    assert (stats.new_series, stats.updated, stats.review) == (0, 0, 0)
+
+
+async def test_a_merchant_level_bill_ruling_never_tags_the_deposits(session: AsyncSession) -> None:
+    """A "bill" answer to the merchant-level question covers every bill the merchant has,
+    and the deposits are none of them: charges an earlier ruling tagged leave the series."""
+    await _payment_plan(session)
+    series = await make_series(
+        session,
+        merchant="Acme University",
+        expected_cents=-120000,
+        next_expected_on=date(2026, 9, 14),
+    )
+    for t in (await session.execute(select(Transaction))).scalars():
+        t.series_id = series.id  # what the ruling tagged while the merchant was one bill
+    ruling = recurring_cluster_item("Acme University", "outflow")
+    ruling.status = ReviewStatus.resolved
+    ruling.resolution = {"is_recurring": True, "resolved_by": "manual"}
+    session.add(ruling)
+    await session.commit()
+
+    stats = await detect_recurring(session, llm=None, today=date(2026, 9, 10))
+
+    assert (stats.new_series, stats.review) == (0, 0)
+    assert [s.id for s in await _series(session)] == [series.id]
+    assert series.expected_cents == -120000 and series.discretionary is False
+    txns = (await session.execute(select(Transaction))).scalars().all()
+    assert sorted(t.posted_on for t in txns if t.series_id == series.id) == list(_INSTALLMENTS)
+
+
+async def test_a_payment_plan_holds_across_a_month_with_only_a_deposit(
+    session: AsyncSession,
+) -> None:
+    """September's installment was paid from an account that isn't linked, so only the
+    deposit posted that month: October's installment continues the plan."""
+    cards = await _payment_plan(session)
+    await detect_recurring(session, llm=None, today=date(2026, 9, 10))
+    await make_txn(
+        session,
+        cards[1],
+        amount_cents=-120000,
+        description="ACME UNIVERSITY CA",
+        posted_on=date(2026, 10, 15),
+    )
+    await normalize_merchants(session, llm=None)
+    await renormalize_merchants(session)
+
+    today = date(2026, 10, 20)
+    stats = await detect_recurring(session, llm=None, today=today)
+    await emit_series_events(session, llm=None, today=today)
+    # the next sync finds nothing new: the missed month is not announced twice
+    again = await detect_recurring(session, llm=None, today=today)
+    await emit_series_events(session, llm=None, today=today)
+
+    assert (stats.new_series, stats.review) == (0, 0)
+    assert (again.new_series, again.updated, again.review, again.merged) == (0, 0, 0, 0)
+    (series,) = await _series(session)
+    assert (series.cadence, series.expected_cents, series.status) == (
+        Cadence.monthly,
+        -120000,
+        SeriesStatus.active,
+    )
+    txns = (await session.execute(select(Transaction))).scalars().all()
+    assert sorted(t.posted_on for t in txns if t.series_id == series.id) == [
+        *_INSTALLMENTS,
+        date(2026, 10, 15),
+    ]
+    items = (await session.execute(select(ReviewItem))).scalars().all()
+    assert [i for i in items if i.status == ReviewStatus.open] == []
+    events = (await session.execute(select(SeriesEvent))).scalars().all()
+    # nothing posted around September's due date: one missed event, as for any bill
+    assert [e.occurred_on for e in events if e.kind == EventKind.missed] == [date(2026, 9, 14)]
+
+
+async def test_a_habit_busy_across_a_gap_forms_no_series(session: AsyncSession) -> None:
+    """Three charges of one price 33 and 52 days apart look like a schedule with a skipped
+    month, but the merchant kept charging at real size in between: spending, not a bill."""
+    acct = await make_account(session)
+    first = date(2026, 3, 1)
+    for days, cents in ((0, -4000), (33, -4000), (85, -4000), (42, -9000), (50, -13000)):
+        await make_txn(
+            session,
+            acct,
+            amount_cents=cents,
+            merchant="Acme Charging",
+            posted_on=first + timedelta(days=days),
+        )
+
+    stats = await detect_recurring(session, llm=None, today=date(2026, 6, 1))
+
+    assert stats.new_series == 0
+    assert await _series(session) == []

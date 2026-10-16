@@ -1,5 +1,5 @@
 from calendar import monthrange
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -687,3 +687,19 @@ async def test_financed_purchase_is_not_also_spend(
     report = await power_report(session, today=date(2026, 7, 7))
     assert report.fixed_costs == fixed
     assert report.spent_so_far_cents == spent
+
+
+async def test_power_reports_quiet_feeds(session: AsyncSession) -> None:
+    today = date(2026, 7, 9)
+    card = await make_account(session, name="Acme Card", mask="1234", type=AccountType.credit)
+    for days_ago in range(14, 201):
+        await make_txn(session, card, posted_on=today - timedelta(days=days_ago))
+    report = await power_report(session, today=today)
+    assert [(s.account_id, s.newest_posted_on) for s in report.stale_accounts] == [
+        (card.id, date(2026, 6, 25))
+    ]
+
+
+async def test_power_reports_no_quiet_feeds_on_an_empty_db(session: AsyncSession) -> None:
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert report.stale_accounts == []

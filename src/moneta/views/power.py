@@ -15,11 +15,13 @@ from moneta.models import (
     SeriesStatus,
 )
 from moneta.queries import (
+    StaleAccount,
     classified_links,
     foreign_series_ids,
     latest_successful_sync_at,
     loan_payment_stats,
     primary_currency,
+    stale_accounts,
 )
 from moneta.views.transactions import link_field, spend_reason
 
@@ -50,6 +52,7 @@ class PowerReport(BaseModel):
     per_day_remaining_cents: int
     upcoming: list[UpcomingCharge]
     data_as_of: datetime | None  # newest successful SyncRun.finished_at (design 2026-07-16 §3)
+    stale_accounts: list[StaleAccount]  # per-account coverage notes (queries.stale_accounts)
 
 
 def _series_lines(series: Iterable[RecurringSeries]) -> tuple[list[SeriesLine], int]:
@@ -201,4 +204,5 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
         per_day_remaining_cents=round(remaining / days_left),
         upcoming=upcoming,
         data_as_of=data_as_of,
+        stale_accounts=await stale_accounts(session, logical, today),
     )

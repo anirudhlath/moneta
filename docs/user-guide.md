@@ -14,6 +14,7 @@ This guide covers day-to-day usage. For what the product is and why, see the [PR
 - [Syncing](#syncing)
   - [`moneta status`](#moneta-status)
   - [Staleness footers](#staleness-footers)
+  - [Coverage notes](#coverage-notes)
   - [`moneta digest` — notifications](#moneta-digest--notifications)
 - [Reading the numbers](#reading-the-numbers)
 - [The review queue](#the-review-queue)
@@ -164,7 +165,7 @@ backups, credentials, financial fixtures, and generated reports outside git.
 ## Syncing
 
 ```bash
-moneta sync            # incremental: resumes from your newest transaction (with overlap)
+moneta sync            # incremental: resumes where each source's accounts left off (with overlap)
 moneta sync --full     # re-pull all history — use after linking a new source
 moneta status          # is data fresh? did the last sync work? what changed
 ```
@@ -179,10 +180,19 @@ current fetch window (e.g. `Syncing… SimpleFIN: fetching 2026-05-01 – 2026-0
 first sync isn't a silent wait. Pointed at a remote server (`MONETA_API_URL` set) you only see
 the spinner — the fetch itself is happening on the server, out of the client's view.
 
-Each configured source (SimpleFIN, Plaid, ...) syncs on its **own** incremental window,
-computed from that source's own newest stored transaction, including observations
-superseded by another provider — not a single global window. This
-means a SimpleFIN outage, or a bank that's been silently failing for weeks, self-heals on the
+When a sync drops automatic transfer links that no longer qualify (see
+[How transfers are matched](#how-transfers-are-matched)), the summary adds a line such
+as `Dropped 1 stale transfer link.` The freed transactions are matched again in that same
+sync, and an outflow left without a match gets a transfer question unless it already had one.
+
+Each configured source (SimpleFIN, Plaid, ...) syncs on its **own** incremental window —
+not a single global window. The window starts a week before the newest stored transaction
+of the source's most-behind active account (observations superseded by another provider
+count), so a card that delivers a month of back-dated transactions at statement time gets
+them on the next sync even when another account at the same source posted yesterday. An
+account counts as active while its newest transaction is within 90 days of the source's
+newest; a closed account stops holding the window back. Because each source has its own
+window, a SimpleFIN outage, or a bank that's been silently failing for weeks, self-heals on the
 next successful sync instead of staying masked by Plaid's daily full-history replay. The
 tradeoff: a brand-new source's first-ever sync on an already-populated database inherits the
 existing global newest date as its starting point rather than pulling full history — run
@@ -199,9 +209,10 @@ Synced: 12 new transactions, 1 transfers linked, 0 new series, 0 events.
 
 SimpleFIN requests wait up to 60 seconds for the bridge, which refreshes your
 institutions live. A `⚠ simplefin: ReadTimeout` therefore means the bridge was stalled,
-not just slow; the next sync retries from SimpleFIN's own newest transaction.
+not just slow; the next sync retries from where SimpleFIN's accounts left off (a week before
+the newest transaction of its most-behind active account).
 
-(A real example: a Plaid item losing its login shows `⚠ Plaid item Apple Card skipped
+(A real example: a Plaid item losing its login shows `⚠ Plaid item Acme Card skipped
 (ITEM_LOGIN_REQUIRED) — repair with: moneta setup plaid-relink <item-id>` — previously this
 only reached the log file; now it's visible in the sync summary the moment it happens, and
 the hint points at the update-mode repair, not a duplicate-account-risking re-link.) Only when
@@ -235,24 +246,30 @@ Last sync: 2026-07-16T06:00:03 → ok
   12 new txns, 1 new series, 0 events
 Accounts: 8  ·  Open review items: 2
 Aggregators: simplefin, plaid  ·  LLM: configured
+Coverage: Acme Card ··1234 has no transactions since 2026-07-02 (usually posts ~4 days a week) — recent spending on it may be missing.
 ```
 
 The first two lines come from the most recent sync run (as before): timestamp, outcome
 (`ok` / `failed` — with the error / `incomplete` — still running or the process died
-mid-sync), and a one-line summary of what changed. The last two lines are new: total
+mid-sync), and a one-line summary of what changed. The next two lines are new: total
 accounts, open review-queue items, which sources are configured (`aggregators`, from
 `AggregatorAdapter.source` — `simplefin` and/or `plaid`), and whether an LLM is configured.
-These are booleans/counts only — never credentials. On a fresh database with no sync yet,
-you still see the accounts/reviews/aggregators/LLM summary; only the "Last sync" line is
-replaced with "No sync has run yet."
+These are booleans/counts only — never credentials. Below them comes one yellow `Coverage:`
+line for each account whose feed has gone quiet (see [Coverage notes](#coverage-notes));
+none when every feed looks alive. On a fresh database with no sync yet, you still see the
+accounts/reviews/aggregators/LLM summary; only the "Last sync" line is replaced with "No
+sync has run yet."
 
 `moneta status --json` merges both API calls into one object: the `/status` fields
-(`last_sync_at`, `last_sync_ok`, `accounts`, `open_reviews`, `aggregators`, `llm_configured`)
+(`last_sync_at`, `last_sync_ok`, `accounts`, `open_reviews`, `aggregators`, `llm_configured`, `stale_accounts`)
 plus a `last_sync` key holding the full `/sync/last` detail (`null` if no sync has ever run):
 
 ```json
 {"last_sync_at": "2026-07-16T06:00:03", "last_sync_ok": true, "accounts": 8,
  "open_reviews": 2, "aggregators": ["simplefin", "plaid"], "llm_configured": true,
+ "stale_accounts": [{"account_id": 3, "name": "Acme Card", "mask": "1234",
+                     "newest_posted_on": "2026-07-02", "posting_days": 187,
+                     "note": "Acme Card ··1234 has no transactions since 2026-07-02 (usually posts ~4 days a week) — recent spending on it may be missing."}],
  "last_sync": {"status": "ok", "started_at": "...", "finished_at": "...",
                "success": true, "error": null, "report": {...}}}
 ```
@@ -275,6 +292,38 @@ no successful sync yet — run moneta sync
 
 The footer is silent (nothing printed) once you've synced within the last 24 hours — it only
 speaks up when the numbers you're looking at might be stale.
+
+### Coverage notes
+
+The staleness footer only knows when the last sync ran. A sync can succeed while one
+account's feed has stalled — or while a bank holds that card's transactions back for a
+monthly batch — so `moneta power` and `moneta status` also judge every account on its own
+and print a yellow line for each one that has gone quiet:
+
+```
+Coverage: Acme Card ··1234 has no transactions since 2026-07-02 (usually posts ~4 days a week) — recent spending on it may be missing.
+```
+
+An account is noted when its newest transaction is at least 7 days old **and**, at its usual
+rate — distinct posting days over the last 365 days — you'd have expected at least 5 posting
+days since then. For an account with about a year of history behind it, a card you use every
+day is noted after a week of silence, one you use a few days a week after about ten days, and a
+weekly account after about six weeks. An account that posts twice a month is noted only after
+three to four months of silence, and one that posts about once a month (roughly 18 posting days
+a year or fewer, spread through the year) never is. A younger account is noted later, because
+its rate is averaged over the whole year. An account linked across providers is judged once,
+and a transaction from either provider counts.
+Accounts with no transactions in the last year are skipped.
+
+It's a note, not an error: nothing is dropped from the numbers, but spending you made on that
+account recently may not be in them yet. Run `moneta sync`; if the note stays, fix the
+account's connection at its provider, then run `moneta sync --full` to backfill. moneta has no
+closed-account flag, so a card you closed can keep its note for up to a year after its last
+transaction.
+
+The same list is `stale_accounts` in `GET /power`, `GET /status` and their `--json` output —
+`account_id`, `name`, `mask`, `newest_posted_on`, `posting_days` (distinct posting days in the
+last 365) and the `note` text.
 
 ### `moneta digest` — notifications
 
@@ -340,12 +389,26 @@ The flagship view for the current month:
   non-credit-card-payment fixed costs (plus derived loan payments) due from today through month-end, e.g.
   `Upcoming this month: Rent $1400.00 (Jul 15) · Netflix $15.99 (Jul 28)`. Omitted when nothing
   is due by month-end. A bill due today shows until its charge syncs.
+- **Coverage** — a yellow `Coverage:` line under the table (after the Upcoming line) for each
+  account whose feed has gone quiet. Omitted when every feed looks alive; see
+  [Coverage notes](#coverage-notes).
 
 `moneta power --history N` (e.g. `--history 6`, 1-60 months) replaces the table above with a
-compact Month/Income/Spend/Net history instead. The newest row is the current, still-in-progress
-month; every row (including that one) reports *actual observed* income and spend for that
-calendar month — not today's recurring-series state — so a since-cancelled bill or an old raise
-still shows correctly even though no series reflects it anymore.
+compact Month/Income/Other inflows/Spend/Net history instead. The newest row is the current,
+still-in-progress month; every row (including that one) reports the *observed* money for that
+calendar month, so a since-cancelled bill or an old raise still shows correctly even though no
+series reflects it anymore. Today's series tags only decide which inflow column a month's money
+lands in: marking a paycheck series a habit today moves its past paychecks to Other inflows.
+**Income** counts inflows tagged to an income series: a recurring inflow series that isn't a
+habit (a paycheck), whether it is still active or has since ended, so a former employer's
+paychecks count in the months they paid. From the next sync after you answer "not recurring",
+that series keeps no tagged charges, so its inflows count as Other inflows, never income.
+**Other inflows** is every other
+inflow that is counted at all — refunds, money from friends, one-off deposits — shown so nothing
+disappears, but not income. Three kinds of transaction are left out of every column: a leg of a
+transfer link, a transaction on an account that isn't checking, savings or credit (a loan or
+brokerage account, say), and one in a currency other than your primary currency. **Net** =
+income − spend; other inflows are left out of it.
 
 ### `moneta txns` — auditing the numbers
 
@@ -395,6 +458,43 @@ The footer has two lines:
   claim any parity — a full-month view includes future-dated rows that `power` hasn't
   counted yet, and a past month has no "through today" concept at all.
 
+### How transfers are matched
+
+A transfer between two of your accounts (checking → savings, checking → a card payment)
+is linked, so neither leg counts as income or spend. A candidate is an outflow and an
+inflow of exactly opposite amounts, on two different accounts in the same currency,
+posted at most 6 days apart. Each candidate pair is scored in points:
+
+| Points | When |
+|---|---|
+| 5 | every candidate |
+| +2 | the legs post 0–1 days apart (+1 at 2–3 days; nothing at 4–6) |
+| +2 | either description has transfer wording: `payment`, `pymt`, `transfer`, `xfer`, `ach`, `autopay`, `epay`, `billpay` or `deposit` (any case; every word but `ach` also counts inside a longer word, e.g. `ONETIMEPAYMENT`, while `ach` must stand alone, so `BEACH` doesn't count) |
+| +1 | the outflow leaves a checking or savings account |
+
+Payment-app rail wording doesn't count as transfer wording: `Zelle payment from`/`to`,
+`Venmo payment` and `PayPal Inst Xfer` (any case, with whitespace between the words; a
+glued `VENMOPAYMENT` doesn't match) name a person, not one of
+your accounts, so that phrase is ignored before the search. Other words in the same
+description still count.
+
+An outflow with exactly one candidate links automatically when the pair scores 8 or more
+**and** has transfer wording. A same-amount pair with no transfer wording is as often a
+coincidence as a transfer, so it is never linked on points alone. Every other case goes
+to the LLM when one is configured, else to `moneta review` as a transfer question. When
+two outflows that both qualify for an automatic link want the same inflow, the higher
+score wins and an equal score goes to the outflow Moneta stored first; the other
+outflow is asked about.
+
+Every sync, and `moneta reconcile`, first re-scores each link it made automatically,
+with the same pair score a new match gets (the points above; `score_pair` in the code),
+and drops the ones that no longer reach 8 or no longer have transfer wording. It then
+matches the freed transactions again in the same run, so an old link that no longer
+holds up is removed instead of keeping its purchase out of spent-so-far. The re-check looks at
+the pair's score and transfer wording only; it does not repeat the single-candidate
+test, so an automatic link stays when a second same-amount inflow shows up later. Links
+you chose in `moneta review`, and links the LLM picked, are never re-checked.
+
 ### `moneta networth`
 
 Liquid balances + **vested** holdings − liabilities. Unvested shares are listed separately as
@@ -422,28 +522,47 @@ the old cadence. A price increase is only applied after two agreeing charges (or
 confirmation) — a single weird charge never rewrites what a bill is "supposed to" cost.
 
 One bill is one series, however the bank words it. Every sync strips wallet prefixes
-(`AplPay`, `SQ*`), legal suffixes (`LLC`), street addresses and city/state tails from
-descriptors, then merges a longer name into a shorter one it starts with (`Acme Fitness`
-and `Acme Fitness Riverton` become `Acme Fitness`). A single-word brand absorbs only a
-trailing place, so `Streamco` and `Streamco Plus` stay apart. A prefix shared by many
-unrelated names, such as a payment rail (`Zelle Payment To …`), absorbs nothing. A
-merchant can also have several series: if a subscription has irregular purchases alongside
-it, or two subscriptions at the same price bill on different days, each schedule is its own
-series and the other charges are ordinary spending. A merchant whose amounts just vary
-month to month stays one series, and a small fee alongside it does not split it. When a
-rename or merge leaves two series for one bill, the sync folds them into one, keeping their
-events. A price jump of more than 20% starts a new series and the old one goes stale.
+(`AplPay`, `SQ*`), legal suffixes (`LLC`), street addresses (expressways too) and
+city/state tails from descriptors, then merges a longer name into a shorter one it
+starts with (`Acme Fitness` and `Acme Fitness Riverton` become `Acme Fitness`). A city
+glued onto the name folds the same way: `Acme Universityelmton` and
+`Acme Universityriverton` become `Acme University` once the tail is a known place or the
+name shows two different glued tails, while one longer word (`Corner Storehouse` beside
+`Corner Store`) stays its own merchant. A single-word brand absorbs only a trailing
+place, so `Streamco` and `Streamco Plus` stay apart. A prefix shared by many unrelated
+names, such as a payment rail (`Zelle Payment To …`), absorbs nothing. A per-charge code
+hyphenated onto a name's first word (`Acmeapp-Qwertyui`: a word of 4 or more letters, a
+hyphen, then exactly 8 letters) is dropped once two or more different codes appear for the
+merchant, so a subscription billed under a new code each month is one series; a lone code
+stays part of the name, and a code with a digit in it is stripped outright like any other
+reference number. A merchant can also have several series: if a subscription has
+irregular purchases alongside it, or two subscriptions at the same price bill on different
+days, each schedule is its own series and the other charges are ordinary spending. A charge of at least a quarter of the bill's
+amount that lands after a schedule's newest charge, while the next one is not yet nearly
+due (6 days short of its due date for a monthly bill), counts the same way: a term deposit
+beside a monthly payment-plan installment is ordinary spending, and the installment alone
+is the fixed cost. Once a merchant has split like this, one month paid from an account
+Moneta can't see does not break the plan: the next installment continues it, and that
+month shows as a missed payment. That holds only when nothing was charged around the
+missed due date and the merchant did not keep charging at real size through the gap (a
+habit stays busy in between; a missed installment leaves the merchant quiet). A merchant
+that has not split is judged on its newest run as before, so a missed month cuts that run
+short. A merchant whose amounts just vary month to month stays one series, and a small fee
+alongside it does not split it. When a rename or merge leaves two series for one bill, the sync folds
+them into one, keeping their events. A price jump of more than 20% starts a new series
+and the old one goes stale.
 
 `--end`, `--not-a-bill`, `--habit`, `--re-review`, and `--reactivate` are mutually exclusive
 with each other — pass exactly one. `--end`/`--not-a-bill`/`--habit`/`--re-review` each write
 through the same `recurring_cluster` review-item ledger a bill/habit/not-recurring answer
 would (`resolved_by: "manual"`), so a wrong LLM or detection verdict is always
 human-correctable: `--not-a-bill` ends the series immediately and suppresses it from every
-future sync; `--habit` flips it to discretionary spending and reactivates it if it had ended;
-`--re-review` reopens the ledger item so it reappears in `moneta review` (and a fresh answer
-can supersede the old one). `--re-review` only reopens the question — it never changes the
-series itself, so an ended series stays ended until you answer `h` (habit, reactivates) or
-bring it back directly.
+future sync; from the next sync its charges are untagged (outflows count as spend, inflows as
+Other inflows in `power --history`, never income); `--habit` flips it to discretionary
+spending and reactivates it if it had ended; `--re-review` reopens the ledger item so it
+reappears in `moneta review` (and a fresh answer can supersede the old one). `--re-review`
+only reopens the question — it never changes the series itself, so an ended series stays
+ended until you answer `h` (habit, reactivates) or bring it back directly.
 
 When a merchant has several series, these overrides and the review answer apply to the one
 bill you pick (the table's ID), not to the whole merchant; its other bills keep their own
@@ -570,7 +689,7 @@ raw API response to stdout with no rich markup, ready to pipe into `jq` or a
 script, and returns before any table is built. `moneta status --json` merges
 `GET /status` and `GET /sync/last` into one object — the `/status` fields
 (`last_sync_at`, `last_sync_ok`, `accounts`, `open_reviews`, `aggregators`,
-`llm_configured`) plus a `last_sync` key holding the full `/sync/last` payload,
+`llm_configured`, `stale_accounts`) plus a `last_sync` key holding the full `/sync/last` payload,
 which is `null` when no sync has ever run (the rest of the object is still
 populated). Combining `--json` with a write flag
 (`recurring --end/--not-a-bill/--habit/--re-review/--reactivate`,
@@ -595,7 +714,7 @@ You'll see an upfront summary, then one question at a time:
 | Shared account identity | Pick a numbered candidate after checking provider, mask, currency, type, and any metadata conflicts; `0` chooses none; Enter skips |
 | Overlapping provider transaction | Compare numbered observations' signed amount, posting date, description, account, and provider; pick a duplicate counterpart, `0` chooses none; Enter skips |
 | Transfer match ("which inflow matches…") | Type the number of the right candidate, or Enter to skip |
-| Bill, habit, or not recurring ("Is X a recurring bill?"; with several bills, "Is 'X' ($12.34) a recurring bill?") | `b` bill (fixed cost) / `h` habit (discretionary, still tracked) / `n` not recurring |
+| Bill, habit, or not recurring ("Is X a recurring bill?"; with several bills, "Is 'X' ($12.34) a recurring bill?") | `b` bill (fixed cost) / `h` habit (discretionary, still tracked) / `n` not recurring (ends the series; from the next sync its charges are untagged: spend for an outflow, Other inflows for an inflow) |
 | Financing check ("X looks like promo financing being paid down…") | `y` treat its payments as fixed costs / `n` leave it as a plain credit card |
 | Price change ("Did X change price from $A to $B?") | `y` (applies the new amount) / `n` |
 | Merchant name | Type the real merchant name, or Enter to skip |
@@ -625,8 +744,12 @@ llm_api_base = "http://localhost:8000/v1"
 
 With an LLM configured, sync auto-resolves review items it's confident about, double-checks
 newly detected recurring series, and gates price changes — anything it isn't sure of still
-comes to you. **The LLM only ever classifies; it never computes a money value.** Unset the
-variable and everything degrades gracefully to deterministic rules + your review queue.
+comes to you. A recurring question gets the same bill / habit / not-recurring choice you
+have, and a confident habit answer is recorded exactly like your `h`: the merchant is
+tracked as discretionary spending, not a fixed cost. Income counts as a bill, so a habit
+answer on a deposit is left for you. **The LLM only ever classifies; it never computes a
+money value.** Unset the variable and everything degrades gracefully to deterministic
+rules + your review queue.
 
 ## RSU vesting import
 
@@ -674,7 +797,7 @@ Fields split into three sign conventions, decided per field rather than globally
   `spent_so_far_cents`, `SeriesLine.monthly_cents`, `SeriesLine.expected_cents`,
   `UpcomingCharge.expected_cents`, `liabilities_cents`, `unvested_potential_cents`,
   `accrual_cents`, `cash_out_cents`, `balance_owed_cents`, `monthly_payment_cents`,
-  `PowerMonth.income_cents`, `PowerMonth.spend_cents`.
+  `PowerMonth.income_cents`, `PowerMonth.other_inflows_cents`, `PowerMonth.spend_cents`.
 
 New money fields document their sign here as they ship. The CLI never hand-negates a
 magnitude field — it calls `fmt_outflow(magnitude_cents)` (renders with the display minus)
@@ -754,22 +877,25 @@ Files in the config dir (all owner-only, dir is 0700):
 | "Did my sync run last night?" | `moneta status` — shows the last run, success/failure, and the error if it failed. |
 | Sync failed | `moneta status` for the error; details in `~/.config/moneta/moneta.log`. Failures never corrupt data — fix the cause and re-sync. |
 | One source failed but the sync "succeeded" | That's by design when at least one other source is configured and healthy — check the `⚠` warning line the sync prints (or `moneta status`/the log) for which source and why; a source only fails the whole sync when it's the only one configured, or every configured source fails together. |
-| A bank's history is missing | `moneta sync --full` re-pulls everything the institution retains for every configured source (needed after adding a new source, or after an outage longer than the 7-day overlap). |
+| A bank's history is missing | `moneta sync --full` re-pulls everything the institution retains for every configured source. It's needed after adding a new source or linking a new account at an existing one, and after an account was quiet for more than 90 days while others at its source kept posting. An outage, or a card whose transactions arrive in late batches, heals on the next plain `moneta sync`, with two exceptions. Rows an older version's window already skipped are not fetched again by a plain sync, so run `moneta sync --full` once after upgrading. And the window follows each account's newest row: if a row reaches a late-batch card ahead of the batch (a payment, say), batch rows older than that row minus 7 days are still skipped, and `moneta sync --full` recovers them. |
 | Account has the wrong type | `moneta accounts --set-type <ID> <TYPE>` — sticks across syncs. |
 | A shared bank appears twice | Inspect `moneta accounts --sources` and account overlap questions in `moneta review`; confirm identity only with corroborating evidence, then link or reconcile. |
 | A provider match is wrong | Reverse an account link with `moneta accounts --unlink-source <ID>` to restore its observations. For an uncertain match with an open transaction overlap question, choose none in that review. Automatic matches do not necessarily have open questions; there is no separate public transaction-unlink endpoint. |
 | Reconciliation did not make data fresh | It only rebuilds stored data; run `moneta sync` and inspect source warnings for new observations. |
 | Merchant names look wrong | Answer the merchant questions in `moneta review`; naming rules and merchant merging already run on every sync, and `moneta renormalize` applies them on demand without a sync. A question disappears by itself once its descriptor no longer appears on any transaction or the rules already name it cleanly. |
-| One bill shows up as two series, or two bills as one | Merging is by name: a truncated name that is not a prefix of the full one (`Acme Fitnriverton`) stays split, as do descriptors with short per-charge codes. Duplicates that a merge does produce are folded automatically on the next sync. `moneta recurring --end <ID>` only ends a series, and a series that is still charging revives. |
+| One bill shows up as two series, or two bills as one | Merging is by name: a truncated name that is not a prefix of the full one (`Acme Fitnriverton`) stays split, and a per-charge code (`Acmeapp-Qwertyui`) is dropped only once two different codes appear for the merchant. Duplicates that a merge does produce are folded automatically on the next sync. `moneta recurring --end <ID>` only ends a series, and a series that is still charging revives. |
 | A subscription shows as active but is cancelled | `moneta recurring --end <ID>`. |
-| A series was wrongly confirmed as a recurring bill | `moneta recurring --not-a-bill <ID>` — ends it and suppresses it from every future sync. |
+| A series was wrongly confirmed as a recurring bill | `moneta recurring --not-a-bill <ID>` — ends it and suppresses it from every future sync; from the next sync its charges are untagged (they count as spend, or as Other inflows if money came in). |
 | A recurring series is really discretionary spending | `moneta recurring --habit <ID>` — reactivates it if ended, tags it discretionary (not a fixed cost). When the merchant has a single bill, the answer keeps applying as long as its amount is among the bill's newest charges, so a habit whose typical spend drifts stays a habit. |
 | A series ended but the bill actually resumed | `moneta recurring --reactivate <ID>` — flips it straight back to active, no review-queue detour. |
 | An overrule was a mistake | `moneta recurring --re-review <ID>` reopens the question in `moneta review`. |
 | A price change looks wrong | It only applies after two agreeing charges or a confirmation; deny it in `moneta review` and the old expected amount stands. |
 | A bill whose amount varies shows an odd expected amount | A variable bill (newest 12 charges more than 20% apart) is expected at the charge that repeats most often among them, or their median when nothing repeats, recomputed every sync. One-off extras at the same merchant don't move it, and it never gets price-change events or questions. |
+| A bill whose amount changes and posts early may show a missed month | A charge more than 20% off the bill's usual amount that posts more than 6 days (a monthly bill's tolerance) before it is due counts as an extra beside the schedule, not as that month's bill. It shows as spending and the month shows as missed. This is a known limitation: a wider window would fold a payment plan's term deposits back into its installments. |
 | Numbers exclude an account | Foreign-currency accounts are excluded from aggregates by design and reported in `networth`. |
 | `power`/`networth` show a dim "data as of ..." line | The newest successful sync is more than 24h old (or there's never been one) — run `moneta sync`. See [Staleness footers](#staleness-footers). |
+| `power`/`status` print a yellow `Coverage:` line | That account's feed has been quiet for longer than its usual posting rate explains, so its recent spending may be missing. Run `moneta sync`; if it persists, fix the account's connection at its provider, then `moneta sync --full`. See [Coverage notes](#coverage-notes). |
+| A `Coverage:` line for an account I closed | moneta has no "closed" flag for accounts, so a card or account that used to post often is judged like any other. Its line stays until its last posting days age out of the 365-day window — or until its usual rate, recomputed over that window every day, no longer predicts 5 posting days since. Nothing is wrong with the numbers; there is nothing to fix at the provider. |
 | `Error: could not reach ...` on any command | Remote mode: the server at `MONETA_API_URL` is down or unreachable — check it's running and the URL/port are right. In-process mode: the aggregator itself (e.g. SimpleFIN) couldn't be reached — check your network. Either way this is a clean exit, not a traceback. |
 | Remote CLI gets 401 | `MONETA_API_TOKEN` on the client must match the server's. |
 | Sync says "setup simplefin or setup plaid" | No source is configured — see [Connecting data sources](#connecting-data-sources). |
