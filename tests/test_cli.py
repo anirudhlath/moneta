@@ -1530,7 +1530,7 @@ def test_backup_command(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no
     assert dest.exists()
 
 
-def test_obligations_renders_deferred_interest_warning(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_obligations_renders_promo_warning(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     _isolate(monkeypatch, tmp_path)
     # /obligations resolves date.today() at request time — seed relative dates
     today = date.today()
@@ -1574,7 +1574,12 @@ def test_obligations_renders_deferred_interest_warning(tmp_path: Path, monkeypat
     result = runner.invoke(app, ["obligations"])
     assert result.exit_code == 0
     assert "Synchrony" in result.output  # rich may wrap the full name across cell lines
-    assert "deferred interest" in result.output  # payoff ~9mo out > promo ~2mo out
+    # payoff ~9mo out > promo ~2mo out; rich wraps the line, so compare on collapsed whitespace
+    flat = " ".join(result.output.split())
+    assert (
+        "interest applies to the remaining balance (back-dated on deferred-interest plans)" in flat
+    )
+    assert "deferred interest risk" not in flat  # a 0% plan may not be deferred
     assert "Traceback" not in result.output
 
 
@@ -2032,3 +2037,30 @@ def test_sync_reports_dropped_transfer_links(  # type: ignore[no-untyped-def]
         assert "Dropped" not in result.output
     else:
         assert line in result.output
+
+
+@pytest.mark.parametrize(
+    ("value", "sent"),
+    [("2026-12-31", "2026-12-31"), ("none", None), ("None", None), (" NONE ", None), ("", None)],
+)
+def test_accounts_set_promo_sends_date_or_clears(
+    monkeypatch: pytest.MonkeyPatch, value: str, sent: str | None
+) -> None:
+    calls: list[tuple[str, str, Any]] = []
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        calls.append((method, path, json_body))
+        if method == "GET":
+            return []
+        return {"ok": True}
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["accounts", "--set-promo", "1", value])
+    assert result.exit_code == 0, result.output
+    assert ("PATCH", "/accounts/1", {"promo_expires_on": sent}) in calls
+    assert "Traceback" not in result.output

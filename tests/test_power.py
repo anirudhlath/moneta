@@ -1,11 +1,25 @@
 from calendar import monthrange
 from datetime import date, datetime, timedelta
+from typing import Any
 
+import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.models import AccountType, Cadence, Direction, SeriesStatus, SyncRun, TransferLink
+from moneta.models import (
+    Account,
+    AccountType,
+    Cadence,
+    Direction,
+    ReviewItem,
+    ReviewKind,
+    ReviewStatus,
+    SeriesStatus,
+    SyncRun,
+    TransferLink,
+)
 from moneta.pipelines.recurring import detect_recurring
-from moneta.views.power import UpcomingCharge, power_report
+from moneta.pipelines.review import apply_resolution
+from moneta.views.power import SeriesLine, UpcomingCharge, power_report
 from tests.factories import make_account, make_series, make_txn
 
 
@@ -325,14 +339,38 @@ async def test_upcoming_includes_series_inside_window_excludes_outside(
     await make_series(
         session, merchant="Insurance", expected_cents=-30000, next_expected_on=date(2026, 8, 1)
     )
-    # boundary: next_expected_on == today itself is not "upcoming" (window is exclusive of today)
+    # boundaries: due today (not yet charged) and due on the month's last day are both
+    # upcoming — the window is [today, month_end]
     await make_series(
         session, merchant="Today Charge", expected_cents=-500, next_expected_on=date(2026, 7, 7)
     )
+    await make_series(
+        session, merchant="Month End", expected_cents=-2000, next_expected_on=date(2026, 7, 31)
+    )
     report = await power_report(session, today=date(2026, 7, 7))
-    assert [u.merchant for u in report.upcoming] == ["Rent"]
-    assert report.upcoming[0].expected_on == date(2026, 7, 15)
-    assert report.upcoming[0].expected_cents == 140000
+    assert report.upcoming == [
+        UpcomingCharge(merchant="Today Charge", expected_on=date(2026, 7, 7), expected_cents=500),
+        UpcomingCharge(merchant="Rent", expected_on=date(2026, 7, 15), expected_cents=140000),
+        UpcomingCharge(merchant="Month End", expected_on=date(2026, 7, 31), expected_cents=2000),
+    ]
+
+
+async def test_bill_charged_today_is_not_also_upcoming(session: AsyncSession) -> None:
+    """Paid today = counted once, as a fixed cost: detection moves the bill's next date
+    a period forward, so it never also shows as still to come."""
+    checking = await make_account(session, type=AccountType.checking)
+    for month in (5, 6, 7):
+        await make_txn(
+            session,
+            checking,
+            amount_cents=-5000,
+            merchant="Corner Gym",
+            posted_on=date(2026, month, 7),
+        )
+    await detect_recurring(session, llm=None, today=date(2026, 7, 7))
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert [line.merchant for line in report.fixed_costs] == ["Corner Gym"]
+    assert report.upcoming == []
 
 
 async def test_upcoming_excludes_discretionary_and_cc_payment_series(
@@ -397,6 +435,29 @@ async def test_upcoming_includes_loan_payment_projected_date(session: AsyncSessi
     ]
 
 
+async def test_upcoming_loan_payment_due_today_but_not_one_paid_today(
+    session: AsyncSession,
+) -> None:
+    checking = await make_account(session, type=AccountType.checking)
+    due = await make_account(session, type=AccountType.loan, name="Acme Car Loan")
+    paid = await make_account(session, type=AccountType.loan, name="Acme Boat Loan")
+    for loan, day in ((due, date(2026, 6, 7)), (paid, date(2026, 6, 7)), (paid, date(2026, 7, 7))):
+        out = await make_txn(
+            session, checking, amount_cents=-13500, merchant="Acme Bank", posted_on=day
+        )
+        inn = await make_txn(session, loan, amount_cents=13500, merchant="Acme Bank", posted_on=day)
+        session.add(
+            TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule")
+        )
+    await session.flush()
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert report.upcoming == [
+        UpcomingCharge(
+            merchant="Acme Car Loan — payment", expected_on=date(2026, 7, 7), expected_cents=13500
+        )
+    ]
+
+
 async def test_upcoming_sorted_by_expected_on(session: AsyncSession) -> None:
     await make_series(
         session, merchant="Rent", expected_cents=-140000, next_expected_on=date(2026, 7, 28)
@@ -427,6 +488,205 @@ async def test_data_as_of_reports_newest_successful_run(session: AsyncSession) -
     await session.flush()
     report = await power_report(session, today=date(2026, 7, 7))
     assert report.data_as_of == datetime(2026, 7, 6, 10, 0)
+
+
+async def _card_paid_monthly(
+    session: AsyncSession, series_id: int | None = None, **card: Any
+) -> Account:
+    """A credit card owing $900.00, paid $100.00 from checking on May, June and July 5."""
+    checking = await make_account(session, type=AccountType.checking)
+    account = await make_account(
+        session, type=AccountType.credit, name="Acme Store Card", balance_cents=-90000, **card
+    )
+    for month in (5, 6, 7):
+        out = await make_txn(
+            session,
+            checking,
+            amount_cents=-10000,
+            merchant="Acme Card Payment",
+            posted_on=date(2026, month, 5),
+            series_id=series_id,
+        )
+        inn = await make_txn(
+            session,
+            account,
+            amount_cents=10000,
+            merchant="Acme Card Payment",
+            posted_on=date(2026, month, 5),
+        )
+        session.add(
+            TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule")
+        )
+    await session.flush()
+    return account
+
+
+def _financing_question(account: Account) -> ReviewItem:
+    return ReviewItem(
+        kind=ReviewKind.financing_account,
+        question="'Acme Store Card' looks like promo financing being paid down?",
+        payload={"account_id": account.id},
+    )
+
+
+async def _second_provider_copy(session: AsyncSession, card: Account) -> Account:
+    """The same card as a second provider reports it: an alias of the first record."""
+    return await make_account(
+        session,
+        type=AccountType.credit,
+        name="Acme Store Card",
+        balance_cents=-90000,
+        canonical_account_id=card.id,
+        source="second",
+    )
+
+
+_CARD_PAYMENT_LINE = SeriesLine(
+    merchant="Acme Store Card — payment",
+    cadence=Cadence.monthly,
+    monthly_cents=10000,
+    expected_cents=10000,
+)
+
+
+@pytest.mark.parametrize("state", ["confirmed", "open question"])
+async def test_open_financing_question_counts_payments_as_fixed(
+    session: AsyncSession, state: str
+) -> None:
+    """No one has answered yet (the LLM never does): the card counts exactly as a
+    confirmed financing card does."""
+    card = await _card_paid_monthly(session, financing_mode=state == "confirmed")
+    if state == "open question":
+        session.add(_financing_question(card))
+    await session.flush()
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert report.fixed_costs == [_CARD_PAYMENT_LINE]
+    assert report.total_fixed_cents == 10000
+
+
+async def test_resolving_not_financing_makes_it_a_revolving_card_again(
+    session: AsyncSession,
+) -> None:
+    card = await _card_paid_monthly(session)
+    item = _financing_question(card)
+    session.add(item)
+    await session.flush()
+    await apply_resolution(session, item, {"financing": False})
+    await session.flush()
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert report.fixed_costs == []  # a plain card's payments are never fixed costs
+    assert report.spent_so_far_cents == 0  # nor spend: a card payment is a transfer
+
+
+async def test_open_financing_question_with_old_payment_series_counts_once(
+    session: AsyncSession,
+) -> None:
+    """A payment series formed before links excluded it stays the one line — no derived
+    payment line on top of it."""
+    series = await make_series(session, merchant="Acme Card Payment", expected_cents=-10000)
+    card = await _card_paid_monthly(session, series_id=series.id)
+    session.add(_financing_question(card))
+    await session.flush()
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert [line.merchant for line in report.fixed_costs] == ["Acme Card Payment"]
+    assert report.total_fixed_cents == 10000
+
+
+async def test_financing_ruling_beats_an_open_question_on_an_alias(
+    session: AsyncSession,
+) -> None:
+    """Ruled 'not financing', then the same card reappears from a second provider with
+    its own open question: the human's ruling stands."""
+    card = await _card_paid_monthly(session)
+    alias = await _second_provider_copy(session, card)
+    ruled = _financing_question(card)
+    session.add(ruled)
+    await session.flush()
+    await apply_resolution(session, ruled, {"financing": False})
+    session.add(_financing_question(alias))
+    await session.flush()
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert report.fixed_costs == []
+
+
+async def test_open_financing_question_on_an_alias_makes_the_card_financing(
+    session: AsyncSession,
+) -> None:
+    """The question was opened against the second provider's copy of the card; the
+    card itself (the logical account the payments land in) counts as financing."""
+    card = await _card_paid_monthly(session)
+    alias = await _second_provider_copy(session, card)
+    session.add(_financing_question(alias))
+    await session.flush()
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert report.fixed_costs == [_CARD_PAYMENT_LINE]
+    assert report.total_fixed_cents == 10000
+
+
+async def test_financing_ruling_on_an_alias_beats_an_open_question_on_the_card(
+    session: AsyncSession,
+) -> None:
+    """'Not financing' was answered for the second provider's copy before the two were
+    linked; the card's own question is still open, and the ruling stands."""
+    card = await _card_paid_monthly(session)
+    alias = await _second_provider_copy(session, card)
+    session.add(_financing_question(card))
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.financing_account,
+            question="'Acme Store Card' looks like promo financing being paid down?",
+            payload={"account_id": alias.id},
+            status=ReviewStatus.resolved,
+            resolution={"financing": False, "resolved_by": "manual"},
+        )
+    )
+    await session.flush()
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert report.fixed_costs == []
+
+
+@pytest.mark.parametrize(
+    ("state", "fixed", "spent"),
+    [
+        ("financing mode", [_CARD_PAYMENT_LINE], 0),
+        ("open question", [_CARD_PAYMENT_LINE], 0),
+        ("plain card", [], 100000),
+    ],
+)
+async def test_financed_purchase_is_not_also_spend(
+    session: AsyncSession, state: str, fixed: list[SeriesLine], spent: int
+) -> None:
+    """A $1,000.00 financed purchase is paid off by the card's $100.00/mo payments, and
+    those are the fixed cost: counting the purchase as spend too would count it twice.
+    A plain card's purchase is spend, and its payment is a transfer."""
+    checking = await make_account(session, type=AccountType.checking)
+    card = await make_account(
+        session,
+        type=AccountType.credit,
+        name="Acme Store Card",
+        balance_cents=-90000,
+        financing_mode=state == "financing mode",
+    )
+    if state == "open question":
+        session.add(_financing_question(card))
+    await make_txn(
+        session, card, amount_cents=-100000, merchant="Acme Furniture", posted_on=date(2026, 7, 2)
+    )
+    out = await make_txn(
+        session,
+        checking,
+        amount_cents=-10000,
+        merchant="Acme Card Payment",
+        posted_on=date(2026, 7, 5),
+    )
+    inn = await make_txn(
+        session, card, amount_cents=10000, merchant="Acme Card Payment", posted_on=date(2026, 7, 5)
+    )
+    session.add(TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule"))
+    await session.flush()
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert report.fixed_costs == fixed
+    assert report.spent_so_far_cents == spent
 
 
 async def test_power_reports_quiet_feeds(session: AsyncSession) -> None:

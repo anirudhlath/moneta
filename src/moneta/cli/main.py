@@ -552,7 +552,10 @@ def obligations(json_output: JsonOption = False) -> None:
         )
     console.print(table)
     if any(ob["deferred_interest_risk"] for ob in rows):
-        console.print("[red]! payoff lands after the promo expires — deferred interest risk[/red]")
+        console.print(
+            "[red]! payoff lands after the promo ends — interest applies to the remaining "
+            "balance (back-dated on deferred-interest plans)[/red]"
+        )
 
 
 def _parse_bool_flag(value: str) -> bool:
@@ -577,8 +580,8 @@ def accounts(
     to: Annotated[int | None, typer.Option("--to")] = None,
     unlink_source: Annotated[int | None, typer.Option("--unlink-source")] = None,
 ) -> None:
-    """List accounts. Flags: --set-type ID TYPE, --set-promo ID YYYY-MM-DD,
-    --set-financing ID true|false."""
+    """List accounts. Flags: --set-type ID TYPE, --set-promo ID YYYY-MM-DD|none
+    (none clears it), --set-financing ID true|false."""
     reject_json_with_writes(
         json_output, set_type, set_promo, set_financing, link_source, to, unlink_source
     )
@@ -602,7 +605,12 @@ def accounts(
         raise typer.Exit(1)
     # Validate --set-promo's date BEFORE firing any PATCH: an invalid date must
     # leave --set-type unapplied too, not partially mutate the account server-side.
-    promo = _parse_iso_date(set_promo[1]) if set_promo else None
+    # `none` (or an empty value) clears the date: the PATCH sends null.
+    promo = (
+        None
+        if set_promo is None or set_promo[1].strip().lower() in {"", "none"}
+        else _parse_iso_date(set_promo[1])
+    )
     financing_mode = _parse_bool_flag(set_financing[1]) if set_financing else None
     if link_source is not None:
         request("POST", f"/accounts/{link_source}/link", {"canonical_account_id": to})

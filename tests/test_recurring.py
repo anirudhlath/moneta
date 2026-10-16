@@ -214,6 +214,52 @@ async def test_existing_merged_payment_series_ends(session: AsyncSession) -> Non
     assert all(t.series_id is None for t in untagged)
 
 
+async def test_open_financing_question_untags_old_card_payment_series(
+    session: AsyncSession,
+) -> None:
+    """The sync that opens a financing question already treats the card as financing:
+    an old payment series over it is untagged and ended now, not after the answer."""
+    checking = await make_account(session, type=AccountType.checking)
+    card = await make_account(session, type=AccountType.credit, balance_cents=-90000)
+    series = await make_series(
+        session,
+        merchant="Acme Card Payment",
+        expected_cents=-10000,
+        next_expected_on=date(2026, 7, 5),
+    )
+    outflow_ids: list[int] = []
+    for month in (4, 5, 6):
+        out = await make_txn(
+            session,
+            checking,
+            amount_cents=-10000,
+            merchant="Acme Card Payment",
+            posted_on=date(2026, month, 5),
+            series_id=series.id,
+        )
+        inn = await make_txn(session, card, amount_cents=10000, posted_on=date(2026, month, 5))
+        session.add(
+            TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method="rule")
+        )
+        outflow_ids.append(out.id)
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.financing_account,
+            question="q",
+            payload={"account_id": card.id},
+        )
+    )
+    await session.flush()
+    await detect_recurring(session, llm=None, today=date(2026, 7, 8))
+    assert series.status == SeriesStatus.ended
+    untagged = (
+        (await session.execute(select(Transaction).where(Transaction.id.in_(outflow_ids))))
+        .scalars()
+        .all()
+    )
+    assert all(t.series_id is None for t in untagged)
+
+
 async def test_partial_untag_keeps_series(session: AsyncSession) -> None:
     """A series with both loan-linked and genuine occurrences loses only the
     loan-linked ones; the genuine occurrences keep it active."""

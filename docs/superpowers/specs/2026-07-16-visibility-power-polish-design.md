@@ -66,10 +66,12 @@ list[TxnRow]` — joins Account + outer-joins RecurringSeries, loads
 "internal" (never counted); outflow leg → "loan_payment" if
 `inflow_is_loan_like`, "cc_payment" if inflow credit, else "internal".
 `counted_in_spend` replicates power's rule exactly (outflow + spend account type
-+ primary currency + not linked + not tagged to an active non-discretionary
-series + in range); `excluded_because` gives the first matching reason
-("inflow", "transfer", "loan payment", "credit-card payment", "fixed cost
-(series X)", "non-spend account", "foreign currency"). Endpoint:
++ primary currency + not on a loan-like account + not linked + not tagged to an
+active non-discretionary series + in range); `excluded_because` gives the first
+matching reason ("inflow", "transfer", "loan payment", "credit-card payment", "fixed cost
+(series X)", "non-spend account", "financed purchase", "foreign currency";
+"financed purchase", added 2026-10-15, is an outflow on a loan-like account,
+whose payments are the fixed cost). Endpoint:
 `GET /transactions?start&end&account_id&merchant` (defaults: current month;
 merchant is a case-insensitive substring match). Ordered newest first.
 
@@ -103,7 +105,10 @@ calendars). CLI row: `Per day (22 days left)  $60.12` right after Remaining.
 
 `PowerReport.upcoming: list[UpcomingCharge]` — `{merchant: str, expected_on:
 date, expected_cents: int (magnitude)}` for active, non-discretionary,
-non-cc-payment outflow series with `next_expected_on` in `(today, month_end]`,
+non-cc-payment outflow series with `next_expected_on` in `[today, month_end]`
+(amended 2026-10-15 from `(today, month_end]`: a bill due today and not yet charged
+is still to come, and a synced charge moves `next_expected_on` a period forward, so a
+paid bill never shows twice),
 PLUS derived loan payments whose projected next date
 (`advance_expected_on(last_paid_on, cadence)`) falls in the window (labeled
 `{account} — payment`). Sorted by date. CLI: a dim block under the table,

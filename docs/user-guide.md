@@ -336,8 +336,9 @@ just a topic:
 2. Set it: `MONETA_NTFY_TOPIC=https://ntfy.sh/<your-topic>` (env var), or add
    `ntfy_topic = "https://ntfy.sh/<your-topic>"` to `config.toml`.
 3. `moneta digest` — sends one plain-text push containing every series event since the last
-   digest, plus any financing obligation newly showing `deferred_interest_risk` (a risk that
-   clears re-notifies if it later reappears). Nothing new → nothing sent (no empty pings), but
+   digest, plus any financing obligation newly showing `deferred_interest_risk` (payoff lands
+   after the promo ends; a risk that clears re-notifies if it later reappears). Nothing new →
+   nothing sent (no empty pings), but
    moneta still remembers it has "seen" everything up to now.
 
 ```bash
@@ -363,7 +364,7 @@ the point. Unset `ntfy_topic` is a clean 400 with a setup hint, not a crash.
 
 The very first `moneta digest` baselines its cursor to setup time instead of replaying every
 series event in your history — only events from that point forward show up in digests
-(deferred-interest warnings are current-state, so they still send on the first run).
+(promo warnings are current-state, so they still send on the first run).
 
 ## Reading the numbers
 
@@ -379,14 +380,15 @@ The flagship view for the current month:
   `$2500.00 every 2 weeks ≈ $5416.67/mo` — monthly rows stay a bare amount.
 - **Spending power** = income − fixed costs.
 - **Spent so far / remaining** — discretionary spend this month (accrual: credit purchases
-  count when made, not when the card is paid).
+  count when made, not when the card is paid). A financing card's purchases don't count:
+  its payments are a fixed cost instead (`financed purchase` in `moneta txns`).
 - **Per day (N days left)** — `remaining ÷ days left in month` (today through month-end,
   inclusive; the last day of the month shows 1 day left). Negative remaining shows a negative
   per-day figure — no clamping to zero.
 - **Upcoming this month** — a dim line under the table listing active, non-discretionary,
-  non-credit-card-payment fixed costs (plus derived loan payments) due later this month, e.g.
+  non-credit-card-payment fixed costs (plus derived loan payments) due from today through month-end, e.g.
   `Upcoming this month: Rent $1400.00 (Jul 15) · Netflix $15.99 (Jul 28)`. Omitted when nothing
-  is due before month-end.
+  is due by month-end. A bill due today shows until its charge syncs.
 - **Coverage** — a yellow `Coverage:` line under the table (after the Upcoming line) for each
   account whose feed has gone quiet. Omitted when every feed looks alive; see
   [Coverage notes](#coverage-notes).
@@ -433,6 +435,7 @@ excluded rows render dim with the reason in the same column — one of:
 | `credit-card payment` | Outflow leg of a transfer paying a credit card (the underlying purchases are counted instead) |
 | `fixed cost (series X)` | Tagged to an active, non-discretionary recurring series (counted in `power`'s fixed costs instead) |
 | `non-spend account` | Posted to an account type that isn't spend-eligible (e.g. a loan or brokerage account) |
+| `financed purchase` | A purchase, interest charge or fee on a financing card — `financing_mode`, or a card whose financing question is still open. `power`'s spent-so-far leaves it out, because the card's payments count as a fixed cost there instead (the payment line stands in for it). `power --history` and `moneta cashflow` count it once, at purchase time, since they exclude every transfer-linked payment. Known gap, `power` only: a new financed purchase shows in no `power` figure until the card's first payment is linked, and never if the card is paid from an account Moneta doesn't sync (`moneta obligations` lists the balance meanwhile) |
 | `foreign currency` | Posted to a non-primary-currency account (excluded from all aggregates) |
 
 `excluded_because` is the *first* matching reason in that order — a row only ever gets one.
@@ -574,15 +577,29 @@ that auto-ended after a gap) has resumed. A 404 for an unknown ID prints a clean
 ### `moneta obligations`
 
 Loans and 0%-promo financing, fully derived from observed transfers: monthly payment, balance,
-estimated months left, and a **deferred interest** warning when the payoff estimate lands after
-the promo expiry.
+estimated months left, and a red `!` when the payoff estimate lands after the promo expiry:
+"payoff lands after the promo ends — interest applies to the remaining balance (back-dated on
+deferred-interest plans)". A true 0% promo charges interest only from its end date; a
+deferred-interest plan charges it back to the purchase date. Either way the plan won't be paid
+off in time. A promo ending today with a balance left warns too. In `--json` and the API the
+warning is the `deferred_interest_risk` field — the name is kept for compatibility and means
+only "payoff lands after `promo_expires_on`", not that the plan is deferred-interest.
 
-The monthly payment is derived **per loan/financing account** from its transfer-linked
-payments, grouped by which account the money lands in — not by the bank's payment
-descriptor. This matters because banks often collapse several different cards' payments
-into one shared descriptor (e.g. `"Synchrony Bank Payment Web Id"` for three unrelated
-store cards); grouping by descriptor would blend or lose individual payments, but grouping
-by the linked account keeps each obligation's amount and cadence correct.
+The monthly payment is derived **per loan/financing account** (a credit card whose
+financing check is still unanswered counts as one) from its transfer-linked payments,
+grouped by which account the money lands in — not by the bank's payment descriptor. This
+matters because banks often collapse several different cards' payments into one shared
+descriptor (e.g. `"ACME BANK PAYMENT WEB ID"` for three unrelated store cards);
+grouping by descriptor would blend or lose individual payments, but grouping by the linked
+account keeps each obligation's amount and cadence correct.
+
+The payment is the account's **newest** payment, so a plan whose payments are winding down is
+judged by what you pay now rather than an older average. One exception: a payment more than
+1.5× or less than half the median of the (up to) three payments before it is treated as a
+one-off, large or small, and the obligation stays at that median (exactly 1.5× or exactly half
+keeps the newest). Payments to one account on the same day count as one payment, their sum.
+A small first payment followed by larger regular ones therefore reads low until the third
+regular payment.
 
 ### Financing cards
 
@@ -595,7 +612,12 @@ first payment is fine) — looks like financing in use. The first time this fing
 fires for an account, `moneta review` asks a one-time financing-check question (`y`/`n`);
 the answer is remembered and never asked again for that account. Answering `y` sets
 `financing_mode`, which gives the account loan semantics: its payments count as fixed
-costs (instead of its purchases), and it appears in `moneta obligations`.
+costs (instead of its purchases), and it appears in `moneta obligations`. Until you
+answer, moneta already treats the card this way — the auto-review LLM never answers this
+question, and a card that fits the fingerprint shouldn't drop out of fixed costs while it
+waits. Answering `n` makes it a plain credit card again. If you already answered for this
+card through another provider's record of it, that answer stands and a question still
+open on the other record changes nothing.
 
 You can also set or clear this manually, bypassing the detection question:
 
@@ -603,10 +625,10 @@ You can also set or clear this manually, bypassing the detection question:
 moneta accounts --set-financing <ID> true|false
 ```
 
-After confirming financing this way (review answer or `--set-financing`), any old
-credit-payment series over that card is replaced by the derived per-account payment line
-on the next `moneta sync` — numbers self-heal automatically, with no double-counting in
-the interim.
+Once a card counts as financing — an open question, a `y` answer, or `--set-financing
+true` — any old credit-payment series over it is replaced by the derived per-account
+payment line on the next `moneta sync` — numbers self-heal automatically, with no
+double-counting in the interim.
 
 **Limitation:** a *hybrid* card — one carrying both everyday spending and a promo
 financing plan at the same time — can't be split apart from transaction data alone, so
@@ -624,21 +646,24 @@ moneta accounts --link-source <SOURCE_ID> --to <ROOT_ID>
 moneta accounts --unlink-source <SOURCE_ID>
 moneta accounts --set-type <ID> <TYPE>             # checking|savings|credit|brokerage|loan|unknown
 moneta accounts --set-promo <ID> YYYY-MM-DD        # promo expiry for a financing account
+moneta accounts --set-promo <ID> none              # clear the promo date (an empty value works too)
 moneta accounts --set-financing <ID> true|false    # mark a credit card as financing (loan semantics)
 ```
 
 Type overrides survive re-syncs. `--set-promo` and `--set-financing` are manual fields —
-promo powers the deferred-interest warning; financing-mode gives a credit account loan
-semantics (its payments count as fixed costs instead of its purchases) without waiting on
-the `financing_account` review prompt. A financing-mode account shows as `credit (financing)`
+promo powers the promo-ends-before-payoff warning; financing-mode gives a credit account loan
+semantics (its payments count as fixed costs instead of its purchases) and settles the
+`financing_account` review prompt instead of leaving it open (an open prompt already counts
+the card the same way until answered). A financing-mode account shows as `credit (financing)`
 in the Type column.
 
 Metadata writes using a source alias ID update its logical root. Explicit financing
 choices, including `false`, are recorded and settle related open financing questions.
 An unconfigured root inherits a sole saved financing/promotion choice from its aliases;
 an explicit root choice takes precedence. Clearing financing with `false`, or clearing
-the promotion through an account PATCH with `{"promo_expires_on": null}`, remains
-effective on subsequent syncs. A promotion-only edit does not answer financing questions.
+the promotion with `--set-promo <ID> none` (an account PATCH with
+`{"promo_expires_on": null}`), remains effective on subsequent syncs. A promotion-only edit
+does not answer financing questions.
 Link/unlink cannot be combined with each other or metadata writes; `--link-source`
 and `--to` must appear together. Invalid IDs, types, financing values, dates, and
 conflicting flags fail before any request. Linking rejects cycles, incompatible
