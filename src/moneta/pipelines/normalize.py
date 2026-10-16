@@ -26,7 +26,7 @@ _ACH_TAIL = re.compile(r"\b(?:web|ppd|ccd|tel)\s+id\b:?.*$", re.IGNORECASE)
 # a street address and everything after it; runs before _STORE_NUM eats the number
 _ADDRESS = re.compile(
     r"\b\d+(?:st|nd|rd|th)?\s+(?:[a-z]+\s+){0,3}?"
-    r"(?:street|st|road|rd|avenue|ave|blvd|drive|dr|lane|ln|way|pkwy)\b.*$",
+    r"(?:street|st|road|rd|avenue|ave|blvd|drive|dr|lane|ln|way|pkwy|expy|expwy)\b.*$",
     re.IGNORECASE,
 )
 _LEGAL = re.compile(r"\b(?:llc|inc|corp|ltd)\b\.?,?", re.IGNORECASE)
@@ -173,11 +173,71 @@ _MIN_PLACE_NAMES = 3
 # a prefix followed by this many different non-place tails is a payment rail or a
 # generic label ("Zelle Payment To …"), not one merchant
 _MAX_TAILS = 3
+# a feed that glues the city onto the merchant ("ACME UNIVERSITYRIVERTON CA"): a glued
+# tail has at least this many letters ("Monthly" is not "Month" plus a place), and a
+# multi-word name needs this many different glued tails before they read as places
+# rather than one longer word ("Corner Storehouse" is not "Corner Store" plus a place)
+_MIN_GLUED_LETTERS = 4
+_MIN_GLUED_TAILS = 2
+# a per-charge code hyphenated onto the merchant ("ACMEAPP-QWERTYUI"); a code with a digit
+# is already a reference token, so only letters-only codes reach the merge pass
+_CHARGE_CODE = re.compile(r"^([a-z]{4,})-([0-9a-z]{8})$", re.IGNORECASE)
+# one hyphenated name may be a real one ("Corner-Sandwich"); different codes behind one
+# merchant are per-charge references
+_MIN_CODES = 2
 
 
 def _tokens(name: str) -> tuple[str, ...]:
     """Comparison tokens: lower-cased, leading digits dropped ("0Elmton" -> "elmton")."""
     return tuple(t for raw in name.lower().split() if (t := raw.lstrip("0123456789")))
+
+
+def _letters(text: str) -> int:
+    return sum(c.isalpha() for c in text)
+
+
+def _glued(
+    keyed: dict[str, tuple[str, ...]],
+    sources: set[str],
+    by_tokens: dict[tuple[str, ...], str],
+) -> dict[str, tuple[tuple[str, ...], str]]:
+    """name -> (tokens of the shorter name whose last word it extends, the glued tail):
+    "Acme Universityriverton" -> (("acme", "university"), "riverton"). The longest stem
+    wins; the stem and the tail both need 4+ letters."""
+    stems: dict[tuple[str, ...], list[str]] = {}
+    for toks in by_tokens:
+        if toks and _letters(toks[-1]) >= _MIN_TARGET_LETTERS:
+            stems.setdefault(toks[:-1], []).append(toks[-1])
+    glued: dict[str, tuple[tuple[str, ...], str]] = {}
+    for name, toks in keyed.items():
+        if name not in sources or not toks:
+            continue
+        head, last = toks[:-1], toks[-1]
+        matches = [stem for stem in stems.get(head, []) if last.startswith(stem) and last != stem]
+        if not matches:
+            continue
+        stem = max(matches, key=len)
+        tail = last[len(stem) :]
+        if _letters(tail) >= _MIN_GLUED_LETTERS:
+            glued[name] = ((*head, stem), tail)
+    return glued
+
+
+def _charge_codes(names: set[str]) -> dict[str, str]:
+    """name -> the name without its per-charge code ("Acmeapp-Qwertyui" -> "Acmeapp"),
+    for a merchant seen with 2+ different codes."""
+    parts: dict[str, tuple[str, str]] = {}  # name -> (merchant, rest of the name)
+    codes: dict[str, set[str]] = {}
+    for name in names:
+        first, _, rest = name.partition(" ")
+        if (match := _CHARGE_CODE.match(first)) is not None:
+            parts[name] = (match[1], rest)
+            codes.setdefault(match[1].lower(), set()).add(match[2].lower())
+    return {
+        name: f"{merchant} {rest}".strip()
+        for name, (merchant, rest) in parts.items()
+        if len(codes[merchant.lower()]) >= _MIN_CODES
+    }
 
 
 def merge_targets(names: Iterable[str], targets_only: Iterable[str] = ()) -> dict[str, str]:
@@ -186,10 +246,17 @@ def merge_targets(names: Iterable[str], targets_only: Iterable[str] = ()) -> dic
     A multi-token name absorbs any name it is a token prefix of; a single-token name
     absorbs only itself plus one *place* — a token that follows 3+ distinct existing
     names, learned from the data. Brand + product names therefore stay apart. A prefix
-    with 3+ different non-place tails absorbs only its place variants. Names in
-    `targets_only` can absorb others but never merge themselves and teach no places.
+    with 3+ different non-place tails absorbs only its place variants. A name whose last
+    word is a shorter name's last word with a place glued on ("Acme Universityriverton")
+    merges into it when the glued tail is a place, or when a multi-word name shows 2+
+    different glued tails, unless that name is a generic prefix (3+ different non-place
+    tails), where only a place folds. A per-charge code ("Acmeapp-Qwertyui") is dropped
+    once 2+ different codes share the merchant. Names in `targets_only` can absorb others
+    but never merge themselves and teach no places.
     """
     sources = set(names)
+    coded = _charge_codes(sources)
+    sources = (sources - coded.keys()) | set(coded.values())
     keyed = {n: _tokens(n) for n in sorted(sources | set(targets_only))}
     by_tokens: dict[tuple[str, ...], str] = {}
     for name, toks in keyed.items():
@@ -210,6 +277,22 @@ def merge_targets(names: Iterable[str], targets_only: Iterable[str] = ()) -> dic
                 if toks[:size] in by_tokens and not is_place(toks[size:]):
                     tails.setdefault(toks[:size], set()).add(toks[size:])
     generic = {prefix for prefix, found in tails.items() if len(found) >= _MAX_TAILS}
+    glued = _glued(keyed, sources, by_tokens)
+    glued_tails: dict[tuple[str, ...], set[str]] = {}
+    for base, tail in glued.values():
+        glued_tails.setdefault(base, set()).add(tail)
+
+    def glued_target(name: str) -> str | None:
+        """The shorter name `name` is with a place glued on, when the evidence says so."""
+        if name not in glued:
+            return None
+        base, tail = glued[name]
+        if tail in places:
+            return by_tokens[base]
+        if len(base) >= 2 and base not in generic and len(glued_tails[base]) >= _MIN_GLUED_TAILS:
+            return by_tokens[base]
+        return None
+
     targets: dict[str, str] = {}
     for name, toks in keyed.items():
         if not toks or name not in sources:
@@ -226,6 +309,10 @@ def merge_targets(names: Iterable[str], targets_only: Iterable[str] = ()) -> dic
         else:
             if by_tokens[toks] != name:  # same tokens, different spelling
                 targets[name] = by_tokens[toks]
+            elif (glued_into := glued_target(name)) is not None:
+                targets[name] = glued_into
+    for name, bare in coded.items():  # before chains, so a code follows its merchant
+        targets[name] = bare
     for name in list(targets):  # resolve chains: A -> B -> C becomes A -> C
         seen = {name}
         while (nxt := targets.get(targets[name])) is not None and nxt not in seen:

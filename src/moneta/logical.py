@@ -6,7 +6,11 @@ from datetime import date
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.account_metadata import account_decisions, effective_account_metadata
+from moneta.account_metadata import (
+    account_decisions,
+    effective_account_metadata,
+    open_financing_roots,
+)
 from moneta.models import Account, AccountType, Holding, ReviewItem, Transaction
 
 
@@ -27,6 +31,13 @@ class LogicalAccount:
     source: str
     mask: str | None
     balance_account_id: int
+    financing_pending: bool  # a credit card's open financing question no one has ruled on
+
+    @property
+    def loan_like(self) -> bool:
+        """Loan semantics: a loan, a financing card, or a card whose financing question
+        is still open (the LLM never answers those, so they count until a human rules)."""
+        return self.type == AccountType.loan or self.financing_mode or self.financing_pending
 
 
 @dataclass(frozen=True)
@@ -115,9 +126,11 @@ async def load_logical_data(session: AsyncSession) -> LogicalData:
         accounts = list(await session.scalars(select(Account).order_by(Account.id)))
         transactions = list(await session.scalars(select(Transaction).order_by(Transaction.id)))
         holdings = list(await session.scalars(select(Holding).order_by(Holding.id)))
-        decisions = account_decisions(list(await session.scalars(select(ReviewItem))))
+        review_items = list(await session.scalars(select(ReviewItem)))
+        decisions = account_decisions(review_items)
 
     account_roots = resolve_account_roots(accounts)
+    pending_financing = open_financing_roots(review_items, account_roots, decisions)
     physical_accounts = {account.id: account for account in accounts}
     groups: dict[int, list[Account]] = {}
     for account in accounts:
@@ -144,6 +157,8 @@ async def load_logical_data(session: AsyncSession) -> LogicalData:
             source=root.source,
             mask=root.mask,
             balance_account_id=latest.id,
+            # only credit cards are asked; a stale question after a type change is inert
+            financing_pending=root_id in pending_financing and root.type == AccountType.credit,
         )
 
     transaction_roots = _resolve_roots(

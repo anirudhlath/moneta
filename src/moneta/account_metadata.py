@@ -60,3 +60,23 @@ def effective_account_metadata(
         if len(dates) == 1:
             promotion = next(iter(dates))
     return financing, promotion
+
+
+def open_financing_roots(
+    items: list[ReviewItem], roots: dict[int, int], decisions: AccountDecisions
+) -> set[int]:
+    """Logical accounts with an open financing question that no one has ruled on.
+
+    The LLM never answers financing questions, so until a human does, the account is
+    treated as financing. A ruling recorded on any member of the logical account wins
+    over a question still open on another member.
+    """
+    ruled = {roots[account_id] for account_id in decisions.financing if account_id in roots}
+    pending: set[int] = set()
+    for item in items:
+        if item.kind != ReviewKind.financing_account or item.status != ReviewStatus.open:
+            continue
+        account_id = item.payload.get("account_id")
+        if type(account_id) is int and account_id in roots:
+            pending.add(roots[account_id])
+    return pending - ruled

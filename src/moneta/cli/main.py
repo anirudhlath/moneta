@@ -65,6 +65,13 @@ def _staleness_footer(data_as_of: str | None) -> str | None:
     return None
 
 
+def _print_coverage(payload: dict[str, Any]) -> None:
+    """One yellow line per account the server judged stale — a coverage note, not an
+    error. `.get`: an older server in remote mode sends no `stale_accounts`."""
+    for account in payload.get("stale_accounts", []):
+        console.print(f"[yellow]Coverage: {escape(account['note'])}[/yellow]")
+
+
 def _series_line_amount(line: dict[str, Any]) -> str:
     """Amount cell for a power-table series row (design 2026-07-16 §3): non-monthly
     cadences show the per-cycle amount alongside the monthly equivalent; monthly
@@ -147,6 +154,8 @@ def sync(
         f"{report['recurring']['new_series']} new series, "
         f"{report['events']} events."
     )
+    if unlinked := report["transfers"].get("unlinked"):
+        console.print(f"Dropped {_plural(unlinked, 'stale transfer link')}.")
     if report["auto_resolved"]:
         console.print(f"LLM auto-resolved {report['auto_resolved']} review item(s).")
     verify = report["verify"]
@@ -234,6 +243,7 @@ def status(json_output: JsonOption = False) -> None:
         f"Aggregators: {aggregators}  ·  "
         f"LLM: {'configured' if st['llm_configured'] else 'not configured'}"
     )
+    _print_coverage(st)
 
 
 @app.command()
@@ -241,7 +251,8 @@ def power(
     history: Annotated[
         int | None,
         typer.Option(
-            "--history", help="Show the last N months' income/spend/net instead of this month."
+            "--history",
+            help="Show the last N months' income/other inflows/spend/net instead of this month.",
         ),
     ] = None,
     json_output: JsonOption = False,
@@ -251,11 +262,12 @@ def power(
         rows = request("GET", "/power/history", params={"months": history})
         if emit_json(rows, json_output):
             return
-        table = Table("Month", "Income", "Spend", "Net")
+        table = Table("Month", "Income", "Other inflows", "Spend", "Net")
         for m in rows:
             table.add_row(
                 m["month"],
                 fmt_money(m["income_cents"]),
+                fmt_money(m["other_inflows_cents"]),
                 fmt_outflow(m["spend_cents"]),
                 fmt_money(m["net_cents"]),
             )
@@ -285,6 +297,7 @@ def power(
             for u in r["upcoming"]
         ]
         console.print(f"[dim]Upcoming this month: {' · '.join(parts)}[/dim]")
+    _print_coverage(r)
     if footer := _staleness_footer(r.get("data_as_of")):
         console.print(f"[dim]{footer}[/dim]")
 
@@ -543,7 +556,10 @@ def obligations(json_output: JsonOption = False) -> None:
         )
     console.print(table)
     if any(ob["deferred_interest_risk"] for ob in rows):
-        console.print("[red]! payoff lands after the promo expires — deferred interest risk[/red]")
+        console.print(
+            "[red]! payoff lands after the promo ends — interest applies to the remaining "
+            "balance (back-dated on deferred-interest plans)[/red]"
+        )
 
 
 def _parse_bool_flag(value: str) -> bool:
@@ -568,8 +584,8 @@ def accounts(
     to: Annotated[int | None, typer.Option("--to")] = None,
     unlink_source: Annotated[int | None, typer.Option("--unlink-source")] = None,
 ) -> None:
-    """List accounts. Flags: --set-type ID TYPE, --set-promo ID YYYY-MM-DD,
-    --set-financing ID true|false."""
+    """List accounts. Flags: --set-type ID TYPE, --set-promo ID YYYY-MM-DD|none
+    (none clears it), --set-financing ID true|false."""
     reject_json_with_writes(
         json_output, set_type, set_promo, set_financing, link_source, to, unlink_source
     )
@@ -593,7 +609,12 @@ def accounts(
         raise typer.Exit(1)
     # Validate --set-promo's date BEFORE firing any PATCH: an invalid date must
     # leave --set-type unapplied too, not partially mutate the account server-side.
-    promo = _parse_iso_date(set_promo[1]) if set_promo else None
+    # `none` (or an empty value) clears the date: the PATCH sends null.
+    promo = (
+        None
+        if set_promo is None or set_promo[1].strip().lower() in {"", "none"}
+        else _parse_iso_date(set_promo[1])
+    )
     financing_mode = _parse_bool_flag(set_financing[1]) if set_financing else None
     if link_source is not None:
         request("POST", f"/accounts/{link_source}/link", {"canonical_account_id": to})

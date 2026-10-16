@@ -6,10 +6,17 @@ from datetime import date
 from typing import NamedTuple
 
 from pydantic import BaseModel
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.cadence import CADENCE_DAYS, GRACE_DAYS, TOLERANCE, advance_expected_on, match_cadence
+from moneta.cadence import (
+    CADENCE_DAYS,
+    GRACE_DAYS,
+    TOLERANCE,
+    advance_expected_on,
+    match_across_a_miss,
+    match_cadence,
+)
 from moneta.llm import CLASSIFICATION_TAXONOMY, Classifier
 from moneta.logical import LogicalData, load_logical_data
 from moneta.models import (
@@ -94,11 +101,20 @@ def _median_gap(dates: list[date]) -> float:
     return float(statistics.median(gaps))
 
 
-def newest_run(charges: Sequence[Transaction]) -> tuple[Cadence | None, list[Transaction]]:
-    """A bill's cadence and its newest cadence run, oldest first — every charge when no
-    cadence holds. Shared with events.py, so both stages judge a bill on the same charges."""
+def newest_run(
+    charges: Sequence[Transaction], *, across_a_miss: bool = False
+) -> tuple[Cadence | None, list[Transaction]]:
+    """A bill's cadence and its newest cadence run, oldest first, or every charge when no
+    cadence holds. Shared with events.py, so both stages judge a bill on the same charges,
+    with one exception. Only detection passes `across_a_miss=True`, and only for a split
+    bill: its run then continues over one missed month that bills.py already checked was
+    really missed."""
     ordered = sorted(charges, key=lambda t: (t.posted_on, t.id))
-    match = match_cadence(sorted({t.posted_on for t in ordered}))
+    dates = sorted({t.posted_on for t in ordered})
+    match = match_cadence(dates)
+    if match is None and across_a_miss:
+        bridged = match_across_a_miss(dates)
+        match = None if bridged is None else bridged[:2]
     if match is None:
         return None, ordered
     cadence, run_start = match
@@ -252,7 +268,7 @@ async def _detect_bill(
     voted = {t.series_id for t in significant if t.series_id is not None}
     dates = sorted({t.posted_on for t in significant})  # dedup: double-posts aren't 0-day gaps
     # stats come from the newest cadence-run so ancient price epochs don't skew them
-    cadence, recent = newest_run(significant)
+    cadence, recent = newest_run(significant, across_a_miss=split)
     amounts = [abs(t.amount_cents) for t in recent]
     med = statistics.median(amounts)
     stable = all(abs(a - med) <= med * _AMOUNT_TOLERANCE for a in amounts)
@@ -265,7 +281,26 @@ async def _detect_bill(
     # an amount it still charges covers it; split bills keep the 20% median match
     forced = _forced(ctx.resolved, ref, None if split else (min(newest), max(newest)))
     if forced is not None and forced.is_recurring is False:
-        return None  # user-resolved as not recurring — suppress silently, forever
+        # user-resolved as not recurring — suppress silently, forever. The bill keeps no
+        # tagged charges (a tag would let an inflow read as income in power --history),
+        # and a series left owning none is ended here: the stale sweep leaves a tagless
+        # active series alone, so it would stay a fixed cost next to its own spend. A
+        # sibling bill's series that still owns charges stays as it is.
+        for t in significant:
+            t.series_id = None
+        for series_id in voted:
+            owner = await ctx.session.get(RecurringSeries, series_id)
+            if owner is None or owner.status != SeriesStatus.active:
+                continue
+            owned = await ctx.session.scalar(
+                select(func.count())
+                .select_from(Transaction)
+                .where(Transaction.series_id == series_id)
+            )
+            if not owned:
+                owner.status = SeriesStatus.ended
+                ctx.stats.updated += 1
+        return None
     discretionary = forced.discretionary if forced is not None else False
     forced_recurring = forced is not None and forced.is_recurring
 
@@ -308,8 +343,8 @@ async def _detect_bill(
             discretionary = True
         elif classification != "bill":
             # an actual (even malformed) LLM answer means the LLM already looked —
-            # mirror verify_series: human-only from here, autoreview must not re-ask
-            # the binary bill/one-off prompt and rubber-stamp it as a fixed cost.
+            # mirror verify_series: human-only from here, autoreview must not ask the
+            # LLM again and let a second answer overrule the first.
             # A classify_json failure (answer is None) never looked; leave it askable.
             _open_review(llm_flagged=answer is not None)
             return None

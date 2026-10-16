@@ -2,7 +2,7 @@ from datetime import date
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.models import AccountType, Transaction, TransferLink
+from moneta.models import AccountType, ReviewItem, ReviewKind, Transaction, TransferLink
 from moneta.views.financing import compute_obligations
 from tests.factories import make_account, make_txn
 
@@ -100,8 +100,8 @@ async def test_two_payments_monthly_fallback(session: AsyncSession) -> None:
 
 async def test_financing_mode_account_gets_obligation(session: AsyncSession) -> None:
     """A financing-mode credit card (type stays `credit`) must still get an
-    obligations row, sourced from its linked payments, with deferred-interest
-    risk computed against its promo expiry."""
+    obligations row, sourced from its linked payments, with the promo-before-payoff
+    flag computed against its promo expiry."""
     checking = await make_account(session, type=AccountType.checking)
     card = await make_account(
         session,
@@ -150,3 +150,114 @@ async def test_loan_without_links_has_no_payment(session: AsyncSession) -> None:
 async def test_paid_off_loan_excluded(session: AsyncSession) -> None:
     await make_account(session, type=AccountType.loan, balance_cents=0)
     assert await compute_obligations(session, today=date(2026, 7, 7)) == []
+
+
+async def test_falling_payments_set_the_obligation_and_its_promo_warning(
+    session: AsyncSession,
+) -> None:
+    """A plan winding down is paid at its newest amount: the payoff estimate (and the
+    promo warning) must follow it, not an older median that hides the warning."""
+    checking = await make_account(session, type=AccountType.checking)
+    loan = await make_account(
+        session,
+        type=AccountType.loan,
+        name="Acme Furniture Plan",
+        balance_cents=-70000,
+        promo_expires_on=date(2027, 3, 1),
+    )
+    for month, amount in ((4, 12000), (5, 11000), (6, 10000), (7, 7000)):
+        out = await make_txn(
+            session,
+            checking,
+            amount_cents=-amount,
+            merchant="Acme Bank Payment",
+            posted_on=date(2026, month, 5),
+        )
+        inn = await make_txn(
+            session,
+            loan,
+            amount_cents=amount,
+            merchant="Acme Bank Payment",
+            posted_on=date(2026, month, 5),
+        )
+        await _link(session, out, inn)
+    await session.flush()
+
+    obs = await compute_obligations(session, today=date(2026, 7, 7))
+
+    assert obs[0].monthly_payment_cents == 7000  # the median, 10500, would say 7 months
+    assert obs[0].months_left == 10
+    assert obs[0].payoff_estimate == date(2027, 5, 3)  # today + 10 * 30 days
+    assert obs[0].deferred_interest_risk is True  # payoff lands after the 2027-03-01 promo end
+
+
+async def test_promo_ending_today_with_a_balance_left_warns(session: AsyncSession) -> None:
+    """A promo that ends today while a balance remains is past saving: the warning holds."""
+    checking = await make_account(session, type=AccountType.checking)
+    loan = await make_account(
+        session,
+        type=AccountType.loan,
+        name="Acme Furniture Plan",
+        balance_cents=-30000,
+        promo_expires_on=date(2026, 7, 7),
+    )
+    for month in (5, 6, 7):
+        out = await make_txn(
+            session,
+            checking,
+            amount_cents=-10000,
+            merchant="Acme Bank Payment",
+            posted_on=date(2026, month, 5),
+        )
+        inn = await make_txn(
+            session,
+            loan,
+            amount_cents=10000,
+            merchant="Acme Bank Payment",
+            posted_on=date(2026, month, 5),
+        )
+        await _link(session, out, inn)
+    await session.flush()
+
+    obs = await compute_obligations(session, today=date(2026, 7, 7))
+
+    assert obs[0].payoff_estimate == date(2026, 10, 5)  # today + 3 * 30 days
+    assert obs[0].deferred_interest_risk is True
+
+
+async def test_open_financing_question_gets_obligation(session: AsyncSession) -> None:
+    """Until someone answers the financing question, the card is an obligation."""
+    checking = await make_account(session, type=AccountType.checking)
+    card = await make_account(
+        session, type=AccountType.credit, name="Acme Store Card", balance_cents=-90000
+    )
+    for month in (5, 6, 7):
+        out = await make_txn(
+            session,
+            checking,
+            amount_cents=-30000,
+            merchant="Acme Card Payment",
+            posted_on=date(2026, month, 5),
+        )
+        inn = await make_txn(
+            session,
+            card,
+            amount_cents=30000,
+            merchant="Acme Card Payment",
+            posted_on=date(2026, month, 5),
+        )
+        await _link(session, out, inn)
+    session.add(
+        ReviewItem(
+            kind=ReviewKind.financing_account,
+            question="'Acme Store Card' looks like promo financing being paid down?",
+            payload={"account_id": card.id},
+        )
+    )
+    await session.flush()
+
+    obs = await compute_obligations(session, today=date(2026, 7, 7))
+
+    assert [(ob.account_id, ob.monthly_payment_cents, ob.months_left) for ob in obs] == [
+        (card.id, 30000, 3)
+    ]

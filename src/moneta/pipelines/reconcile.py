@@ -56,7 +56,11 @@ async def _reconcile_links(session: AsyncSession, logical: LogicalData) -> set[i
     rank = {LinkMethod.manual: 0, LinkMethod.llm: 1, LinkMethod.rule: 2}
     used: set[int] = set()
     keep: list[tuple[TransferLink, int, int]] = []
-    for link in sorted(links, key=lambda row: (rank[row.method], -row.confidence, row.id)):
+    # compare stored confidence in tenths: links saved before integer scoring carry
+    # float noise (0.8999999999999999), which must not outrank an equal, older link
+    for link in sorted(
+        links, key=lambda row: (rank[row.method], -round(row.confidence * 10), row.id)
+    ):
         out_id = logical.transaction_roots.get(link.outflow_id)
         in_id = logical.transaction_roots.get(link.inflow_id)
         out = by_id.get(out_id) if out_id is not None else None

@@ -10,7 +10,7 @@ re-scan TransferLink and rebuild their own txn->account/type/series maps.
 import statistics
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -25,6 +25,7 @@ from moneta.models import (
     ReviewItem,
     ReviewKind,
     SyncRun,
+    Transaction,
     TransferLink,
     bill_ref,
 )
@@ -109,6 +110,91 @@ async def latest_successful_sync_at(session: AsyncSession) -> datetime | None:
     ).scalar_one_or_none()
 
 
+# Coverage rule (stale feeds): a logical account is flagged once its newest txn is at
+# least STALE_MIN_DAYS old AND its usual rate — distinct posting days over the trailing
+# COVERAGE_WINDOW_DAYS — predicts at least STALE_EXPECTED_POSTING_DAYS posting days since.
+COVERAGE_WINDOW_DAYS = 365
+STALE_MIN_DAYS = 7
+STALE_EXPECTED_POSTING_DAYS = 5
+
+
+class StaleAccount(BaseModel):
+    """A logical account whose feed went quiet for longer than its usual posting rate
+    explains — a coverage note, not an error. `note` is the full user-facing sentence."""
+
+    account_id: int
+    name: str
+    mask: str | None
+    newest_posted_on: date
+    posting_days: int  # distinct posting days in the trailing COVERAGE_WINDOW_DAYS
+    note: str
+
+
+def feed_is_stale(posting_days: int, days_since: int) -> bool:
+    """`posting_days / 365 * days_since >= 5`, in integers so the boundary is exact."""
+    return (
+        days_since >= STALE_MIN_DAYS
+        and posting_days * days_since >= STALE_EXPECTED_POSTING_DAYS * COVERAGE_WINDOW_DAYS
+    )
+
+
+def _posting_rate_phrase(posting_days: int) -> str:
+    # integer posting_days can never land on a .5 here, so round() has no ties to break
+    per_week = round(posting_days * 7 / COVERAGE_WINDOW_DAYS)
+    if per_week >= 1:
+        return f"~{per_week} day{'' if per_week == 1 else 's'} a week"
+    per_month = max(1, round(posting_days * 30 / COVERAGE_WINDOW_DAYS))
+    return f"~{per_month} day{'' if per_month == 1 else 's'} a month"
+
+
+async def stale_accounts(
+    session: AsyncSession, logical: LogicalData, today: date
+) -> list[StaleAccount]:
+    """Logical accounts whose feed looks stalled, each judged on its own history.
+
+    Newest is the newest *physical* observation in the logical account — suppressed
+    duplicates included — so an account fresh via either provider is fresh. Posting
+    days count survivors only, so one purchase seen by both providers days apart is one
+    posting day. Accounts without a transaction in the window are skipped.
+    """
+    newest: dict[int, date] = {}
+    rows = await session.execute(
+        select(Transaction.account_id, func.max(Transaction.posted_on)).group_by(
+            Transaction.account_id
+        )
+    )
+    for account_id, posted_on in rows.tuples():
+        root = logical.account_roots[account_id]
+        newest[root] = max(newest.get(root, posted_on), posted_on)
+    window_start = today - timedelta(days=COVERAGE_WINDOW_DAYS)
+    posting: dict[int, set[date]] = {}
+    for txn in logical.transactions:
+        if window_start < txn.posted_on <= today:
+            posting.setdefault(logical.account_roots[txn.account_id], set()).add(txn.posted_on)
+    stale: list[StaleAccount] = []
+    for root_id, days in sorted(posting.items()):
+        last = newest[root_id]
+        if not feed_is_stale(len(days), (today - last).days):
+            continue
+        account = logical.accounts[root_id]
+        label = f"{account.name} ··{account.mask}" if account.mask else account.name
+        stale.append(
+            StaleAccount(
+                account_id=root_id,
+                name=account.name,
+                mask=account.mask,
+                newest_posted_on=last,
+                posting_days=len(days),
+                note=(
+                    f"{label} has no transactions since {last.isoformat()} "
+                    f"(usually posts {_posting_rate_phrase(len(days))}) — "
+                    "recent spending on it may be missing."
+                ),
+            )
+        )
+    return stale
+
+
 async def account_type_map(session: AsyncSession) -> dict[int, AccountType]:
     logical = await load_logical_data(session)
     return {aid: logical.accounts[root].type for aid, root in logical.account_roots.items()}
@@ -141,8 +227,7 @@ async def classified_links(session: AsyncSession) -> list[ClassifiedLink]:
                 outflow_series_id=out.series_id,
                 outflow_posted_on=out.posted_on,
                 outflow_amount_cents=out.amount_cents,
-                inflow_is_loan_like=in_account.type == AccountType.loan
-                or in_account.financing_mode,
+                inflow_is_loan_like=in_account.loan_like,
             )
         )
     return result
@@ -162,31 +247,57 @@ class LoanPayment(BaseModel):
     last_paid_on: date
 
 
+# a payment above this multiple of the payments before it is a one-off extra, not the
+# new obligation
+_ONE_OFF_FACTOR = 1.5
+# ...and so is one below this fraction of them: a small extra, not a plan winding down
+_ONE_OFF_FLOOR = 0.5
+_PRIOR_PAYMENTS = 3  # the yardstick: up to this many payments before the newest
+
+
+def _current_payment(amounts: list[int]) -> int:
+    """What the account is paid now, from its in-run payment magnitudes (oldest first).
+
+    The newest payment, so a plan winding down is not held at its old median — unless it
+    is more than _ONE_OFF_FACTOR x or less than _ONE_OFF_FLOOR x the median of the up to
+    _PRIOR_PAYMENTS payments before it, in which case that median (exactly 1.5x or exactly
+    half keeps the newest). A first payment has nothing before it, so it stands alone.
+    """
+    newest = amounts[-1]
+    prior = amounts[-1 - _PRIOR_PAYMENTS : -1]
+    if prior:
+        typical = statistics.median(prior)
+        if newest > _ONE_OFF_FACTOR * typical or newest < _ONE_OFF_FLOOR * typical:
+            return round(typical)
+    return newest
+
+
 def loan_payment_stats(links: list[ClassifiedLink]) -> dict[int, LoanPayment]:
     """Per-loan-account payment cadence/amount derived from transfer-linked outflows.
 
     Banks collapse different loans' payments into one descriptor; the link's inflow
-    account is the reliable per-loan identity (design 2026-07-16 §3).
+    account is the reliable per-loan identity (design 2026-07-16 §3). Payments on one
+    day are one payment (a payment split in two), so cadence and amount read the same
+    per-day totals.
     """
-    by_account: dict[int, list[ClassifiedLink]] = {}
+    by_account: dict[int, dict[date, int]] = {}
     for link in links:
         if link.inflow_is_loan_like:
-            by_account.setdefault(link.inflow_account_id, []).append(link)
+            days = by_account.setdefault(link.inflow_account_id, {})
+            day = link.outflow_posted_on
+            days[day] = days.get(day, 0) + abs(link.outflow_amount_cents)
     result: dict[int, LoanPayment] = {}
-    for account_id, group in by_account.items():
-        dates = sorted({link.outflow_posted_on for link in group})
+    for account_id, days in by_account.items():
+        dates = sorted(days)
         match = match_cadence(dates)
         if match is None:
             cadence, run_start = Cadence.monthly, dates[0]  # loans are near-universally monthly
         else:
             cadence, run_start = match
-        amounts = [
-            abs(link.outflow_amount_cents) for link in group if link.outflow_posted_on >= run_start
-        ]
         result[account_id] = LoanPayment(
             account_id=account_id,
             cadence=cadence,
-            expected_cents=-round(statistics.median(amounts)),
+            expected_cents=-_current_payment([days[d] for d in dates if d >= run_start]),
             last_paid_on=dates[-1],
         )
     return result

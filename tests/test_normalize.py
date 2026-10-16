@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from moneta.models import (
     AliasSource,
     MerchantAlias,
+    RecurringSeries,
     ReviewItem,
     ReviewKind,
     ReviewStatus,
@@ -564,3 +565,106 @@ async def test_kept_llm_group_is_not_a_phantom_merge_target(session: AsyncSessio
         group[1]: "Acme Garage",
         plus: "Acme Parking Monthly Riverton Plus",
     }
+
+
+def test_rule_normalize_strips_expressway_addresses() -> None:
+    assert rule_normalize("ACME DINER 4500 OAK HOLLOW EXPY ELMTON TX") == "Acme Diner"
+    assert rule_normalize("ACME DINER 4500 OAK HOLLOW EXPWY ELMTON TX") == "Acme Diner"
+
+
+def test_glued_places_fold_into_the_spaced_name() -> None:
+    assert merge_targets(
+        ["Acme University", "Acme Universityelmton", "Acme Universityriverton"]
+    ) == {
+        "Acme Universityelmton": "Acme University",
+        "Acme Universityriverton": "Acme University",
+    }
+    # a one-word name absorbs only a glued place learned from other names
+    assert merge_targets([*_PLACES, "Shyco", "Shycoelmton"])["Shycoelmton"] == "Shyco"
+    assert merge_targets(["Shyco", "Shycobrook", "Shycofield"]) == {}
+
+
+def test_one_longer_word_is_not_a_glued_place() -> None:
+    # one glued variant is as likely a different word as a place
+    assert merge_targets(["Corner Store", "Corner Storehouse"]) == {}
+    # a short tail is a word ending, not a place, however many there are
+    names = ["Acme Parking Month", "Acme Parking Monthly", "Acme Parking Months"]
+    assert merge_targets(names) == {}
+
+
+async def test_renormalize_folds_glued_place_descriptors(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    for raw in ("ACME UNIVERSITY CA", "ACME UNIVERSITYELMTON CA", "ACME UNIVERSITYRIVERTON CA"):
+        await make_txn(session, acct, description=raw)
+    await normalize_merchants(session, llm=None)
+
+    assert await renormalize_merchants(session) == 2
+    assert await renormalize_merchants(session) == 0
+
+    txns = (await session.execute(select(Transaction))).scalars().all()
+    assert {t.merchant for t in txns} == {"Acme University"}
+
+
+def test_rule_normalize_keeps_a_letters_only_code_for_the_merge_pass() -> None:
+    # the address strips; a letters-only code stays, since one alone may be a real name
+    assert rule_normalize("ACMEAPP-QWERTYUI 12 ELM AVENUE ELMTON 99999 TX USA") == (
+        "Acmeapp-Qwertyui"
+    )
+    # a code with a digit is a reference token and was always stripped
+    assert rule_normalize("ACMEAPP-QW3RTYUI 12 ELM AVENUE ELMTON 99999 TX USA") == "Acmeapp"
+
+
+def test_per_charge_codes_fold_into_their_merchant() -> None:
+    assert merge_targets(["Acmeapp-Qwertyui", "Acmeapp-Asdfghjk"]) == {
+        "Acmeapp-Qwertyui": "Acmeapp",
+        "Acmeapp-Asdfghjk": "Acmeapp",
+    }
+    # beside the name a digit code's charges already carry
+    assert merge_targets(["Acmeapp", "Acmeapp-Qwertyui", "Acmeapp-Asdfghjk"]) == {
+        "Acmeapp-Qwertyui": "Acmeapp",
+        "Acmeapp-Asdfghjk": "Acmeapp",
+    }
+
+
+def test_one_hyphenated_name_is_not_a_code() -> None:
+    assert merge_targets(["Corner-Sandwich"]) == {}
+    assert merge_targets(["Corner", "Corner-Sandwich"]) == {}
+    # the same second word twice is one name, not two codes
+    assert merge_targets(["Corner-Sandwich", "Corner-Sandwich Elmton"]) == {}
+
+
+def test_a_charge_code_is_exactly_eight_letters() -> None:
+    # 7 or 9 letters are not codes, however many different ones there are
+    assert merge_targets(["Acmeapp-Qwertyu", "Acmeapp-Asdfghj"]) == {}
+    assert merge_targets(["Acmeapp-Qwertyuio", "Acmeapp-Asdfghjkl"]) == {}
+    # an 8-letter code beside a 7-letter one is one code, and one code is not enough
+    assert merge_targets(["Acmeapp-Qwertyui", "Acmeapp-Asdfghj"]) == {}
+
+
+def test_a_charge_code_needs_a_base_word_of_four_letters() -> None:
+    assert merge_targets(["Acme-Qwertyui", "Acme-Asdfghjk"]) == {
+        "Acme-Qwertyui": "Acme",
+        "Acme-Asdfghjk": "Acme",
+    }
+    assert merge_targets(["Abc-Qwertyui", "Abc-Asdfghjk"]) == {}
+
+
+async def test_per_charge_codes_form_one_subscription(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    for month, code in ((4, "QWERTYUI"), (5, "ASDFGHJK"), (6, "ZXCVBNMQ")):
+        await make_txn(
+            session,
+            acct,
+            description=f"ACMEAPP-{code} 12 ELM AVENUE ELMTON 99999 TX USA",
+            amount_cents=-1500,
+            posted_on=date(2026, month, 3),
+        )
+    await normalize_merchants(session, llm=None)
+
+    assert await renormalize_merchants(session) == 3
+    assert await renormalize_merchants(session) == 0
+
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.new_series == 1
+    series = (await session.execute(select(RecurringSeries))).scalar_one()
+    assert series.merchant == "Acmeapp" and series.expected_cents == -1500

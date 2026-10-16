@@ -20,7 +20,7 @@ from moneta.pipelines.recurring import detect_recurring
 from moneta.pipelines.transfers import link_transfers
 from moneta.queries import primary_currency
 from moneta.vesting import apply_vesting, parse_vesting_csv
-from moneta.views.cashflow import accrual_by_month, accrual_income, accrual_spend, cash_out
+from moneta.views.cashflow import accrual_by_month, accrual_inflows, accrual_spend, cash_out
 from moneta.views.financing import compute_obligations
 from moneta.views.networth import net_worth_report
 from moneta.views.power import power_report
@@ -107,14 +107,14 @@ async def test_all_accounting_views_use_the_same_survivors(session: AsyncSession
         2300,
     )
     start, end = date(2026, 7, 1), date(2026, 7, 31)
-    assert await accrual_income(session, start, end) == 200000
+    assert await accrual_inflows(session, start, end) == 200000
     assert await accrual_spend(session, start, end) == 7300
     assert await cash_out(session, start, end) == 17300
     obligations = await compute_obligations(session, TODAY)
     assert [(o.account_id, o.balance_owed_cents, o.monthly_payment_cents) for o in obligations] == [
         (loan.id, 25000, 10000)
     ]
-    assert (await accrual_by_month(session, 13, TODAY))[-1] == ("2025-07", 0, 1700)
+    assert (await accrual_by_month(session, 13, TODAY))[-1] == ("2025-07", 0, 0, 1700)
     rows = await transactions_report(session, start, end)
     assert len(rows) == 5
     assert spend_totals(rows, start, end, TODAY) == (2300, 2300)
@@ -200,7 +200,10 @@ async def test_month_end_duplicate_uses_survivor_posting_date(session: AsyncSess
         session, alias, posted_on=date(2026, 7, 2), amount_cents=-2000, description="Coffee Shop"
     )
     await reconcile_provider_overlap(session, TODAY)
-    assert await accrual_by_month(session, 2, TODAY) == [("2026-07", 0, 0), ("2026-06", 0, 2000)]
+    assert await accrual_by_month(session, 2, TODAY) == [
+        ("2026-07", 0, 0, 0),
+        ("2026-06", 0, 0, 2000),
+    ]
 
 
 async def test_vesting_updates_count_logical_positions(session: AsyncSession) -> None:

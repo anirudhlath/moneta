@@ -6,7 +6,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.cadence import monthlyize
 from moneta.logical import load_logical_data
-from moneta.models import AccountType
 from moneta.queries import classified_links, loan_payment_stats, primary_currency
 
 
@@ -18,6 +17,9 @@ class Obligation(BaseModel):
     months_left: int | None
     payoff_estimate: date | None
     promo_expires_on: date | None
+    # True when payoff_estimate lands after promo_expires_on: interest will apply to the
+    # balance left at promo end (back-dated only on deferred-interest plans). The name
+    # predates that wording and is kept for API compatibility.
     deferred_interest_risk: bool
 
 
@@ -27,9 +29,7 @@ async def compute_obligations(session: AsyncSession, today: date) -> list[Obliga
     loans = [
         a
         for a in logical.accounts.values()
-        if (a.type == AccountType.loan or a.financing_mode)
-        and a.balance_cents != 0
-        and a.currency == primary
+        if a.loan_like and a.balance_cents != 0 and a.currency == primary
     ]
     links = await classified_links(session)
     payments = loan_payment_stats(links)
