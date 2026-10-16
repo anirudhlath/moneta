@@ -937,7 +937,7 @@ async def test_power_history_months_out_of_range_is_422(client: httpx.AsyncClien
 async def test_power_history_multi_month_rows_newest_first(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    from moneta.models import AccountType
+    from moneta.models import AccountType, Direction
 
     today = date.today()
     this_month_start = _months_back(today, 0)
@@ -946,9 +946,24 @@ async def test_power_history_multi_month_rows_newest_first(
 
     async with sessionmaker() as session:
         checking = await make_account(session, type=AccountType.checking)
-        # this (current, partial) month: one paycheck, one purchase
+        payroll = await make_series(
+            session, merchant="Acme Payroll", direction=Direction.inflow, expected_cents=300000
+        )
+        # this (current, partial) month: one paycheck, a friend's Zelle, one purchase
         await make_txn(
-            session, checking, amount_cents=300000, posted_on=today, description="PAYROLL"
+            session,
+            checking,
+            amount_cents=300000,
+            posted_on=today,
+            description="PAYROLL",
+            series_id=payroll.id,
+        )
+        await make_txn(
+            session,
+            checking,
+            amount_cents=30000,
+            posted_on=today,
+            description="Zelle payment from JANE DOE 1234",
         )
         await make_txn(
             session, checking, amount_cents=-5000, posted_on=today, description="GROCERY"
@@ -960,6 +975,7 @@ async def test_power_history_multi_month_rows_newest_first(
             amount_cents=250000,
             posted_on=last_month_start,
             description="PAYROLL",
+            series_id=payroll.id,
         )
         await make_txn(
             session,
@@ -978,11 +994,13 @@ async def test_power_history_multi_month_rows_newest_first(
 
     assert rows[0]["month"] == f"{this_month_start.year:04d}-{this_month_start.month:02d}"
     assert rows[0]["income_cents"] == 300000
+    assert rows[0]["other_inflows_cents"] == 30000  # shown, but not income
     assert rows[0]["spend_cents"] == 5000
     assert rows[0]["net_cents"] == 295000
 
     assert rows[1]["month"] == f"{last_month_start.year:04d}-{last_month_start.month:02d}"
     assert rows[1]["income_cents"] == 250000
+    assert rows[1]["other_inflows_cents"] == 0
     assert rows[1]["spend_cents"] == 4000
     assert rows[1]["net_cents"] == 246000
 

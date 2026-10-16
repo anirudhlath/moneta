@@ -32,7 +32,9 @@ Existing apps (Origin, Copilot) fail in four specific ways that moneta is built 
   plus spent-so-far, remaining, safe-to-spend per day, and upcoming charges due later
   this month, for the current month. Accrual vs. cash-out accounting keeps "spent so
   far" honest when purchases go on credit. `--history N` shows a month-over-month
-  income/spend/net table instead.
+  income/other inflows/spend/net table instead, where income is detected income only: inflows
+  tagged to an income series, whether that series is still active or has since ended (unlike
+  `power`, which counts active series only).
 - **Transaction drill-down** (`moneta txns`) — every transaction in a date range,
   dimmed and labeled with the exact reason it isn't counted as spend (transfer, loan
   payment, credit-card payment, fixed-cost series, ...) when it isn't. The trust
@@ -41,8 +43,11 @@ Existing apps (Origin, Copilot) fail in four specific ways that moneta is built 
   amount-stability analysis over normalized merchants, for outflows (bills) *and*
   inflows (paychecks). Series events: missed payment, price increase, new series.
   Stale series auto-end; a genuinely new charge at cadence revives them.
-- **Transfer dedup** — candidate pairs scored on amount, date proximity, and
-  account direction; high-confidence pairs auto-link, ambiguous ones escalate.
+- **Transfer dedup** — opposite-amount pairs up to 6 days apart, scored on date
+  proximity, transfer wording and account type; a lone pair that scores high *and*
+  carries transfer wording auto-links, the rest escalate. Automatic links are
+  re-checked every sync and dropped when the pair's score or wording no longer qualifies
+  (a rival same-amount inflow appearing later doesn't drop one).
   Human decisions remain effective across provider aliases and later automatic review.
 - **RSU-vesting-aware net worth** — liquid + *vested* holdings − liabilities;
   unvested reported separately, never summed in. Vesting quantities import via CSV
@@ -197,7 +202,7 @@ Unset = no LLM; ambiguous items go to `moneta review` instead.
 | Command | What it does |
 |---|---|
 | `moneta sync [--full]` | Pull latest data and run all pipelines |
-| `moneta power [--history N]` | Income, fixed costs, spending power, spent so far, remaining, per-day, upcoming charges, coverage notes for accounts whose feed went quiet; `--history N` shows a month-over-month income/spend/net table instead |
+| `moneta power [--history N]` | Income, fixed costs, spending power, spent so far, remaining, per-day, upcoming charges, coverage notes for accounts whose feed went quiet; `--history N` shows a month-over-month income/other inflows/spend/net table instead |
 | `moneta networth` | Net worth (vested only); unvested listed as potential |
 | `moneta cashflow [--start D --end D]` | Accrual spend vs cash out for a range (default: this month) |
 | `moneta txns [--month M \| --start D --end D] [--account ID] [--merchant NAME] [--sources]` | Combined retained history; source audit includes superseded provider observations without counting them again |
