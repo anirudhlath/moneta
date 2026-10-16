@@ -9,9 +9,15 @@ detection handles it exactly as before, so a variable bill is never dropped.
 import itertools
 import statistics
 from collections.abc import Sequence
-from datetime import date
+from datetime import date, timedelta
 
-from moneta.cadence import TOLERANCE, advance_expected_on, match_cadence
+from moneta.cadence import (
+    CADENCE_DAYS,
+    TOLERANCE,
+    advance_expected_on,
+    match_across_a_miss,
+    match_cadence,
+)
 from moneta.models import BILL_TOLERANCE, Cadence, Transaction
 
 _MIN_TRACK_DATES = 3
@@ -96,13 +102,42 @@ def concurrent_tracks(band: Sequence[Transaction]) -> list[list[Transaction]] | 
     return None
 
 
+def _across_a_miss(
+    unit: Sequence[Transaction], group: Sequence[Transaction]
+) -> tuple[Cadence, date] | None:
+    """A unit's monthly schedule across one missed month (an installment paid from an
+    account that isn't linked). Not when the merchant charged anything around the missed
+    due date: that is the month's bill at another size. Not when two of the unit's
+    charges are less than 18 days apart: a habit that repeats a price is not a schedule.
+    Not when the merchant kept charging at real size through the gap (more than one
+    charge of at least `MINOR_FRACTION` of the unit's median): a missed installment
+    leaves the merchant quiet."""
+    dates = _dates(unit)
+    bridged = match_across_a_miss(dates)
+    if bridged is None:
+        return None
+    cadence, start, before = bridged
+    missed_on = advance_expected_on(before, cadence)
+    if any(abs((t.posted_on - missed_on).days) <= TOLERANCE[cadence] for t in group):
+        return None
+    shortest = CADENCE_DAYS[cadence] - 2 * TOLERANCE[cadence]
+    if any((b - a).days < shortest for a, b in itertools.pairwise(dates)):
+        return None
+    after = dates[dates.index(before) + 1]
+    floor = statistics.median(abs(t.amount_cents) for t in unit) * MINOR_FRACTION
+    busy = sum(1 for t in group if before < t.posted_on < after and abs(t.amount_cents) >= floor)
+    return None if busy > 1 else (cadence, start)
+
+
 def _scheduled_units(
     group: Sequence[Transaction],
 ) -> tuple[list[list[Transaction]], bool]:
     """The group's scheduled units (those with a cadence) and whether anything splits them.
 
     Splits when two same-price subscriptions run side by side, or when a charge of
-    real size (not an adjustment) sits inside a unit's schedule without belonging to it.
+    real size (not an adjustment) sits inside a unit's schedule without belonging to it:
+    within its newest run, or after it while the next charge is not due yet. A run holds
+    across one missed month (`_across_a_miss`).
     """
     units: list[list[Transaction]] = []
     concurrent = False
@@ -117,12 +152,17 @@ def _scheduled_units(
     extras = False
     for unit in units:
         dates = _dates(unit)
-        match = match_cadence(dates)
+        match = match_cadence(dates) or _across_a_miss(unit, group)
         if match is None:
             continue
         scheduled.append(unit)
         members = {t.id for t in unit}
-        start, end = match[1], dates[-1]
+        (cadence, start), end = match, dates[-1]
+        # nothing charged since the next charge came due: a later charge (a term deposit
+        # after the newest installment) sits alongside the schedule too
+        due = advance_expected_on(end, cadence) - timedelta(days=TOLERANCE[cadence])
+        if all(t.posted_on < due for t in group):
+            end = max(t.posted_on for t in group)
         # a charge far below the bill is an adjustment (a fee, a true-up), not a second bill
         floor = statistics.median(abs(t.amount_cents) for t in unit) * MINOR_FRACTION
         extras = extras or any(
@@ -143,7 +183,8 @@ def whole_bill(group: Sequence[Transaction]) -> list[Transaction]:
 
     "Small" is measured against the scheduled unit that declined to split (the one
     with the most dates; ties go to the larger charge), so a subscription's own size
-    sets the bar even when many small purchases drag the group median down. With no
+    sets the bar even when many small purchases drag the group median down. A unit that
+    holds across a missed month counts as scheduled, so it can set the bar too. With no
     scheduled unit the group's median is the bar.
     """
     scheduled, _ = _scheduled_units(group)

@@ -519,17 +519,35 @@ the old cadence. A price increase is only applied after two agreeing charges (or
 confirmation) — a single weird charge never rewrites what a bill is "supposed to" cost.
 
 One bill is one series, however the bank words it. Every sync strips wallet prefixes
-(`AplPay`, `SQ*`), legal suffixes (`LLC`), street addresses and city/state tails from
-descriptors, then merges a longer name into a shorter one it starts with (`Acme Fitness`
-and `Acme Fitness Riverton` become `Acme Fitness`). A single-word brand absorbs only a
-trailing place, so `Streamco` and `Streamco Plus` stay apart. A prefix shared by many
-unrelated names, such as a payment rail (`Zelle Payment To …`), absorbs nothing. A
-merchant can also have several series: if a subscription has irregular purchases alongside
-it, or two subscriptions at the same price bill on different days, each schedule is its own
-series and the other charges are ordinary spending. A merchant whose amounts just vary
-month to month stays one series, and a small fee alongside it does not split it. When a
-rename or merge leaves two series for one bill, the sync folds them into one, keeping their
-events. A price jump of more than 20% starts a new series and the old one goes stale.
+(`AplPay`, `SQ*`), legal suffixes (`LLC`), street addresses (expressways too) and
+city/state tails from descriptors, then merges a longer name into a shorter one it
+starts with (`Acme Fitness` and `Acme Fitness Riverton` become `Acme Fitness`). A city
+glued onto the name folds the same way: `Acme Universityelmton` and
+`Acme Universityriverton` become `Acme University` once the tail is a known place or the
+name shows two different glued tails, while one longer word (`Corner Storehouse` beside
+`Corner Store`) stays its own merchant. A single-word brand absorbs only a trailing
+place, so `Streamco` and `Streamco Plus` stay apart. A prefix shared by many unrelated
+names, such as a payment rail (`Zelle Payment To …`), absorbs nothing. A per-charge code
+hyphenated onto a name's first word (`Acmeapp-Qwertyui`: a word of 4 or more letters, a
+hyphen, then exactly 8 letters) is dropped once two or more different codes appear for the
+merchant, so a subscription billed under a new code each month is one series; a lone code
+stays part of the name, and a code with a digit in it is stripped outright like any other
+reference number. A merchant can also have several series: if a subscription has
+irregular purchases alongside it, or two subscriptions at the same price bill on different
+days, each schedule is its own series and the other charges are ordinary spending. A charge of at least a quarter of the bill's
+amount that lands after a schedule's newest charge, while the next one is not yet nearly
+due (6 days short of its due date for a monthly bill), counts the same way: a term deposit
+beside a monthly payment-plan installment is ordinary spending, and the installment alone
+is the fixed cost. Once a merchant has split like this, one month paid from an account
+Moneta can't see does not break the plan: the next installment continues it, and that
+month shows as a missed payment. That holds only when nothing was charged around the
+missed due date and the merchant did not keep charging at real size through the gap (a
+habit stays busy in between; a missed installment leaves the merchant quiet). A merchant
+that has not split is judged on its newest run as before, so a missed month cuts that run
+short. A merchant whose amounts just vary month to month stays one series, and a small fee
+alongside it does not split it. When a rename or merge leaves two series for one bill, the sync folds
+them into one, keeping their events. A price jump of more than 20% starts a new series
+and the old one goes stale.
 
 `--end`, `--not-a-bill`, `--habit`, `--re-review`, and `--reactivate` are mutually exclusive
 with each other — pass exactly one. `--end`/`--not-a-bill`/`--habit`/`--re-review` each write
@@ -701,8 +719,12 @@ llm_api_base = "http://localhost:8000/v1"
 
 With an LLM configured, sync auto-resolves review items it's confident about, double-checks
 newly detected recurring series, and gates price changes — anything it isn't sure of still
-comes to you. **The LLM only ever classifies; it never computes a money value.** Unset the
-variable and everything degrades gracefully to deterministic rules + your review queue.
+comes to you. A recurring question gets the same bill / habit / not-recurring choice you
+have, and a confident habit answer is recorded exactly like your `h`: the merchant is
+tracked as discretionary spending, not a fixed cost. Income counts as a bill, so a habit
+answer on a deposit is left for you. **The LLM only ever classifies; it never computes a
+money value.** Unset the variable and everything degrades gracefully to deterministic
+rules + your review queue.
 
 ## RSU vesting import
 
@@ -836,7 +858,7 @@ Files in the config dir (all owner-only, dir is 0700):
 | A provider match is wrong | Reverse an account link with `moneta accounts --unlink-source <ID>` to restore its observations. For an uncertain match with an open transaction overlap question, choose none in that review. Automatic matches do not necessarily have open questions; there is no separate public transaction-unlink endpoint. |
 | Reconciliation did not make data fresh | It only rebuilds stored data; run `moneta sync` and inspect source warnings for new observations. |
 | Merchant names look wrong | Answer the merchant questions in `moneta review`; naming rules and merchant merging already run on every sync, and `moneta renormalize` applies them on demand without a sync. A question disappears by itself once its descriptor no longer appears on any transaction or the rules already name it cleanly. |
-| One bill shows up as two series, or two bills as one | Merging is by name: a truncated name that is not a prefix of the full one (`Acme Fitnriverton`) stays split, as do descriptors with short per-charge codes. Duplicates that a merge does produce are folded automatically on the next sync. `moneta recurring --end <ID>` only ends a series, and a series that is still charging revives. |
+| One bill shows up as two series, or two bills as one | Merging is by name: a truncated name that is not a prefix of the full one (`Acme Fitnriverton`) stays split, and a per-charge code (`Acmeapp-Qwertyui`) is dropped only once two different codes appear for the merchant. Duplicates that a merge does produce are folded automatically on the next sync. `moneta recurring --end <ID>` only ends a series, and a series that is still charging revives. |
 | A subscription shows as active but is cancelled | `moneta recurring --end <ID>`. |
 | A series was wrongly confirmed as a recurring bill | `moneta recurring --not-a-bill <ID>` — ends it and suppresses it from every future sync; from the next sync its charges are untagged (they count as spend, or as Other inflows if money came in). |
 | A recurring series is really discretionary spending | `moneta recurring --habit <ID>` — reactivates it if ended, tags it discretionary (not a fixed cost). When the merchant has a single bill, the answer keeps applying as long as its amount is among the bill's newest charges, so a habit whose typical spend drifts stays a habit. |
@@ -844,6 +866,7 @@ Files in the config dir (all owner-only, dir is 0700):
 | An overrule was a mistake | `moneta recurring --re-review <ID>` reopens the question in `moneta review`. |
 | A price change looks wrong | It only applies after two agreeing charges or a confirmation; deny it in `moneta review` and the old expected amount stands. |
 | A bill whose amount varies shows an odd expected amount | A variable bill (newest 12 charges more than 20% apart) is expected at the charge that repeats most often among them, or their median when nothing repeats, recomputed every sync. One-off extras at the same merchant don't move it, and it never gets price-change events or questions. |
+| A bill whose amount changes and posts early may show a missed month | A charge more than 20% off the bill's usual amount that posts more than 6 days (a monthly bill's tolerance) before it is due counts as an extra beside the schedule, not as that month's bill. It shows as spending and the month shows as missed. This is a known limitation: a wider window would fold a payment plan's term deposits back into its installments. |
 | Numbers exclude an account | Foreign-currency accounts are excluded from aggregates by design and reported in `networth`. |
 | `power`/`networth` show a dim "data as of ..." line | The newest successful sync is more than 24h old (or there's never been one) — run `moneta sync`. See [Staleness footers](#staleness-footers). |
 | `power`/`status` print a yellow `Coverage:` line | That account's feed has been quiet for longer than its usual posting rate explains, so its recent spending may be missing. Run `moneta sync`; if it persists, fix the account's connection at its provider, then `moneta sync --full`. See [Coverage notes](#coverage-notes). |

@@ -23,12 +23,14 @@ class Classifier(Protocol):
 
 
 # Shared bill/habit/not_recurring definitions for every recurring-classification prompt
-# (initial detection, LLM verification) — one place to keep the taxonomy consistent.
+# (initial detection, LLM verification, auto-review) — one place to keep the taxonomy
+# consistent.
 CLASSIFICATION_TAXONOMY = (
     '- "bill": a fixed obligation — subscription, rent, insurance, loan or membership payment; '
-    "roughly stable amount; there are consequences if unpaid.\n"
+    "roughly stable amount; there are consequences if unpaid. For money coming in, a regular "
+    'income stream — a paycheck, a benefit, a recurring transfer in — is also a "bill".\n'
     '- "habit": recurring discretionary spending — restaurants, coffee, bars, groceries, '
-    "rideshare; variable amounts; a fresh choice each time.\n"
+    "rideshare; variable amounts; a fresh choice each time. Spending only, never income.\n"
     '- "not_recurring": neither — coincidental repetition.'
 )
 

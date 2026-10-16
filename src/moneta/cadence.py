@@ -77,6 +77,31 @@ def match_cadence(dates: list[date]) -> tuple[Cadence, date] | None:
     return None
 
 
+def match_across_a_miss(dates: list[date]) -> tuple[Cadence, date, date] | None:
+    """A monthly run that holds only across one missed month: the cadence, the run's start
+    and the date of the charge before the miss. None when no such run reaches 3 dates.
+
+    `match_cadence` ends a run at the first gap it cannot place, so one month paid from
+    elsewhere cuts a schedule down to the charges after it.
+    """
+    days, tol = CADENCE_DAYS[Cadence.monthly], TOLERANCE[Cadence.monthly]
+    gaps = [(b - a).days for a, b in zip(dates, dates[1:], strict=False)]
+    start, missed = len(dates) - 1, None
+    while start > 0:
+        gap = gaps[start - 1]
+        if missed is None and abs(gap - 2 * days) <= tol * 2:
+            missed = start - 1
+        elif abs(gap - days) > tol * 2:
+            break
+        start -= 1
+    if missed is None or len(dates) - start < _MIN_OCCURRENCES:
+        return None
+    periods = [gap / 2 if i == missed else gap for i, gap in enumerate(gaps) if i >= start]
+    if abs(statistics.median(periods) - days) > tol:
+        return None
+    return Cadence.monthly, dates[start], dates[missed]
+
+
 def monthlyize(expected_cents: int, cadence: Cadence) -> int:
     return round(expected_cents * PER_MONTH[cadence])
 
