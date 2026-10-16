@@ -187,7 +187,8 @@ for review, corrections, and safe upgrades.
 The first sync pulls all history your institutions retain. `moneta sync --full`
 re-pulls everything — use it after linking a new SimpleFIN account so its history
 isn't skipped by the incremental window. Plaid replays its full history (up to
-730 days) on every sync, so plain `moneta sync` suffices after `plaid-link`.
+730 days) on every sync, so plain `moneta sync` suffices after `plaid-link`; once a
+bank's history has finished loading, transactions it stops reporting are removed.
 
 No server needed — the CLI runs the app in-process. To run a server instead:
 `uv run moneta serve`, then `export MONETA_API_URL=http://127.0.0.1:8300`.

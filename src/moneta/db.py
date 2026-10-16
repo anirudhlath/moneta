@@ -13,7 +13,7 @@ from sqlalchemy.pool import StaticPool
 _BASELINE = "0001"
 # newest revision in migrations/versions/ — bump alongside each new migration;
 # tests/test_migrations.py pins this against the script directory
-_HEAD = "0007"
+_HEAD = "0009"
 
 
 def make_sessionmaker(db_url: str) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
@@ -41,6 +41,14 @@ def _upgrade(conn: Connection) -> None:
         current = conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
         if current == _HEAD:
             return  # common case (every CLI command) — skip the alembic machinery
+
+    # sqlite3 opens a transaction only before DML, so ALTER TABLE ADD COLUMN and a
+    # batch rebuild's CREATE TABLE autocommit, and a failure halfway through
+    # leaves a database every later start refuses ("duplicate column name",
+    # "table _alembic_tmp_... already exists"). One explicit transaction makes the
+    # whole upgrade all-or-nothing; engine.begin() commits it or rolls it back.
+    # IMMEDIATE takes the write lock now, so contention fails before any change.
+    conn.exec_driver_sql("BEGIN IMMEDIATE")
 
     from alembic import command  # deferred: only imported when migrations actually run
     from alembic.config import Config

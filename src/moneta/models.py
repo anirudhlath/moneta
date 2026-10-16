@@ -171,11 +171,18 @@ class Account(Base):
     canonical_account_id: Mapped[int | None] = mapped_column(
         ForeignKey("accounts.id"), default=None
     )
+    # the provider's latest account record as fetched; latest observation only
+    raw: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
 class Transaction(Base):
     __tablename__ = "transactions"
-    __table_args__ = (UniqueConstraint("account_id", "aggregator_id"),)
+    # AUTOINCREMENT (migration 0009): ingest deletes rows a complete Plaid replay
+    # dropped, and review payloads name rows by id, so an id must never come back
+    __table_args__ = (
+        UniqueConstraint("account_id", "aggregator_id"),
+        {"sqlite_autoincrement": True},
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"))

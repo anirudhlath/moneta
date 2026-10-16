@@ -19,6 +19,7 @@ class AccountDTO(BaseModel):
     type_hint: AccountType | None = None
     source: str = ""
     mask: str | None = None
+    raw: dict[str, Any] = Field(default_factory=dict)  # the provider's account record
 
 
 class TransactionDTO(BaseModel):
@@ -42,6 +43,10 @@ class Snapshot(BaseModel):
     transactions: list[TransactionDTO]
     holdings: list[HoldingDTO]
     warnings: list[str] = Field(default_factory=list)
+    # account external id -> earliest posted date of a replay its provider called
+    # complete. Ingest deletes that account's stored rows from that date on that
+    # the replay no longer returned. Only the Plaid adapter fills it.
+    complete_replays: dict[str, date] = Field(default_factory=dict)
 
 
 class AggregatorAdapter(Protocol):
@@ -52,12 +57,18 @@ class AggregatorAdapter(Protocol):
 
 
 def concat_snapshots(snaps: list[Snapshot]) -> Snapshot:
-    """Merge snapshots into one, concatenating all four fields in order."""
+    """Merge snapshots into one: the lists concatenate in order, and each account's
+    replay floor is the earliest any snapshot reported."""
+    floors: dict[str, date] = {}
+    for s in snaps:
+        for account_id, floor in s.complete_replays.items():
+            floors[account_id] = min(floor, floors.get(account_id, floor))
     return Snapshot(
         accounts=[a for s in snaps for a in s.accounts],
         transactions=[t for s in snaps for t in s.transactions],
         holdings=[h for s in snaps for h in s.holdings],
         warnings=[w for s in snaps for w in s.warnings],
+        complete_replays=floors,
     )
 
 

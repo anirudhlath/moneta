@@ -5,18 +5,22 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from moneta.aggregator.base import AccountDTO, Snapshot, TransactionDTO
+from moneta.aggregator.base import AccountDTO, Snapshot, TransactionDTO, concat_snapshots
+from moneta.logical import load_logical_data
 from moneta.models import (
     Account,
     AccountType,
     RecurringSeries,
     ReviewItem,
+    ReviewKind,
+    ReviewStatus,
     SeriesEvent,
     SyncRun,
     Transaction,
     TransferLink,
 )
 from moneta.pipelines.run import ACTIVE_ACCOUNT_DAYS, RESYNC_OVERLAP_DAYS, _sync_since, run_sync
+from moneta.pipelines.transaction_overlap import set_transaction_duplicate
 from tests.conftest import FakeAdapter, RecordingAdapter
 from tests.factories import make_account, make_txn
 
@@ -409,3 +413,171 @@ async def test_sync_merges_one_bills_descriptors(session: AsyncSession) -> None:
     assert report.merchants_renamed == 1
     series = (await session.execute(select(RecurringSeries))).scalars().all()
     assert [(s.merchant, s.expected_cents) for s in series] == [("Acme Fitness", -4999)]
+
+
+def test_concat_snapshots_keeps_each_accounts_earliest_floor() -> None:
+    def snap(floors: dict[str, date]) -> Snapshot:
+        return Snapshot(accounts=[], transactions=[], holdings=[], complete_replays=floors)
+
+    merged = concat_snapshots(
+        [
+            snap({"acc-a": date(2026, 6, 1)}),
+            snap({"acc-a": date(2026, 5, 1), "acc-b": date(2026, 6, 9)}),
+            snap({}),
+        ]
+    )
+    assert merged.complete_replays == {"acc-a": date(2026, 5, 1), "acc-b": date(2026, 6, 9)}
+
+
+def _acme_plaid() -> AccountDTO:
+    return AccountDTO(
+        id="plaid-acme",
+        name="Everyday Checking",
+        org_name="Acme Bank",
+        currency="USD",
+        balance=Decimal("100.00"),
+        balance_date=date(2026, 7, 9),
+        source="plaid",
+    )
+
+
+def _curry(txn_id: str, posted_on: date) -> TransactionDTO:
+    return TransactionDTO(
+        id=txn_id,
+        account_id="plaid-acme",
+        posted_on=posted_on,
+        amount=Decimal("-12.00"),
+        description="CORNER CURRY ELMTON",
+        raw={},
+    )
+
+
+async def test_sync_report_counts_rows_a_complete_replay_dropped(session: AsyncSession) -> None:
+    t1, t2 = _curry("t1", date(2026, 6, 1)), _curry("t2", date(2026, 6, 15))
+    adapter = FakeAdapter(
+        Snapshot(accounts=[_acme_plaid()], transactions=[t1, t2], holdings=[]), source="plaid"
+    )
+    await run_sync(session, [adapter], llm=None, today=date(2026, 7, 9))
+    adapter.snapshot = Snapshot(
+        accounts=[_acme_plaid()],
+        transactions=[t1],
+        holdings=[],
+        complete_replays={"plaid-acme": t1.posted_on},
+    )
+    report = await run_sync(session, [adapter], llm=None, today=date(2026, 7, 9))
+    assert report.ingest.deleted_transactions == 1
+    runs = list(await session.scalars(select(SyncRun).order_by(SyncRun.id)))
+    assert runs[-1].report is not None
+    assert runs[-1].report["ingest"]["deleted_transactions"] == 1
+
+
+async def test_simplefin_copy_is_counted_after_plaid_drops_its_own(session: AsyncSession) -> None:
+    plaid = await make_account(
+        session, aggregator_id="plaid-acme", name="Everyday Checking", source="plaid"
+    )
+    simplefin = await make_account(session, source="simplefin", canonical_account_id=plaid.id)
+    await make_txn(
+        session,
+        plaid,
+        aggregator_id="keep",
+        posted_on=date(2026, 6, 1),
+        amount_cents=-1200,
+        description="CORNER CURRY ELMTON",
+    )
+    gone = await make_txn(
+        session,
+        plaid,
+        aggregator_id="gone",
+        posted_on=date(2026, 6, 15),
+        amount_cents=-4500,
+        description="ELMTON GROCER",
+    )
+    copy = await make_txn(
+        session,
+        simplefin,
+        aggregator_id="s1",
+        posted_on=date(2026, 6, 15),
+        amount_cents=-4500,
+        description="ELMTON GROCER",
+    )
+    # a human confirmed the SimpleFIN row duplicates the Plaid one
+    await set_transaction_duplicate(session, copy.id, gone.id)
+    await session.commit()
+    replay = Snapshot(
+        accounts=[_acme_plaid()],
+        transactions=[_curry("keep", date(2026, 6, 1))],
+        holdings=[],
+        complete_replays={"plaid-acme": date(2026, 6, 1)},
+    )
+    report = await run_sync(
+        session, [FakeAdapter(replay, source="plaid")], llm=None, today=date(2026, 7, 9)
+    )
+    assert report.ingest.deleted_transactions == 1
+    logical = await load_logical_data(session)
+    assert {t.aggregator_id for t in logical.transactions} == {"keep", "s1"}
+
+
+async def test_withdrawn_inflow_voids_a_human_transfer_choice_and_the_outflow_is_asked_again(
+    session: AsyncSession,
+) -> None:
+    day = date(2026, 6, 15)
+    checking = _acme_plaid()
+    savings = checking.model_copy(update={"id": "plaid-acme-savings", "name": "Acme Savings"})
+
+    def leg(txn_id: str, account: AccountDTO, amount: str) -> TransactionDTO:
+        return TransactionDTO(
+            id=txn_id,
+            account_id=account.id,
+            posted_on=day,
+            amount=Decimal(amount),
+            description="ACME TRANSFER",
+            raw={},
+        )
+
+    def replay(*legs: TransactionDTO) -> Snapshot:
+        return Snapshot(
+            accounts=[checking, savings],
+            transactions=list(legs),
+            holdings=[],
+            complete_replays={checking.id: day, savings.id: day},
+        )
+
+    out = leg("out", checking, "-1000.00")
+    adapter = FakeAdapter(
+        replay(out, leg("i1", savings, "1000.00"), leg("i2", savings, "1000.00")), source="plaid"
+    )
+    await run_sync(session, [adapter], llm=None, today=date(2026, 7, 9))
+    # two equal inflows: the outflow cannot link on its own, so it is asked about
+    question = await session.scalar(
+        select(ReviewItem).where(ReviewItem.kind == ReviewKind.transfer_pair)
+    )
+    assert question is not None and question.status == ReviewStatus.open
+    chosen = await session.scalar(select(Transaction).where(Transaction.aggregator_id == "i1"))
+    assert chosen is not None
+    question.status = ReviewStatus.resolved
+    question.resolution = {"inflow_id": chosen.id, "resolved_by": "manual"}
+    await session.commit()
+    await run_sync(session, [adapter], llm=None, today=date(2026, 7, 9))
+    assert [link.inflow_id for link in await session.scalars(select(TransferLink))] == [chosen.id]
+
+    # the bank withdraws the chosen inflow and re-posts it under a new id
+    adapter.snapshot = replay(
+        out, leg("i1-reposted", savings, "1000.00"), leg("i2", savings, "1000.00")
+    )
+    report = await run_sync(session, [adapter], llm=None, today=date(2026, 7, 9))
+    assert report.ingest.deleted_transactions == 1
+    assert list(await session.scalars(select(TransferLink))) == []
+    # the human's pick named a row that no longer exists, so it is void: the outflow has
+    # two candidates again (re-posted and i2) and is asked about once more, not silently
+    # left as spending
+    open_questions = list(
+        await session.scalars(
+            select(ReviewItem).where(
+                ReviewItem.kind == ReviewKind.transfer_pair, ReviewItem.status == ReviewStatus.open
+            )
+        )
+    )
+    assert len(open_questions) == 1
+    ids = {t.aggregator_id: t.id for t in await session.scalars(select(Transaction))}
+    assert open_questions[0].payload["outflow_id"] == ids["out"]
+    assert set(open_questions[0].payload["candidates"]) == {ids["i1-reposted"], ids["i2"]}

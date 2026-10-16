@@ -1,11 +1,21 @@
 from datetime import date
 
+from loguru import logger
 from pydantic import BaseModel
-from sqlalchemy import or_, select, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.aggregator.base import Snapshot
-from moneta.models import Account, AccountType, Holding, Transaction, TransferLink, to_cents
+from moneta.models import (
+    Account,
+    AccountType,
+    Holding,
+    RecurringSeries,
+    SeriesStatus,
+    Transaction,
+    TransferLink,
+    to_cents,
+)
 
 _TYPE_HINTS: list[tuple[AccountType, tuple[str, ...]]] = [
     (AccountType.checking, ("checking",)),
@@ -29,6 +39,7 @@ class IngestStats(BaseModel):
     new_transactions: int = 0
     updated_transactions: int = 0
     holdings: int = 0
+    deleted_transactions: int = 0
 
 
 async def ingest_snapshot(session: AsyncSession, snap: Snapshot) -> IngestStats:
@@ -50,6 +61,7 @@ async def ingest_snapshot(session: AsyncSession, snap: Snapshot) -> IngestStats:
                 balance_date=dto.balance_date,
                 source=dto.source,
                 mask=dto.mask,
+                raw=dto.raw,
             )
             session.add(existing)
             await session.flush()
@@ -59,6 +71,7 @@ async def ingest_snapshot(session: AsyncSession, snap: Snapshot) -> IngestStats:
             existing.balance_date = dto.balance_date
             existing.source = dto.source  # natural backfill for pre-attribution accounts
             existing.mask = dto.mask
+            existing.raw = dto.raw
         acct_ids[dto.id] = existing.id
 
     # comparison columns as plain tuples — ORM rows are only fetched for the rare correction
@@ -120,33 +133,12 @@ async def ingest_snapshot(session: AsyncSession, snap: Snapshot) -> IngestStats:
         snapshot_new.add(key)
         stats.new_transactions += 1
 
-    if relinked_ids:
-        await session.execute(
-            update(Transaction)
-            .where(
-                or_(
-                    Transaction.id.in_(relinked_ids),
-                    Transaction.duplicate_of_id.in_(relinked_ids),
-                )
-            )
-            .values(duplicate_of_id=None)
-        )
-        stale_links = (
-            (
-                await session.execute(
-                    select(TransferLink).where(
-                        or_(
-                            TransferLink.outflow_id.in_(relinked_ids),
-                            TransferLink.inflow_id.in_(relinked_ids),
-                        )
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-        for link in stale_links:  # link_transfers re-matches on the corrected values
-            await session.delete(link)
+    # link_transfers and overlap reconciliation re-match on the corrected values
+    await _void_relations(session, relinked_ids)
+    gone = _absent_from_replay(snap, acct_ids, existing_txns)
+    if gone:
+        await _delete_absent(session, gone)
+        stats.deleted_transactions = len(gone)
 
     for h in snap.holdings:
         if h.account_id not in acct_ids:
@@ -173,3 +165,123 @@ async def ingest_snapshot(session: AsyncSession, snap: Snapshot) -> IngestStats:
 
     await session.commit()
     return stats
+
+
+async def _void_relations(session: AsyncSession, ids: set[int]) -> None:
+    """Clear the duplicate pointers and transfer links resting on `ids`.
+
+    Provider-overlap reconciliation and link_transfers, which run right after
+    ingest, re-match from whatever remains.
+    """
+    if not ids:
+        return
+    await session.execute(
+        update(Transaction)
+        .where(or_(Transaction.id.in_(ids), Transaction.duplicate_of_id.in_(ids)))
+        .values(duplicate_of_id=None)
+    )
+    stale_links = await session.scalars(
+        select(TransferLink).where(
+            or_(TransferLink.outflow_id.in_(ids), TransferLink.inflow_id.in_(ids))
+        )
+    )
+    for link in stale_links.all():
+        await session.delete(link)
+
+
+def _absent_from_replay(
+    snap: Snapshot,
+    acct_ids: dict[str, int],
+    stored: dict[tuple[int, str], tuple[int, int, date, str]],
+) -> set[int]:
+    """Ids of stored rows a complete Plaid replay should have returned but did not.
+
+    Only Plaid accounts the snapshot gives a replay floor are judged, and only their
+    rows dated on or after that floor: older rows have aged out of the replay window,
+    not been withdrawn.
+    """
+    plaid = {dto.id for dto in snap.accounts if dto.source == "plaid"}
+    floors = {
+        acct_ids[ext]: floor
+        for ext, floor in snap.complete_replays.items()
+        if ext in plaid and ext in acct_ids
+    }
+    if not floors:
+        return set()
+    returned = {
+        (acct_ids[t.account_id], t.id) for t in snap.transactions if t.account_id in acct_ids
+    }
+    return {
+        tid
+        for key, (tid, _cents, posted, _desc) in stored.items()
+        if key[0] in floors and posted >= floors[key[0]] and key not in returned
+    }
+
+
+async def _delete_absent(session: AsyncSession, gone: set[int]) -> None:
+    """Delete withdrawn rows, leaving nothing pointing at them."""
+    withdrawn = (
+        await session.execute(
+            select(
+                Transaction.id,
+                Transaction.series_id,
+                Transaction.aggregator_id,
+                Transaction.account_id,
+                Account.aggregator_id,
+                Transaction.posted_on,
+                Transaction.amount_cents,
+                Transaction.description,
+            )
+            .join(Account, Account.id == Transaction.account_id)
+            .where(Transaction.id.in_(gone))
+        )
+    ).all()
+    tags: dict[int, int | None] = {tid: sid for tid, sid, *_ in withdrawn}
+    for tid, _sid, aggregator_id, acct_pk, acct_aggregator_id, posted_on, cents, desc in sorted(
+        withdrawn, key=lambda r: r[0]
+    ):
+        # the store is the only copy of the history: keep enough to restore a wrong deletion
+        logger.info(
+            "ingest: deleted withdrawn transaction {} (id {}) in account {} (provider id {})"
+            " posted {} amount_cents {} {!r}",
+            aggregator_id,
+            tid,
+            acct_pk,
+            acct_aggregator_id,
+            posted_on,
+            cents,
+            desc,
+        )
+    survivors = await session.scalars(
+        select(Transaction).where(
+            Transaction.duplicate_of_id.in_(gone), Transaction.id.not_in(gone)
+        )
+    )
+    for survivor in survivors.all():
+        # the other provider's copy becomes the counted row; carrying the bill's tag
+        # keeps detection from mistaking it for a genuinely new, untagged charge
+        if survivor.series_id is None and survivor.duplicate_of_id is not None:
+            survivor.series_id = tags.get(survivor.duplicate_of_id)
+    await _void_relations(session, gone)
+    lost = {sid for sid in tags.values() if sid is not None}
+    if lost:
+        kept = set(
+            await session.scalars(
+                select(Transaction.series_id).where(
+                    Transaction.series_id.in_(lost), Transaction.id.not_in(gone)
+                )
+            )
+        )
+        if orphaned := lost - kept:
+            # with no tagged row left the series would keep firing `missed` events;
+            # detection revives it if a genuinely new charge arrives
+            await session.execute(
+                update(RecurringSeries)
+                .where(
+                    RecurringSeries.id.in_(orphaned),
+                    RecurringSeries.status == SeriesStatus.active,
+                )
+                .values(status=SeriesStatus.ended)
+            )
+    # transactions is AUTOINCREMENT (Task 4): these ids are never handed out again
+    await session.execute(delete(Transaction).where(Transaction.id.in_(gone)))

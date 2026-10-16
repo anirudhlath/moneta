@@ -93,6 +93,11 @@ no duplicate accounts. An unknown item id is a clean error pointing at `plaid-li
 Notes:
 - Plaid replays its full history (up to 730 days) on every sync, so plain `moneta sync`
   suffices after linking — no `--full` needed for Plaid.
+- Once a bank's history has finished loading at Plaid, a transaction the bank stops
+  reporting is removed on the next sync. Only its Plaid copy goes; a SimpleFIN copy of the
+  same transaction stays and counts instead. Transactions older than the earliest one Plaid
+  still returns for that account are kept, and nothing is removed while a bank is still
+  loading or its sync fails.
 - Plaid supplies real account types, which take precedence over moneta's name-based inference.
 - If one bank's login expires, that bank is skipped with a warning; the rest of the sync
   proceeds. `moneta setup plaid-relink <ITEM_ID>` restores access without duplicating accounts.
@@ -139,11 +144,12 @@ deletes original provider observations.
 
 `moneta reconcile` rebuilds overlap, transfers, recurring estimates, and events from
 stored data. It fetches no providers, calls no LLM, and does not advance sync
-freshness. Use `moneta sync` to obtain upstream corrections: a changed amount/date
-can dissolve a former duplicate and invalid transfer links are revalidated. The
-original reviewed answers remain recorded. To correct an uncertain transaction
-match, use its numbered overlap question in `moneta review`; `0` explicitly chooses
-none, while Enter leaves it unanswered.
+freshness. Use `moneta sync` to obtain upstream corrections: a changed amount/date can
+dissolve a former duplicate and invalid transfer links are revalidated; a Plaid
+transaction the bank stops reporting is deleted and its SimpleFIN duplicate becomes
+the counted copy. The original reviewed answers remain recorded. To correct an
+uncertain transaction match, use its numbered overlap question in `moneta review`; `0`
+explicitly chooses none, while Enter leaves it unanswered.
 
 All aggregate views still use one primary currency; linking incompatible currencies
 is rejected and no conversion is inferred. Holdings use one source's available set
@@ -173,7 +179,7 @@ moneta status          # is data fresh? did the last sync work? what changed
 A sync runs the full pipeline: ingest → merchant normalization and merging → provider-overlap reconciliation → transfer dedup →
 financing-account detection → LLM auto-review → recurring detection → LLM verification →
 series events. The summary line tells you what changed (new transactions, transfers linked,
-new series, events); if items need your attention (including a financing check) it points
+new series, events, transactions corrected or removed upstream); if items need your attention (including a financing check) it points
 you at `moneta review`. While a sync is running, the terminal shows a `Syncing…` spinner;
 running in-process (the default, no `MONETA_API_URL`) the spinner also live-updates with the
 current fetch window (e.g. `Syncing… SimpleFIN: fetching 2026-05-01 – 2026-06-15`) so a long
@@ -719,9 +725,10 @@ You'll see an upfront summary, then one question at a time:
 | Price change ("Did X change price from $A to $B?") | `y` (applies the new amount) / `n` |
 | Merchant name | Type the real merchant name, or Enter to skip |
 
-Skipped items come back next time. Invalid input skips cleanly — nothing is guessed on your
-behalf. Answers are recorded with who resolved them (`manual` vs `llm`) so every
-classification is auditable.
+Skipped items come back next time, except questions whose evidence has gone away (for
+example a price-change question about a transaction the provider withdrew), which retire
+themselves. Invalid input skips cleanly — nothing is guessed on your behalf. Answers are
+recorded with who resolved them (`manual` vs `llm`) so every classification is auditable.
 
 ## LLM assist (optional)
 
@@ -866,7 +873,7 @@ file values. The `setup` commands write the file for you.
 Files in the config dir (all owner-only, dir is 0700):
 
 - `config.toml` — settings, including credentials
-- `moneta.db` — the database
+- `moneta.db` — the database (it also keeps each account's latest raw provider record)
 - `plaid_items.json` — linked Plaid banks (item ids + access tokens)
 - `moneta.log` — rotating log file
 

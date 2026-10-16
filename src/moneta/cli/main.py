@@ -167,6 +167,10 @@ def sync(
         console.print(
             f"{report['ingest']['updated_transactions']} transaction(s) corrected upstream."
         )
+    if report["ingest"].get("deleted_transactions"):
+        console.print(
+            f"{report['ingest']['deleted_transactions']} transaction(s) removed upstream."
+        )
     for warning in report.get("warnings", []):
         console.print(f"[yellow]⚠ {warning}[/yellow]")
     open_reviews = request("GET", "/review")

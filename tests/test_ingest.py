@@ -1,13 +1,28 @@
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
 import pytest
+from loguru import logger
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.aggregator.base import AccountDTO, HoldingDTO, Snapshot, TransactionDTO
-from moneta.models import Account, AccountType, Holding, Transaction
+from moneta.logical import load_logical_data
+from moneta.models import (
+    Account,
+    AccountType,
+    AliasSource,
+    Holding,
+    LinkMethod,
+    MerchantAlias,
+    SeriesStatus,
+    Transaction,
+    TransferLink,
+)
 from moneta.pipelines.ingest import infer_account_type, ingest_snapshot
+from moneta.pipelines.normalize import normalize_merchants
+from tests.factories import make_account, make_series, make_txn
 
 
 def _snap() -> Snapshot:
@@ -372,3 +387,238 @@ async def test_correction_invalidates_affected_duplicate_relationships(
         "TEST",
         {},
     )
+
+
+async def test_account_keeps_only_its_latest_raw_record(session: AsyncSession) -> None:
+    def snap(seen: int) -> Snapshot:
+        account = AccountDTO(
+            id="plaid-raw",
+            name="Everyday Checking",
+            org_name="Acme Bank",
+            currency="USD",
+            balance=Decimal("100.00"),
+            balance_date=date(2026, 7, 1),
+            source="plaid",
+            raw={"subtype": "checking", "seen": seen},
+        )
+        return Snapshot(accounts=[account], transactions=[], holdings=[])
+
+    await ingest_snapshot(session, snap(1))
+    account = (await session.scalars(select(Account))).one()
+    assert account.raw == {"subtype": "checking", "seen": 1}
+    await ingest_snapshot(session, snap(2))
+    await session.refresh(account)
+    assert account.raw == {"subtype": "checking", "seen": 2}
+
+
+_ACME = AccountDTO(
+    id="plaid-acme",
+    name="Everyday Checking",
+    org_name="Acme Bank",
+    currency="USD",
+    balance=Decimal("100.00"),
+    balance_date=date(2026, 7, 1),
+    source="plaid",
+)
+JUNE_1, JUNE_15 = date(2026, 6, 1), date(2026, 6, 15)
+
+
+def _row(txn_id: str, posted_on: date, description: str = "CORNER CURRY ELMTON") -> TransactionDTO:
+    """A $120.00 purchase on the Acme Plaid account."""
+    return TransactionDTO(
+        id=txn_id,
+        account_id=_ACME.id,
+        posted_on=posted_on,
+        amount=Decimal("-120.00"),
+        description=description,
+        raw={},
+    )
+
+
+def _replay(*rows: TransactionDTO, complete: bool = True) -> Snapshot:
+    """What the Plaid adapter hands ingest: a complete replay floors at its earliest row."""
+    floors = {_ACME.id: min(r.posted_on for r in rows)} if complete and rows else {}
+    return Snapshot(accounts=[_ACME], transactions=list(rows), holdings=[], complete_replays=floors)
+
+
+async def _stored_ids(session: AsyncSession) -> set[str]:
+    return set(await session.scalars(select(Transaction.aggregator_id)))
+
+
+async def _acme_account(session: AsyncSession) -> Account:
+    """The stored Acme Plaid account, for tests that seed rows through the factories."""
+    return await make_account(
+        session, aggregator_id=_ACME.id, name=_ACME.name, org_name=_ACME.org_name, source="plaid"
+    )
+
+
+async def _seed(
+    session: AsyncSession, account: Account, aggregator_id: str, posted_on: date, **kw: Any
+) -> Transaction:
+    """A stored $120.00 Corner Curry row, as an earlier sync would have left it."""
+    fields: dict[str, Any] = {"amount_cents": -12000, "description": "CORNER CURRY ELMTON", **kw}
+    return await make_txn(
+        session, account, aggregator_id=aggregator_id, posted_on=posted_on, **fields
+    )
+
+
+async def test_complete_replay_deletes_a_row_it_no_longer_returns(session: AsyncSession) -> None:
+    await ingest_snapshot(session, _replay(_row("t1", JUNE_1), _row("t2", JUNE_15)))
+    stats = await ingest_snapshot(session, _replay(_row("t1", JUNE_1)))
+    assert stats.deleted_transactions == 1
+    assert await _stored_ids(session) == {"t1"}
+    # the same replay again finds nothing more to delete
+    again = await ingest_snapshot(session, _replay(_row("t1", JUNE_1)))
+    assert again.deleted_transactions == 0
+    assert await _stored_ids(session) == {"t1"}
+
+
+async def test_a_deleted_row_is_logged_with_enough_to_restore_it(session: AsyncSession) -> None:
+    await ingest_snapshot(session, _replay(_row("t1", JUNE_1), _row("t2", JUNE_15)))
+    account = (await session.scalars(select(Account))).one()
+    messages: list[str] = []
+    sink_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="INFO")
+    try:
+        await ingest_snapshot(session, _replay(_row("t1", JUNE_1)))
+    finally:
+        logger.remove(sink_id)
+
+    (line,) = [m for m in messages if "deleted withdrawn" in m]
+    # the row's own provider id, the account it belongs to (both ids), when and how much
+    assert "transaction t2 " in line
+    assert f"account {account.id} " in line
+    assert "plaid-acme" in line
+    assert str(JUNE_15) in line
+    assert "-12000" in line
+    assert "CORNER CURRY ELMTON" in line
+
+
+async def test_incomplete_replay_deletes_nothing(session: AsyncSession) -> None:
+    await ingest_snapshot(session, _replay(_row("t1", JUNE_1), _row("t2", JUNE_15)))
+    stats = await ingest_snapshot(session, _replay(_row("t1", JUNE_1), complete=False))
+    assert stats.deleted_transactions == 0
+    assert await _stored_ids(session) == {"t1", "t2"}
+
+
+async def test_replay_without_rows_for_an_account_deletes_nothing(session: AsyncSession) -> None:
+    await ingest_snapshot(session, _replay(_row("t1", JUNE_1)))
+    stats = await ingest_snapshot(session, _replay())  # complete, but no earliest date
+    assert stats.deleted_transactions == 0
+    assert await _stored_ids(session) == {"t1"}
+
+
+async def test_rows_older_than_the_replays_earliest_date_survive(session: AsyncSession) -> None:
+    old = _row("t0", date(2024, 9, 1))
+    await ingest_snapshot(
+        session,
+        _replay(old, _row("t1", JUNE_1), _row("t1b", JUNE_1), _row("t2", JUNE_15)),
+    )
+    # t0 aged out of the replay window; t1b sits on the earliest date and is gone
+    stats = await ingest_snapshot(session, _replay(_row("t1", JUNE_1)))
+    assert stats.deleted_transactions == 2
+    assert await _stored_ids(session) == {"t0", "t1"}
+
+
+async def test_floor_on_a_non_plaid_account_deletes_nothing(session: AsyncSession) -> None:
+    other = _ACME.model_copy(update={"source": "simplefin"})
+    rows = [_row("t1", JUNE_1), _row("t2", JUNE_15)]
+    await ingest_snapshot(session, Snapshot(accounts=[other], transactions=rows, holdings=[]))
+    stats = await ingest_snapshot(
+        session,
+        Snapshot(
+            accounts=[other],
+            transactions=rows[:1],
+            holdings=[],
+            complete_replays={other.id: JUNE_1},
+        ),
+    )
+    assert stats.deleted_transactions == 0
+    assert await _stored_ids(session) == {"t1", "t2"}
+
+
+async def test_only_accounts_with_a_floor_are_swept(session: AsyncSession) -> None:
+    savings = _ACME.model_copy(update={"id": "plaid-acme-savings", "name": "Savings"})
+    s1 = TransactionDTO(
+        id="s1",
+        account_id=savings.id,
+        posted_on=JUNE_15,
+        amount=Decimal("-12.00"),
+        description="ELMTON WATER",
+        raw={},
+    )
+    await ingest_snapshot(
+        session,
+        Snapshot(accounts=[_ACME, savings], transactions=[_row("t1", JUNE_1), s1], holdings=[]),
+    )
+    # savings returned nothing this time and has no floor, so its row is not judged
+    second = _replay(_row("t1", JUNE_1))
+    second.accounts.append(savings)
+    stats = await ingest_snapshot(session, second)
+    assert stats.deleted_transactions == 0
+    assert await _stored_ids(session) == {"t1", "s1"}
+
+
+async def test_deleted_root_promotes_its_other_provider_copy(session: AsyncSession) -> None:
+    plaid = await _acme_account(session)
+    simplefin = await make_account(session, source="simplefin", canonical_account_id=plaid.id)
+    series = await make_series(session, merchant="Corner Curry", expected_cents=-12000)
+    await _seed(session, plaid, "t1", JUNE_1)
+    root = await _seed(session, plaid, "t2", JUNE_15, series_id=series.id)
+    copy = await _seed(session, simplefin, "sf-2", JUNE_15, duplicate_of_id=root.id)
+    stats = await ingest_snapshot(session, _replay(_row("t1", JUNE_1)))
+    assert stats.deleted_transactions == 1
+    await session.refresh(copy)
+    await session.refresh(series)
+    assert copy.duplicate_of_id is None
+    assert copy.series_id == series.id  # the bill keeps its evidence
+    assert series.status == SeriesStatus.active
+    # nothing dangles: the logical projection loads and counts the copy
+    logical = await load_logical_data(session)
+    assert copy.id in {t.id for t in logical.transactions}
+
+
+async def test_deleting_a_transfer_leg_drops_its_link(session: AsyncSession) -> None:
+    plaid = await _acme_account(session)
+    savings = await make_account(session, type=AccountType.savings)
+    await _seed(session, plaid, "t1", JUNE_1)
+    out = await _seed(session, plaid, "t2", JUNE_15, amount_cents=-10000, description="TRANSFER")
+    inn = await make_txn(session, savings, posted_on=JUNE_15, amount_cents=10000)
+    session.add(
+        TransferLink(outflow_id=out.id, inflow_id=inn.id, confidence=1.0, method=LinkMethod.rule)
+    )
+    stats = await ingest_snapshot(session, _replay(_row("t1", JUNE_1)))
+    assert stats.deleted_transactions == 1
+    assert list(await session.scalars(select(TransferLink))) == []
+    assert await session.get(Transaction, inn.id) is not None  # the other leg stays
+
+
+async def test_series_left_without_a_tagged_row_ends(session: AsyncSession) -> None:
+    plaid = await _acme_account(session)
+    orphan = await make_series(session, merchant="Corner Curry", expected_cents=-12000)
+    supported = await make_series(session, merchant="Acme Fitness", expected_cents=-12000)
+    fitness = "ACME FITNESS"
+    await _seed(session, plaid, "keep", JUNE_1, description=fitness, series_id=supported.id)
+    await _seed(session, plaid, "gone", JUNE_15, series_id=orphan.id)
+    await _seed(session, plaid, "gone2", JUNE_15, description=fitness, series_id=supported.id)
+    stats = await ingest_snapshot(session, _replay(_row("keep", JUNE_1, fitness)))
+    assert stats.deleted_transactions == 2
+    await session.refresh(orphan)
+    await session.refresh(supported)
+    assert orphan.status == SeriesStatus.ended  # its only evidence is gone
+    assert supported.status == SeriesStatus.active  # "keep" still carries it
+
+
+async def test_reissued_row_keeps_its_manual_merchant(session: AsyncSession) -> None:
+    session.add(
+        MerchantAlias(
+            raw_descriptor="CORNER CURRY 0042", merchant="Corner Curry", source=AliasSource.manual
+        )
+    )
+    await ingest_snapshot(session, _replay(_row("old-id", JUNE_1, "CORNER CURRY 0042")))
+    await normalize_merchants(session, None)
+    # the bank withdraws the row and re-posts the same purchase under a new id
+    stats = await ingest_snapshot(session, _replay(_row("new-id", JUNE_1, "CORNER CURRY 0042")))
+    await normalize_merchants(session, None)
+    assert stats.deleted_transactions == 1
+    rows = list(await session.scalars(select(Transaction)))
+    assert [(t.aggregator_id, t.merchant) for t in rows] == [("new-id", "Corner Curry")]

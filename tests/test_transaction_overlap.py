@@ -761,3 +761,91 @@ async def test_merchant_question_with_clean_names_is_superseded(session: AsyncSe
     assert stats.reviews_superseded == 1
     assert clean.status == ReviewStatus.resolved
     assert still_unclear.status == ReviewStatus.open
+
+
+async def test_price_question_whose_transaction_is_gone_is_superseded(
+    session: AsyncSession,
+) -> None:
+    a, _ = await accounts(session)
+    series = await make_series(session, merchant="Acme Fitness", expected_cents=-12000)
+    live = await make_txn(
+        session,
+        a,
+        description="ACME FITNESS",
+        merchant="Acme Fitness",
+        amount_cents=-13000,
+        series_id=series.id,
+    )
+
+    def question(transaction_id: int) -> ReviewItem:
+        return ReviewItem(
+            kind=ReviewKind.price_change,
+            question="Did 'Acme Fitness' change price from $120.00 to $130.00?",
+            payload={
+                "series_id": series.id,
+                "currency": "USD",
+                "transaction_id": transaction_id,
+                "merchant": "Acme Fitness",
+                "old_cents": -12000,
+                "new_cents": -13000,
+                "occurred_on": "2026-07-01",
+                "llm_flagged": True,
+            },
+        )
+
+    stale, current = question(live.id + 1000), question(live.id)
+    session.add_all([stale, current])
+    stats = await reconcile(session)
+    reason = "Transaction is no longer reported by its provider"
+    assert stats.reviews_superseded == 1
+    assert stale.status == ReviewStatus.resolved
+    assert stale.resolution is not None
+    assert stale.resolution["superseded_reason"] == reason
+    assert current.status == ReviewStatus.open
+
+
+def price_question(series_id: int, **payload: Any) -> ReviewItem:
+    return ReviewItem(
+        kind=ReviewKind.price_change,
+        question="Did 'Acme Fitness' change price from $120.00 to $130.00?",
+        payload={
+            "series_id": series_id,
+            "currency": "USD",
+            "merchant": "Acme Fitness",
+            "old_cents": -12000,
+            "new_cents": -13000,
+            "occurred_on": "2026-07-01",
+            **payload,
+        },
+    )
+
+
+async def test_price_question_naming_a_suppressed_duplicate_stays_open(
+    session: AsyncSession,
+) -> None:
+    plaid, simplefin = await accounts(session)
+    series = await make_series(session, merchant="Acme Fitness", expected_cents=-12000)
+    root = await make_txn(session, plaid, description="ACME FITNESS", amount_cents=-13000)
+    copy = await make_txn(session, simplefin, description="ACME FITNESS", amount_cents=-13000)
+    await reconcile(session)
+    assert copy.duplicate_of_id == root.id
+    question = price_question(series.id, transaction_id=copy.id)
+    session.add(question)
+    stats = await reconcile(session)
+    assert stats.reviews_superseded == 0
+    assert question.status == ReviewStatus.open
+
+
+async def test_price_question_without_an_integer_transaction_id_stays_open(
+    session: AsyncSession,
+) -> None:
+    a, _ = await accounts(session)
+    series = await make_series(session, merchant="Acme Fitness", expected_cents=-12000)
+    live = await make_txn(session, a, description="ACME FITNESS", amount_cents=-13000)
+    legacy = price_question(series.id)
+    textual = price_question(series.id, transaction_id=str(live.id + 1000))
+    session.add_all([legacy, textual])
+    stats = await reconcile(session)
+    assert stats.reviews_superseded == 0
+    assert legacy.status == ReviewStatus.open
+    assert textual.status == ReviewStatus.open

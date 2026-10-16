@@ -101,6 +101,7 @@ async def _retire_questions(
     today: date,
 ) -> None:
     txns = list(await session.scalars(select(Transaction)))
+    physical_ids = {t.id for t in txns}
     survivors = {t.id: t for t in logical.transactions}
     suppressed = [t for t in txns if t.id not in survivors]
     raw_descriptors = {t.description for t in suppressed}
@@ -168,8 +169,13 @@ async def _retire_questions(
                     item, "Recurring cluster is supported only by suppressed observations", today
                 )
         elif item.kind == ReviewKind.price_change:
+            evidence = item.payload.get("transaction_id")
             if item.payload.get("series_id") in orphaned:
                 _supersede(item, "Series is supported only by suppressed observations", today)
+            elif type(evidence) is int and evidence not in physical_ids:
+                # the provider withdrew the charge: events ignores this question (its evidence
+                # no longer resolves), so a second could open beside it; a "yes" is rejected
+                _supersede(item, "Transaction is no longer reported by its provider", today)
         elif item.kind == ReviewKind.transfer_pair:
             old_out = item.payload.get("outflow_id")
             out_id = logical.transaction_roots.get(old_out) if type(old_out) is int else None

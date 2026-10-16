@@ -160,6 +160,9 @@ async def remove_item(client: PlaidClient, access_token: str) -> None:
 
 _SYNC_PAGE_SIZE = 500
 _MUTATION_RETRIES = 3
+# the only status under which a replay is the bank's whole history (Plaid also
+# reports NOT_READY, INITIAL_UPDATE_COMPLETE and TRANSACTIONS_UPDATE_STATUS_UNKNOWN)
+_HISTORY_COMPLETE = "HISTORICAL_UPDATE_COMPLETE"
 _LIABILITY_PLAID_TYPES = {"credit", "loan"}
 _PLAID_TYPE_MAP = {
     "credit": AccountType.credit,
@@ -200,7 +203,20 @@ def _parse_account(acct: dict[str, Any], org_name: str) -> AccountDTO:
         type_hint=_map_type(acct.get("type", ""), acct.get("subtype")),
         source="plaid",
         mask=acct.get("mask"),
+        raw=acct,
     )
+
+
+def _replay_floors(txns: list[TransactionDTO]) -> dict[str, date]:
+    """Earliest posted date per account in a complete replay.
+
+    Pending rows are never emitted, so an account that returned only pending (or no)
+    transactions gets no floor, and ingest judges none of its rows.
+    """
+    floors: dict[str, date] = {}
+    for t in txns:
+        floors[t.account_id] = min(t.posted_on, floors.get(t.account_id, t.posted_on))
+    return floors
 
 
 class PlaidAdapter:
@@ -248,7 +264,9 @@ class PlaidAdapter:
             holdings=[],
         )
         if "transactions" in item.products:
-            snap.transactions = await self._fetch_transactions(item)
+            snap.transactions, complete = await self._fetch_transactions(item)
+            if complete:
+                snap.complete_replays = _replay_floors(snap.transactions)
         if "investments" in item.products:
             snap.holdings = await self._fetch_holdings(item)
         return snap
@@ -283,7 +301,7 @@ class PlaidAdapter:
             )
         return holdings
 
-    async def _fetch_transactions(self, item: PlaidItem) -> list[TransactionDTO]:
+    async def _fetch_transactions(self, item: PlaidItem) -> tuple[list[TransactionDTO], bool]:
         for attempt in range(_MUTATION_RETRIES):
             try:
                 return await self._sync_pages(item)
@@ -293,7 +311,7 @@ class PlaidAdapter:
                     raise
         raise AssertionError("unreachable")
 
-    async def _sync_pages(self, item: PlaidItem) -> list[TransactionDTO]:
+    async def _sync_pages(self, item: PlaidItem) -> tuple[list[TransactionDTO], bool]:
         txns: list[TransactionDTO] = []
         cursor = ""
         while True:
@@ -325,9 +343,12 @@ class PlaidAdapter:
             cursor = data.get("next_cursor", "")
             if not data.get("has_more"):
                 break
-        if data.get("transactions_update_status") == "NOT_READY":
+        status = data.get("transactions_update_status")
+        if status == "NOT_READY":
             logger.info(
                 "Plaid item {}: transaction history still preparing; next sync picks it up",
                 item.institution_name or item.item_id,
             )
-        return txns
+        # has_more is false here (the loop above only exits then); a replay is the
+        # bank's whole history only once Plaid says the historical pull finished
+        return txns, status == _HISTORY_COMPLETE
