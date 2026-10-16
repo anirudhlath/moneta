@@ -202,7 +202,7 @@ Unset = no LLM; ambiguous items go to `moneta review` instead.
 | Command | What it does |
 |---|---|
 | `moneta sync [--full]` | Pull latest data and run all pipelines |
-| `moneta power [--history N]` | Income, fixed costs, spending power, spent so far, remaining, per-day, upcoming charges; `--history N` shows a month-over-month income/other inflows/spend/net table instead |
+| `moneta power [--history N]` | Income, fixed costs, spending power, spent so far, remaining, per-day, upcoming charges, coverage notes for accounts whose feed went quiet; `--history N` shows a month-over-month income/other inflows/spend/net table instead |
 | `moneta networth` | Net worth (vested only); unvested listed as potential |
 | `moneta cashflow [--start D --end D]` | Accrual spend vs cash out for a range (default: this month) |
 | `moneta txns [--month M \| --start D --end D] [--account ID] [--merchant NAME] [--sources]` | Combined retained history; source audit includes superseded provider observations without counting them again |
@@ -215,7 +215,7 @@ Unset = no LLM; ambiguous items go to `moneta review` instead.
 | `moneta reconcile [--json]` | Reconcile stored provider overlap and rebuild estimates; no provider fetch |
 | `moneta import vesting <file.csv>` | Vesting data (`symbol,vested_quantity,unvested_quantity`) |
 | `moneta renormalize` | Re-apply improved merchant rules to already-synced data |
-| `moneta status` | Health check: last sync (when, success/failure, what changed), account/open-review counts, configured sources, LLM status |
+| `moneta status` | Health check: last sync (when, success/failure, what changed), account/open-review counts, configured sources, LLM status, coverage notes for accounts whose feed went quiet |
 | `moneta backup [dest]` | Online DB snapshot via SQLite `VACUUM INTO` |
 | `moneta serve` | Run the FastAPI server |
 

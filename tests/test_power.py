@@ -1,5 +1,5 @@
 from calendar import monthrange
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -427,3 +427,19 @@ async def test_data_as_of_reports_newest_successful_run(session: AsyncSession) -
     await session.flush()
     report = await power_report(session, today=date(2026, 7, 7))
     assert report.data_as_of == datetime(2026, 7, 6, 10, 0)
+
+
+async def test_power_reports_quiet_feeds(session: AsyncSession) -> None:
+    today = date(2026, 7, 9)
+    card = await make_account(session, name="Acme Card", mask="1234", type=AccountType.credit)
+    for days_ago in range(14, 201):
+        await make_txn(session, card, posted_on=today - timedelta(days=days_ago))
+    report = await power_report(session, today=today)
+    assert [(s.account_id, s.newest_posted_on) for s in report.stale_accounts] == [
+        (card.id, date(2026, 6, 25))
+    ]
+
+
+async def test_power_reports_no_quiet_feeds_on_an_empty_db(session: AsyncSession) -> None:
+    report = await power_report(session, today=date(2026, 7, 7))
+    assert report.stale_accounts == []

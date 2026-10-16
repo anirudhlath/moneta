@@ -65,6 +65,13 @@ def _staleness_footer(data_as_of: str | None) -> str | None:
     return None
 
 
+def _print_coverage(payload: dict[str, Any]) -> None:
+    """One yellow line per account the server judged stale — a coverage note, not an
+    error. `.get`: an older server in remote mode sends no `stale_accounts`."""
+    for account in payload.get("stale_accounts", []):
+        console.print(f"[yellow]Coverage: {escape(account['note'])}[/yellow]")
+
+
 def _series_line_amount(line: dict[str, Any]) -> str:
     """Amount cell for a power-table series row (design 2026-07-16 §3): non-monthly
     cadences show the per-cycle amount alongside the monthly equivalent; monthly
@@ -232,6 +239,7 @@ def status(json_output: JsonOption = False) -> None:
         f"Aggregators: {aggregators}  ·  "
         f"LLM: {'configured' if st['llm_configured'] else 'not configured'}"
     )
+    _print_coverage(st)
 
 
 @app.command()
@@ -285,6 +293,7 @@ def power(
             for u in r["upcoming"]
         ]
         console.print(f"[dim]Upcoming this month: {' · '.join(parts)}[/dim]")
+    _print_coverage(r)
     if footer := _staleness_footer(r.get("data_as_of")):
         console.print(f"[dim]{footer}[/dim]")
 
