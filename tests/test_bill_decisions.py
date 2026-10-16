@@ -355,3 +355,42 @@ async def test_not_a_bill_on_a_variable_bill_holds_across_syncs(
             assert statuses == {steady_id: SeriesStatus.active, variable_id: SeriesStatus.ended}
         report = await power_report(session, date(2026, 8, 20))
     assert (report.total_fixed_cents if sign < 0 else report.monthly_income_cents) == 4000
+
+
+@pytest.mark.parametrize("sign", [-1, 1], ids=["outflow", "inflow"])
+async def test_not_recurring_answer_spares_a_sibling_series_that_owns_other_charges(
+    session: AsyncSession, sign: int
+) -> None:
+    """Three of the suppressed bill's charges are tagged to the steady bill's series, which
+    also owns its own charges. Untagging them ends only the series left owning nothing."""
+    merchant = "Acme Gym" if sign < 0 else "Jane Doe"
+    _charge, steady, variable = await _two_bills_one_merchant(session, sign)
+    oldest = await session.scalars(
+        select(Transaction)
+        .where(Transaction.series_id == variable.id)
+        .order_by(Transaction.posted_on)
+        .limit(3)
+    )
+    for txn in oldest:
+        txn.series_id = steady.id
+    # the answer exists before the next sync, so nothing has untangled the tags yet
+    answer = recurring_cluster_item(merchant, "outflow" if sign < 0 else "inflow", 8200)
+    session.add(_human(answer, False))
+    await session.commit()
+
+    async def owned(series: RecurringSeries) -> int:
+        count = await session.scalar(
+            select(func.count()).select_from(Transaction).where(Transaction.series_id == series.id)
+        )
+        return count or 0
+
+    assert await owned(steady) == 14 + 3  # its own charges and the three borrowed ones
+
+    await detect_recurring(session, _SwitchLLM("bill"), date(2026, 7, 20))
+
+    assert steady.status == SeriesStatus.active
+    assert await owned(steady) == 14  # its own charges only; the borrowed three are untagged
+    assert variable.status == SeriesStatus.ended
+    assert await owned(variable) == 0
+    report = await power_report(session, date(2026, 7, 20))
+    assert (report.total_fixed_cents if sign < 0 else report.monthly_income_cents) == 4000
