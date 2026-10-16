@@ -46,7 +46,13 @@ from moneta.pipelines.reconcile import (
 from moneta.pipelines.recurring import reactivate_series
 from moneta.pipelines.review import apply_resolution, review_context
 from moneta.pipelines.run import SyncReport, run_sync
-from moneta.queries import bill_amount, classified_links, primary_currency
+from moneta.queries import (
+    StaleAccount,
+    bill_amount,
+    classified_links,
+    primary_currency,
+    stale_accounts,
+)
 from moneta.vesting import apply_vesting, parse_vesting_csv
 from moneta.views.cashflow import accrual_by_month, accrual_spend, cash_out
 from moneta.views.financing import Obligation, compute_obligations
@@ -137,7 +143,8 @@ class CashflowReport(BaseModel):
 
 class PowerMonth(BaseModel):
     month: str  # "2026-07"
-    income_cents: int  # magnitude
+    income_cents: int  # magnitude: inflows tagged to an income series (active or ended)
+    other_inflows_cents: int  # magnitude: every other counted inflow
     spend_cents: int  # magnitude
     net_cents: int  # signed: income - spend
 
@@ -157,6 +164,7 @@ class StatusOut(BaseModel):
     open_reviews: int
     aggregators: list[str]
     llm_configured: bool
+    stale_accounts: list[StaleAccount]
 
 
 class SyncRunOut(BaseModel):
@@ -292,7 +300,8 @@ def create_app(
 
     @app.get("/status")
     async def status(session: Session) -> StatusOut:
-        """Overall health: booleans/counters only, never secrets (design 2026-07-16 §3)."""
+        """Overall health: booleans, counts and per-account coverage notes — never
+        secrets (design 2026-07-16 §3)."""
         last_run = await _latest_sync_run(session)
         last_sync_at = last_run.finished_at if last_run is not None else None
         # last_sync_ok is unknown (None), not False, while the newest run is still in
@@ -300,7 +309,7 @@ def create_app(
         last_sync_ok = (
             last_run.success if last_run is not None and last_run.finished_at is not None else None
         )
-        accounts_count = len((await load_logical_data(session)).accounts)
+        logical = await load_logical_data(session)
         open_reviews_count = (
             await session.execute(
                 select(func.count())
@@ -311,10 +320,11 @@ def create_app(
         return StatusOut(
             last_sync_at=last_sync_at,
             last_sync_ok=last_sync_ok,
-            accounts=accounts_count,
+            accounts=len(logical.accounts),
             open_reviews=open_reviews_count,
             aggregators=[a.source for a in adapters],
             llm_configured=llm is not None,
+            stale_accounts=await stale_accounts(session, logical, date.today()),
         )
 
     @app.get("/power")
@@ -325,21 +335,27 @@ def create_app(
     async def power_history(
         session: Session, months: Annotated[int, Query(ge=1, le=60)] = 6
     ) -> list[PowerMonth]:
-        """Month-over-month income/spend, newest first (the newest row is the current,
-        still-in-progress month). Unlike GET /power, which reports today's recurring-
-        series state, past months here report actual *observed* flows for that
-        calendar month — accrual income/spend over the month's full date range — so
-        a since-cancelled bill or a past raise still shows correctly even though no
-        series reflects it anymore today."""
+        """Month-over-month income/other inflows/spend, newest first (the newest row is
+        the current, still-in-progress month). Unlike GET /power, which reports today's
+        recurring-series state, each month here reports the *observed* money for that
+        calendar month, so a since-cancelled bill or a past raise still shows correctly.
+        Today's series tags only decide the split of inflows: income is inflows tagged to
+        an income series (non-discretionary inflow series, active or ended), so marking a
+        paycheck series a habit today moves its past paychecks to other_inflows_cents.
+        Every other counted inflow is other_inflows_cents, and net is income - spend."""
         today = date.today()
         links = await classified_links(session)
         primary = await primary_currency(session)
         rows = await accrual_by_month(session, months, today, links=links, primary=primary)
         return [
             PowerMonth(
-                month=month, income_cents=income, spend_cents=spend, net_cents=income - spend
+                month=row.month,
+                income_cents=row.income_cents,
+                other_inflows_cents=row.other_inflows_cents,
+                spend_cents=row.spend_cents,
+                net_cents=row.income_cents - row.spend_cents,
             )
-            for month, income, spend in rows
+            for row in rows
         ]
 
     @app.get("/networth")

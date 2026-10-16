@@ -905,7 +905,7 @@ def test_power_history_runs_in_process(tmp_path: Path, monkeypatch) -> None:  # 
     assert "Spending power" not in result.output  # --history replaces the normal view
 
 
-def test_power_history_table_renders_month_income_spend_net(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_power_history_table_renders_month_income_other_spend_net(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     def fake_request(
         method: str,
         path: str,
@@ -917,25 +917,34 @@ def test_power_history_table_renders_month_income_spend_net(monkeypatch) -> None
             {
                 "month": "2026-07",
                 "income_cents": 300000,
+                "other_inflows_cents": 12000,
                 "spend_cents": 5000,
                 "net_cents": 295000,
             },
             {
                 "month": "2026-06",
                 "income_cents": 250000,
+                "other_inflows_cents": 0,
                 "spend_cents": 260000,
                 "net_cents": -10000,
             },
-            {"month": "2026-05", "income_cents": 250000, "spend_cents": 4000, "net_cents": 246000},
+            {
+                "month": "2026-05",
+                "income_cents": 250000,
+                "other_inflows_cents": 0,
+                "spend_cents": 4000,
+                "net_cents": 246000,
+            },
         ]
 
     monkeypatch.setattr("moneta.cli.main.request", fake_request)
     result = runner.invoke(app, ["power", "--history", "3"])
     assert result.exit_code == 0
-    for header in ("Month", "Income", "Spend", "Net"):
+    for header in ("Month", "Income", "Other inflows", "Spend", "Net"):
         assert header in result.output
     assert "2026-07" in result.output
     assert "$3000.00" in result.output  # income: fmt_money
+    assert "$120.00" in result.output  # other inflows: fmt_money
     assert "-$50.00" in result.output  # spend: fmt_outflow(5000)
     assert "$2950.00" in result.output  # net: fmt_money, positive
     assert "-$100.00" in result.output  # net: fmt_money, negative month
@@ -1909,3 +1918,117 @@ def test_networth_renders_logical_vesting_warnings(
     assert result.exit_code == 0
     assert "Conflicting vesting" in result.output
     assert "requires review" in result.output
+
+
+def _seed_quiet_card(tmp_path: Path, name: str = "Acme Card") -> str:
+    """A daily-use card silent for two weeks; returns the date it went quiet."""
+    today = date.today()
+
+    async def seed(session: AsyncSession) -> None:
+        card = await make_account(session, name=name, mask="1234", type=AccountType.credit)
+        for days_ago in range(14, 201):
+            await make_txn(session, card, posted_on=today - timedelta(days=days_ago))
+
+    _seed_db(tmp_path, seed)
+    return (today - timedelta(days=14)).isoformat()
+
+
+def _coverage_line(quiet_since: str, name: str = "Acme Card") -> str:
+    return (
+        f"Coverage: {name} ··1234 has no transactions since {quiet_since} "
+        "(usually posts ~4 days a week) — recent spending on it may be missing."
+    )
+
+
+def test_power_prints_coverage_note_for_a_quiet_feed(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    quiet_since = _seed_quiet_card(tmp_path)
+    result = runner.invoke(app, ["power"])
+    assert result.exit_code == 0
+    flat = " ".join(result.output.split())  # rich wraps long lines at the terminal width
+    assert _coverage_line(quiet_since) in flat
+
+
+def test_status_prints_coverage_note_for_a_quiet_feed(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _isolate(monkeypatch, tmp_path)
+    quiet_since = _seed_quiet_card(tmp_path)
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert _coverage_line(quiet_since) in " ".join(result.output.split())
+
+
+def test_coverage_note_keeps_brackets_in_account_name(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """An account name is data: rich would read `[joint]` as markup and drop it."""
+    _isolate(monkeypatch, tmp_path)
+    quiet_since = _seed_quiet_card(tmp_path, name="Acme [joint] Card")
+    expected = _coverage_line(quiet_since, name="Acme [joint] Card")
+    for command in ("power", "status"):
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0
+        assert expected in " ".join(result.output.split())
+
+
+def test_power_tolerates_a_server_without_coverage_notes(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Remote mode against an older server: no `stale_accounts` key, no crash."""
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        return {
+            "month": "2026-07",
+            "monthly_income_cents": 0,
+            "income_sources": [],
+            "fixed_costs": [],
+            "total_fixed_cents": 0,
+            "spending_power_cents": 0,
+            "spent_so_far_cents": 0,
+            "remaining_cents": 0,
+            "days_left": 23,
+            "per_day_remaining_cents": 0,
+            "upcoming": [],
+            "data_as_of": None,
+        }
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["power"])
+    assert result.exit_code == 0
+    assert "Spending power" in result.output
+    assert "Coverage:" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("unlinked", "line"),
+    [(2, "Dropped 2 stale transfer links."), (1, "Dropped 1 stale transfer link."), (0, None)],
+)
+def test_sync_reports_dropped_transfer_links(  # type: ignore[no-untyped-def]
+    tmp_path: Path, monkeypatch, unlinked: int, line: str | None
+) -> None:
+    _isolate(monkeypatch, tmp_path)
+
+    def fake_request(
+        method: str,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        if path == "/sync":
+            return {
+                "ingest": {"new_transactions": 0},
+                "transfers": {"linked": 0, "review": 0, "unlinked": unlinked},
+                "recurring": {"new_series": 0},
+                "events": 0,
+                "auto_resolved": 0,
+                "verify": {"verified": 0, "flagged": 0},
+            }
+        return []
+
+    monkeypatch.setattr("moneta.cli.main.request", fake_request)
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 0
+    if line is None:
+        assert "Dropped" not in result.output
+    else:
+        assert line in result.output
