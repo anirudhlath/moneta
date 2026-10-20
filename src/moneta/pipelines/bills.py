@@ -15,8 +15,10 @@ from moneta.cadence import (
     CADENCE_DAYS,
     TOLERANCE,
     advance_expected_on,
+    grid_spread,
     match_across_a_miss,
     match_cadence,
+    phase_spread,
 )
 from moneta.models import BILL_TOLERANCE, Cadence, Transaction
 
@@ -46,12 +48,21 @@ def amount_bands(txns: Sequence[Transaction]) -> list[list[Transaction]]:
 
 
 def _tracks(band: Sequence[Transaction], cadence: Cadence) -> list[list[Transaction]]:
-    """Greedy: each charge extends the track whose next expected date is nearest."""
+    """Greedy: each charge extends the track whose next expected date is nearest, the
+    nearer price breaking a tie. A track takes one charge a day, bar a double-post."""
     tracks: list[list[Transaction]] = []
     for t in _by_date(band):
-        same_day = next((tr for tr in tracks if tr[-1].posted_on == t.posted_on), None)
-        # a double-post is the same occurrence, unless another track expects a charge
-        # around now: then two same-price bills co-posted, and expectation decides
+        same_day = next(
+            (
+                tr
+                for tr in tracks
+                if tr[-1].posted_on == t.posted_on and tr[-1].amount_cents == t.amount_cents
+            ),
+            None,
+        )
+        # a double-post repeats the charge's price on its day and is the same occurrence,
+        # unless another track expects a charge around now: then two same-price bills
+        # co-posted, and expectation decides
         if same_day is not None and not any(
             abs((t.posted_on - advance_expected_on(tr[-1].posted_on, cadence)).days)
             <= TOLERANCE[cadence]
@@ -61,11 +72,14 @@ def _tracks(band: Sequence[Transaction], cadence: Cadence) -> list[list[Transact
             same_day.append(t)
             continue
         best: list[Transaction] | None = None
-        best_gap = TOLERANCE[cadence] + 1
+        best_key = (TOLERANCE[cadence] + 1, 0)
         for track in tracks:
+            if track[-1].posted_on == t.posted_on:
+                continue
             gap = abs((t.posted_on - advance_expected_on(track[-1].posted_on, cadence)).days)
-            if gap < best_gap:
-                best, best_gap = track, gap
+            key = (gap, abs(t.amount_cents - track[-1].amount_cents))
+            if key < best_key:
+                best, best_key = track, key
         if best is None:
             tracks.append([t])
         else:
@@ -73,17 +87,53 @@ def _tracks(band: Sequence[Transaction], cadence: Cadence) -> list[list[Transact
     return tracks
 
 
-def concurrent_tracks(band: Sequence[Transaction]) -> list[list[Transaction]] | None:
-    """The band's simultaneous subscriptions, or None when it is one stream.
+def _bill_track(track: Sequence[Transaction], cadence: Cadence) -> bool:
+    """A track that is a bill: 3+ dates on one schedule (`phase_spread` within twice
+    TOLERANCE) at one price (every charge within 20% of the track's median)."""
+    dates = _dates(track)
+    if len(dates) < _MIN_TRACK_DATES or phase_spread(dates, cadence) > 2 * TOLERANCE[cadence]:
+        return False
+    median = statistics.median(abs(t.amount_cents) for t in track)
+    return all(abs(abs(t.amount_cents) - median) <= median * BILL_TOLERANCE for t in track)
 
-    Splits only when every charge sits on a track of 3+ dates and two tracks overlap
-    in time — a moved billing day is one track ending where another starts.
+
+def _one_fixed_schedule(bills: Sequence[Sequence[Transaction]]) -> bool:
+    """Monthly tracks that are one weekly or biweekly stream with skipped periods (a
+    paycheck missing a payday chains into drifting monthly tracks): every charge's place
+    in the period lies within TOLERANCE days of the others' (a fixed payday barely moves,
+    while a monthly bill moves two or three days along a fixed period every month), and no
+    two come closer than a period less twice its tolerance, so two bills on one day are
+    never one stream."""
+    dates = sorted(d for tr in bills for d in _dates(tr))
+    closest = min((b - a).days for a, b in itertools.pairwise(dates))
+    return any(
+        closest >= CADENCE_DAYS[cadence] - 2 * TOLERANCE[cadence]
+        and grid_spread(dates, cadence) <= TOLERANCE[cadence]
+        for cadence in (Cadence.weekly, Cadence.biweekly)
+    )
+
+
+def concurrent_tracks(band: Sequence[Transaction]) -> list[list[Transaction]] | None:
+    """The band's simultaneous bills, or None when it is one stream.
+
+    Splits when two bill tracks (`_bill_track`) overlap in time — a moved billing day is
+    one track ending where another starts — and charges on no bill track number at most
+    half the bills' charges between the first bill's start and the last one's end. Those
+    one-off charges are left out of every track, so they stay spending. A band whose
+    newest weekly or biweekly run holds most of its dates is one stream, and so are
+    monthly bill tracks that keep one fixed schedule (`_one_fixed_schedule`).
     """
-    match = match_cadence(_dates(band))
-    if match is not None and match[0] in (Cadence.weekly, Cadence.biweekly):
+    dates = _dates(band)
+    match = match_cadence(dates)
+    # a short run at the tail of several monthly bills is a coincidence of their days
+    if (
+        match is not None
+        and match[0] in (Cadence.weekly, Cadence.biweekly)
+        and 2 * sum(1 for d in dates if d >= match[1]) > len(dates)
+    ):
         return None
 
-    # Try monthly; only try annual if monthly produced no valid track (3+ dates).
+    # Try monthly; only try annual if monthly produced no track of 3+ dates.
     monthly_tracks = _tracks(band, Cadence.monthly)
     has_valid_monthly = any(len(_dates(tr)) >= _MIN_TRACK_DATES for tr in monthly_tracks)
 
@@ -91,14 +141,19 @@ def concurrent_tracks(band: Sequence[Transaction]) -> list[list[Transaction]] | 
 
     for cadence in cadences:
         tracks = monthly_tracks if cadence == Cadence.monthly else _tracks(band, Cadence.annual)
-
-        if len(tracks) < 2 or any(len(_dates(tr)) < _MIN_TRACK_DATES for tr in tracks):
-            continue
-        if any(
+        bills = [tr for tr in tracks if _bill_track(tr, cadence)]
+        if not any(
             a[0].posted_on <= b[-1].posted_on and b[0].posted_on <= a[-1].posted_on
-            for a, b in itertools.combinations(tracks, 2)
+            for a, b in itertools.combinations(bills, 2)
         ):
-            return [_by_date(tr) for tr in tracks]
+            continue
+        if cadence == Cadence.monthly and _one_fixed_schedule(bills):
+            return None
+        start, end = min(tr[0].posted_on for tr in bills), max(tr[-1].posted_on for tr in bills)
+        on_bills = {t.id for tr in bills for t in tr}
+        one_offs = sum(1 for t in band if start <= t.posted_on <= end and t.id not in on_bills)
+        if 2 * one_offs <= len(on_bills):
+            return [_by_date(tr) for tr in bills]
     return None
 
 

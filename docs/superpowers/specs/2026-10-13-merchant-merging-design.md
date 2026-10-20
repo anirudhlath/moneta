@@ -132,6 +132,22 @@ group into candidate bills:
    Two same-price subscriptions billing on different days become two units. A
    subscription whose billing day moved is one track that ends where the other
    starts; those two don't overlap, so the band stays whole.
+
+   *Amended 2026-10-19.* "Every charge lands on a track" let one stray charge
+   keep several subscriptions together, and "no weekly or biweekly cadence"
+   let two monthly bills half a month apart, or a weekly-looking tail of three
+   dates, stand for the whole band. Now: a charge is attached by nearest
+   expected date, then nearest price, one per track per day (a double-post
+   repeats the price). A *bill track* has three or more dates on one schedule
+   (every date within tolerance of one day of the month) at one price (every
+   charge within 20% of the track's median). The band splits into its bill
+   tracks when two of them overlap and the charges on no bill track, counted
+   between the first bill's start and the last one's end, number at most half
+   the bills' charges; those charges are ordinary spending. A weekly or
+   biweekly run keeps the band whole only when it holds most of the band's
+   dates, and a biweekly run must keep one 14-day schedule. Bill tracks whose
+   dates all keep one weekly or biweekly schedule, never two charges a few days
+   apart, are one stream that skipped some periods, so the band stays whole.
 3. **Split or not.** A unit is *scheduled* when `match_cadence` finds a run of
    three or more dates. The group splits when tracks were split, or when a
    scheduled unit has other charges of the group inside its run's date span

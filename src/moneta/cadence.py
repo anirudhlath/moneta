@@ -1,3 +1,4 @@
+import itertools
 import statistics
 from calendar import monthrange
 from datetime import date, timedelta
@@ -44,17 +45,38 @@ def _add_months(d: date, months: int) -> date:
     return date(year, month, min(d.day, monthrange(year, month)[1]))
 
 
-def advance_expected_on(d: date, cadence: Cadence) -> date:
-    """One period after d — calendar-aware for monthly/annual so day-of-month holds."""
+def periods_after(d: date, cadence: Cadence, n: int) -> date:
+    """n periods after d — calendar-aware for monthly/annual so day-of-month holds."""
     match cadence:
         case Cadence.weekly:
-            return d + timedelta(days=7)
+            return d + timedelta(days=7 * n)
         case Cadence.biweekly:
-            return d + timedelta(days=14)
+            return d + timedelta(days=14 * n)
         case Cadence.monthly:
-            return _add_months(d, 1)
+            return _add_months(d, n)
         case Cadence.annual:
-            return _add_months(d, 12)
+            return _add_months(d, 12 * n)
+
+
+def advance_expected_on(d: date, cadence: Cadence) -> date:
+    """One period after d."""
+    return periods_after(d, cadence, 1)
+
+
+def phase_spread(dates: list[date], cadence: Cadence) -> int:
+    """How far consecutive charges, one period apart, drift from a single schedule: the
+    spread in days of each date's offset from the slot n periods after the first. Every
+    date within TOLERANCE of one schedule keeps it at or under twice TOLERANCE."""
+    offsets = [(d - periods_after(dates[0], cadence, n)).days for n, d in enumerate(dates)]
+    return max(offsets) - min(offsets)
+
+
+def grid_spread(dates: list[date], cadence: Cadence) -> int:
+    """The fewest days of a weekly or biweekly period that hold every date's place in it:
+    small when the dates keep one fixed schedule, even across skipped periods."""
+    days = CADENCE_DAYS[cadence]
+    places = sorted({(d - dates[0]).days % days for d in dates})
+    return days - max(b - a for a, b in itertools.pairwise([*places, places[0] + days]))
 
 
 def match_cadence(dates: list[date]) -> tuple[Cadence, date] | None:
@@ -69,6 +91,10 @@ def match_cadence(dates: list[date]) -> tuple[Cadence, date] | None:
         tol = TOLERANCE[cadence]
         start = len(dates) - 1
         while start > 0 and abs(gaps[start - 1] - days) <= tol * 2:
+            # a biweekly run keeps one fixed schedule too: two monthly bills half a month
+            # apart pass every gap test, but drift off a 14-day schedule
+            if cadence == Cadence.biweekly and phase_spread(dates[start - 1 :], cadence) > tol * 2:
+                break
             start -= 1
         if len(dates) - start < _MIN_OCCURRENCES:
             continue

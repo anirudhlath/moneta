@@ -1,6 +1,13 @@
 from datetime import date, timedelta
 
-from moneta.cadence import TOLERANCE, advance_expected_on, match_across_a_miss
+from moneta.cadence import (
+    TOLERANCE,
+    advance_expected_on,
+    grid_spread,
+    match_across_a_miss,
+    match_cadence,
+    phase_spread,
+)
 from moneta.models import Cadence, Transaction
 from moneta.pipelines.bills import amount_bands, concurrent_tracks, split_bills, whole_bill
 
@@ -36,9 +43,152 @@ def test_moved_billing_day_is_one_stream() -> None:
     assert concurrent_tracks(band) is None
 
 
-def test_weekly_band_is_never_split_into_tracks() -> None:
+def test_a_weekly_stream_is_not_split_into_tracks() -> None:
     band = [_t(date(2026, 1, 5) + timedelta(days=7 * i), -500) for i in range(12)]
     assert concurrent_tracks(band) is None
+
+
+def test_a_weekly_stream_that_skipped_a_week_is_not_split_into_monthly_bills() -> None:
+    # the skip leaves a short weekly run, and the weeks chain into four drifting monthly
+    # tracks, but every charge still sits on one 7-day schedule
+    weeks = [date(2026, 1, 6) + timedelta(days=7 * i) for i in range(17)]
+    weeks.remove(date(2026, 4, 7))
+    assert split_bills([_t(d, -2500) for d in weeks]) is None
+
+
+def _pair(first: tuple[int, int], second: tuple[int, int], months: int) -> list[Transaction]:
+    (day_a, cents_a), (day_b, cents_b) = first, second
+    pair = [
+        *_monthly(day_a, range(1, months + 1), cents_a),
+        *_monthly(day_b, range(1, months + 1), cents_b),
+    ]
+    return sorted(pair, key=lambda t: (t.posted_on, t.id))
+
+
+def test_bills_a_few_days_apart_split_after_three_months() -> None:
+    # no fixed weekly or biweekly stream posts two charges on one day or two days apart
+    assert split_bills(_pair((11, -1000), (11, -1150), 3)) is not None
+    assert split_bills(_pair((11, -2000), (13, -2000), 3)) is not None
+
+
+def test_bills_half_a_month_apart_split_once_they_drift_off_a_fortnight() -> None:
+    # for five months the 9th and the 24th keep a 14-day schedule as well as a fortnightly
+    # bill would; by the sixth they have drifted off it
+    assert split_bills(_pair((9, -4700), (24, -5300), 5)) is None
+    assert split_bills(_pair((9, -4700), (24, -5300), 6)) is not None
+
+
+def test_phase_spread_measures_drift_from_one_schedule() -> None:
+    fortnights = [date(2026, 1, 2) + timedelta(days=14 * i) for i in range(6)]
+    assert phase_spread(fortnights, Cadence.biweekly) == 0
+    # a calendar month keeps its day, clamped through a short month
+    month_ends = [date(2026, 1, 31), date(2026, 2, 28), date(2026, 3, 31)]
+    assert phase_spread(month_ends, Cadence.monthly) == 0
+    jittered = [date(2026, 1, 2), date(2026, 1, 14), date(2026, 2, 1)]
+    assert phase_spread(jittered, Cadence.biweekly) == 4
+
+
+def test_grid_spread_holds_a_fixed_schedule_across_skipped_periods() -> None:
+    # fortnights with two skipped, one a day late: every date keeps its place in the period
+    fortnights = [date(2026, 1, 2) + timedelta(days=14 * i) for i in (0, 1, 3, 4, 7)]
+    fortnights[2] += timedelta(days=1)
+    assert grid_spread(fortnights, Cadence.biweekly) == 1
+    # places 13 and 0 sit a day apart across the period's end
+    assert grid_spread([date(2026, 1, 2), date(2026, 1, 29)], Cadence.biweekly) == 1
+    # a day of the month moves two or three days along a 14-day schedule every month
+    months = [date(2026, m, 9) for m in range(1, 7)]
+    assert grid_spread(months, Cadence.biweekly) > 2 * TOLERANCE[Cadence.biweekly]
+
+
+def test_a_biweekly_run_keeps_one_fixed_schedule() -> None:
+    # bills on the 9th and the 24th pass every fortnightly gap test, but slip a day or two
+    # off a 14-day schedule each month: the run holds only the newest charges that keep one
+    halves = [date(2026, month, day) for month in range(1, 7) for day in (9, 24)]
+    assert match_cadence(halves) == (Cadence.biweekly, date(2026, 4, 9))
+
+
+def test_a_biweekly_stream_with_shifted_paydays_keeps_its_whole_run() -> None:
+    # a payday moved a day or two early for a holiday is still on the same schedule
+    paydays = [date(2026, 1, 2) + timedelta(days=14 * i) for i in range(12)]
+    paydays[3] -= timedelta(days=2)
+    paydays[8] -= timedelta(days=1)
+    assert match_cadence(paydays) == (Cadence.biweekly, paydays[0])
+
+
+def _ids_of(bills: list[list[Transaction]] | None) -> list[list[int]]:
+    assert bills is not None
+    return sorted([t.id for t in b] for b in bills)
+
+
+def test_monthly_bills_half_a_month_apart_split_into_two_bills() -> None:
+    # two monthly bills at prices within 20% read as one biweekly stream; each keeps its own
+    # day of the month, and a one-off charge between them is no bill
+    early = _monthly(9, range(3, 10), -4700)
+    late = _monthly(24, range(3, 10), -5300)
+    one_off = _t(date(2026, 6, 2), -5000)
+    bills = split_bills(sorted([*early, *late, one_off], key=lambda t: t.posted_on))
+    assert _ids_of(bills) == _ids_of([early, late])
+
+
+def test_mixed_price_subscriptions_split_despite_a_weekly_looking_tail() -> None:
+    # three subscriptions whose prices chain into one band, two of them billed the same
+    # day; a one-off charge between them makes the newest three dates read weekly
+    storage = _monthly(11, range(4, 11), -1000)
+    music = _monthly(11, range(6, 11), -1150)
+    video = _monthly(28, range(4, 10), -1300)
+    one_off = _t(date(2026, 10, 2), -1100)
+    group = sorted([*storage, *music, *video, one_off], key=lambda t: (t.posted_on, t.id))
+    assert _ids_of(split_bills(group)) == _ids_of([storage, music, video])
+
+
+def test_same_day_charges_at_different_prices_are_not_a_double_post() -> None:
+    # two subscriptions billed the same day; after the first month the dearer one posts
+    # first, and the nearer price, not the posting order, picks its track
+    cheap: list[Transaction] = []
+    dear: list[Transaction] = []
+    for month in range(4, 9):
+        pair = ((-1000, cheap), (-1150, dear)) if month == 4 else ((-1150, dear), (-1000, cheap))
+        for cents, bill in pair:
+            bill.append(_t(date(2026, month, 11), cents))
+    group = sorted([*cheap, *dear], key=lambda t: (t.posted_on, t.id))
+    assert _ids_of(concurrent_tracks(group)) == _ids_of([cheap, dear])
+
+
+def test_pay_on_the_first_and_the_fifteenth_is_two_monthly_streams() -> None:
+    # twice a month is 24 paydays a year, not a fortnightly 26
+    first = _monthly(1, range(1, 10), 150000)
+    fifteenth = _monthly(15, range(1, 10), 150000)
+    bills = split_bills(sorted([*first, *fifteenth], key=lambda t: t.posted_on))
+    assert _ids_of(bills) == _ids_of([first, fifteenth])
+
+
+def test_a_biweekly_stream_that_skipped_paydays_is_not_split_into_monthly_bills() -> None:
+    # two paydays went out at another amount, so this band skips them: its fortnights then
+    # chain into monthly tracks that drift, but every charge still sits on one 14-day grid
+    paydays = [date(2026, 1, 2) + timedelta(days=14 * i) for i in range(20)]
+    group = [_t(d, 90000 if i in (6, 13) else 180000 + 1000 * i) for i, d in enumerate(paydays)]
+    assert split_bills(group) is None
+
+
+def test_one_off_charges_may_number_at_most_half_the_bills_charges() -> None:
+    # two bills on the 5th and the 20th, and one-off charges at the same price between them
+    bills = [_t(date(2026, m, d), -2500) for m in range(1, 7) for d in (5, 20)]
+    days = [(1, 12), (1, 28), (2, 13), (3, 27), (4, 11), (5, 29)]
+    one_offs = [_t(date(2026, m, d), -2500) for m, d in days]
+    group = sorted([*bills, *one_offs], key=lambda t: t.posted_on)
+    assert _ids_of(concurrent_tracks(group)) == _ids_of([bills[::2], bills[1::2]])
+    busier = sorted([*group, _t(date(2026, 6, 13), -2500)], key=lambda t: t.posted_on)
+    assert concurrent_tracks(busier) is None
+
+
+def test_a_track_whose_price_wanders_is_no_bill() -> None:
+    # same day each month, but one track's charges sit more than 20% from their median
+    steady = _monthly(3, range(1, 6), -1500)
+    wandering = [
+        _t(date(2026, m, 18), c)
+        for m, c in zip(range(1, 6), (-1100, -1300, -1500, -1750, -1750), strict=True)
+    ]
+    assert concurrent_tracks(sorted([*steady, *wandering], key=lambda t: t.posted_on)) is None
 
 
 def test_subscription_with_orders_splits_off_the_subscription() -> None:
