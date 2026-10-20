@@ -387,7 +387,8 @@ The flagship view for the current month:
 - **Spending power** = income − fixed costs.
 - **Spent so far / remaining** — discretionary spend this month (accrual: credit purchases
   count when made, not when the card is paid). A financing card's purchases don't count:
-  its payments are a fixed cost instead (`financed purchase` in `moneta txns`).
+  its payments are a fixed cost instead (`financed purchase` in `moneta txns`). Neither does
+  a [pass-through merchant](#pass-through-merchants)'s.
 - **Per day (N days left)** — `remaining ÷ days left in month` (today through month-end,
   inclusive; the last day of the month shows 1 day left). Negative remaining shows a negative
   per-day figure — no clamping to zero.
@@ -411,9 +412,10 @@ paychecks count in the months they paid. From the next sync after you answer "no
 that series keeps no tagged charges, so its inflows count as Other inflows, never income.
 **Other inflows** is every other
 inflow that is counted at all — refunds, money from friends, one-off deposits — shown so nothing
-disappears, but not income. Three kinds of transaction are left out of every column: a leg of a
-transfer link, a transaction on an account that isn't checking, savings or credit (a loan or
-brokerage account, say), and one in a currency other than your primary currency. **Net** =
+disappears, but not income. Four kinds of transaction are left out of every column: a leg of a
+transfer link, a [pass-through merchant](#pass-through-merchants)'s transaction, a transaction
+on an account that isn't checking, savings or credit (a loan or brokerage account, say), and
+one in a currency other than your primary currency. **Net** =
 income − spend; other inflows are left out of it.
 
 ### `moneta txns` — auditing the numbers
@@ -427,6 +429,8 @@ moneta txns --month 2026-06          # a specific month
 moneta txns --start 2026-06-01 --end 2026-06-15 --account 3
 moneta txns --merchant netflix       # case-insensitive substring match
 moneta txns --sources               # include original provider observations
+moneta txns --pass-through "Acme Lofts"        # someone else's money: never spend, a bill or income
+moneta txns --clear-pass-through "Acme Lofts"  # count it again
 ```
 
 `--month` and `--start`/`--end` are mutually exclusive. Counted rows show a plain `✓`;
@@ -435,6 +439,7 @@ excluded rows render dim with the reason in the same column — one of:
 | Reason | Meaning |
 |---|---|
 | `superseded provider observation` | Another provider's observation of the same transaction; retained for audit, excluded from totals (`provider_duplicate` in JSON) |
+| `pass-through` | A transaction, in either direction, of a merchant you ruled [pass-through](#pass-through-merchants) |
 | `inflow` | Money coming in, not spend |
 | `transfer` | The inflow leg of an internal transfer (always excluded) |
 | `loan payment` | Outflow leg of a transfer into a loan/financing account (counted as a fixed cost instead, in `power`) |
@@ -463,6 +468,36 @@ The footer has two lines:
   number even though it's still "through today" for that filter. The first line does *not*
   claim any parity — a full-month view includes future-dated rows that `power` hasn't
   counted yet, and a past month has no "through today" concept at all.
+
+### Pass-through merchants
+
+Some money only passes through your accounts: you pay a partner's rent and they pay you
+back, say. That rent is not your spending, and once it has charged three months running
+it would otherwise read as a monthly bill. Rule the merchant pass-through:
+
+```bash
+moneta txns --pass-through "Acme Lofts"
+```
+
+The name matches a merchant as `moneta txns` shows it, ignoring case and surrounding spaces;
+a name no transaction carries is an error. From then on every transaction of that merchant,
+money in or out, is in no figure: not `power`'s spent-so-far, income or fixed costs, not
+`power --history`, not `moneta cashflow`. `moneta txns` still lists each one, as
+`pass-through`. `power` drops the merchant's series at once, and the ruling closes any open
+question about its bills or their prices. The next sync ends those series, untags their
+charges and never builds a series from them. The money that pays you back usually comes from
+another name (a payment app), so it stays an Other inflow in `power --history`; it was never
+income, and Moneta does not pair it with the payment.
+
+`moneta txns --clear-pass-through "Acme Lofts"` counts the merchant again and reopens the
+questions the ruling closed. Cleared before a sync ran, it leaves everything as it was; after
+one, the next sync reads its charges afresh and revives a series whose charges are current. The
+two flags are mutually exclusive, and neither combines with `--json`. The ruling follows the
+merchant through a merchant-name merge, so it then covers every name merged into it, and to a
+name you (or auto-review) give its descriptor in `moneta review` once no transaction keeps the
+old one. Over the API it is
+`POST /merchants/pass-through` with `{"merchant": NAME, "pass_through": true|false}`, returning
+the stored name and the ruling, or 404 for an unknown name.
 
 ### How transfers are matched
 
@@ -509,7 +544,8 @@ Liquid balances + **vested** holdings − liabilities. Unvested shares are liste
 ### `moneta cashflow [--start YYYY-MM-DD] [--end YYYY-MM-DD]`
 
 Accrual spend vs. actual cash out for a range (defaults to this month) — how much you
-committed vs. how much left your accounts.
+committed vs. how much left your accounts. A [pass-through merchant](#pass-through-merchants)'s
+transactions are in neither.
 
 ### `moneta recurring`
 
@@ -706,6 +742,7 @@ script, and returns before any table is built. `moneta status --json` merges
 which is `null` when no sync has ever run (the rest of the object is still
 populated). Combining `--json` with a write flag
 (`recurring --end/--not-a-bill/--habit/--re-review/--reactivate`,
+`txns --pass-through/--clear-pass-through`,
 `accounts --set-type/--set-promo/--set-financing/--link-source/--to/--unlink-source`) is a clean error — no
 request fires.
 `accounts --sources --json` and `txns --sources --json` are read-only audit output.
@@ -899,6 +936,7 @@ Files in the config dir (all owner-only, dir is 0700):
 | Merchant names look wrong | Answer the merchant questions in `moneta review`; naming rules and merchant merging already run on every sync, and `moneta renormalize` applies them on demand without a sync. A question disappears by itself once its descriptor no longer appears on any transaction or the rules already name it cleanly. |
 | One bill shows up as two series, or two bills as one | Merging is by name: a truncated name that is not a prefix of the full one (`Acme Fitnriverton`) stays split, and a per-charge code (`Acmeapp-Qwertyui`) is dropped only once two different codes appear for the merchant. Duplicates that a merge does produce are folded automatically on the next sync. `moneta recurring --end <ID>` only ends a series, and a series that is still charging revives. Subscriptions at one merchant split only once each has three months on its own day at a steady price (about six months for two billed half a month apart), so a new one counts as ordinary spending until then. |
 | A subscription shows as active but is cancelled | `moneta recurring --end <ID>`. |
+| Money you pay on someone else's behalf (and they repay) counts as your spending, or became a bill | `moneta txns --pass-through "<merchant>"` — none of that merchant's transactions count anywhere, and its series stop counting at once (the next sync ends them). See [Pass-through merchants](#pass-through-merchants). |
 | A series was wrongly confirmed as a recurring bill | `moneta recurring --not-a-bill <ID>` — ends it and suppresses it from every future sync; from the next sync its charges are untagged (they count as spend, or as Other inflows if money came in). |
 | A recurring series is really discretionary spending | `moneta recurring --habit <ID>` — reactivates it if ended, tags it discretionary (not a fixed cost). When the merchant has a single bill, the answer keeps applying as long as its amount is among the bill's newest charges, so a habit whose typical spend drifts stays a habit. |
 | A series ended but the bill actually resumed | `moneta recurring --reactivate <ID>` — flips it straight back to active, no review-queue detour. |

@@ -38,6 +38,7 @@ from moneta.models import (
 )
 from moneta.pipelines.account_overlap import set_account_link
 from moneta.pipelines.events import apply_price_change
+from moneta.pipelines.normalize import move_pass_through_rulings
 from moneta.pipelines.recurring import amount_window, newest_run
 from moneta.pipelines.transaction_overlap import (
     human_recurring_refs,
@@ -48,6 +49,7 @@ from moneta.pipelines.transfers import effective_transfer_choices
 from moneta.queries import (
     bill_amount,
     foreign_series_ids,
+    pass_through_merchants,
     price_review_matches_currency,
     primary_currency,
 )
@@ -372,10 +374,23 @@ async def apply_resolution(
         else:
             alias.merchant = merchant
             alias.source = source
-        for txn in (
-            await session.execute(select(Transaction).where(Transaction.description == raw))
-        ).scalars():
+        renamed = list(
+            await session.scalars(select(Transaction).where(Transaction.description == raw))
+        )
+        old_names = {t.merchant for t in renamed if t.merchant not in (None, merchant)}
+        for txn in renamed:
             txn.merchant = merchant
+        # a pass-through ruling follows its merchant to the name given here, as it
+        # follows a merge, once no transaction carries the old name
+        gone = {
+            old
+            for old in old_names & await pass_through_merchants(session)
+            if await session.scalar(
+                select(Transaction.id).where(Transaction.merchant == old).limit(1)
+            )
+            is None
+        }
+        await move_pass_through_rulings(session, {old: merchant for old in gone})
     elif item.kind == ReviewKind.transfer_pair and "inflow_id" in resolution:
         logical = await load_logical_data(session)
         raw_out = item.payload.get("outflow_id")

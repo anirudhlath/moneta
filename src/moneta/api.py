@@ -43,7 +43,7 @@ from moneta.pipelines.reconcile import (
     rebuild_logical_derived,
     reconcile_provider_overlap,
 )
-from moneta.pipelines.recurring import reactivate_series
+from moneta.pipelines.recurring import reactivate_series, rule_pass_through
 from moneta.pipelines.review import apply_resolution, review_context
 from moneta.pipelines.run import SyncReport, run_sync
 from moneta.queries import (
@@ -75,6 +75,11 @@ class AccountPatch(BaseModel):
     type: AccountType | None = None
     promo_expires_on: date | None = None
     financing_mode: bool | None = None
+
+
+class PassThroughRuling(BaseModel):
+    merchant: str
+    pass_through: bool
 
 
 class SourceAccountOut(AccountOut):
@@ -127,6 +132,7 @@ _REQUIRED_BOOL: dict[ReviewKind, str] = {
     ReviewKind.recurring_cluster: "is_recurring",
     ReviewKind.price_change: "is_price_change",
     ReviewKind.financing_account: "financing",
+    ReviewKind.pass_through: "pass_through",
 }
 
 
@@ -518,6 +524,26 @@ def create_app(
         item.resolution = None
         await session.commit()
         return {"ok": True}
+
+    @app.post("/merchants/pass-through")
+    async def set_pass_through(body: PassThroughRuling, session: Session) -> PassThroughRuling:
+        """Rule a merchant pass-through (someone else's money moving through the
+        account) or clear the ruling. The name matches the merchants `GET
+        /transactions` shows (logical survivors), ignoring case and surrounding spaces."""
+        wanted = body.merchant.strip()
+        logical = await load_logical_data(session)
+        names = sorted(
+            {
+                t.merchant
+                for t in logical.transactions
+                if t.merchant is not None and t.merchant.casefold() == wanted.casefold()
+            }
+        )
+        if not names:
+            raise HTTPException(status_code=404, detail=f"no transactions from {wanted!r}")
+        await rule_pass_through(session, names, body.pass_through, date.today())
+        await session.commit()
+        return PassThroughRuling(merchant=names[0], pass_through=body.pass_through)
 
     @app.get("/recurring/events")
     async def events(session: Session) -> list[EventOut]:

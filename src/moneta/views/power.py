@@ -20,6 +20,7 @@ from moneta.queries import (
     foreign_series_ids,
     latest_successful_sync_at,
     loan_payment_stats,
+    pass_through_merchants,
     primary_currency,
     stale_accounts,
 )
@@ -83,7 +84,10 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
         .scalars()
         .all()
     )
-    series = [s for s in series if s.id not in foreign_series]
+    # a pass-through merchant's series is out from the moment it is ruled; the next
+    # sync ends it
+    pass_through = await pass_through_merchants(session)
+    series = [s for s in series if s.id not in foreign_series and s.merchant not in pass_through]
     links = [
         link
         for link in await classified_links(session)
@@ -183,6 +187,7 @@ async def power_report(session: AsyncSession, today: date) -> PowerReport:
             link_field(txn.id, by_outflow, inflow_ids),
             series.status if series is not None else None,
             series.discretionary if series is not None else None,
+            pass_through=txn.merchant in pass_through,
         )
         is None
     )

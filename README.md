@@ -209,6 +209,7 @@ Unset = no LLM; ambiguous items go to `moneta review` instead.
 | `moneta networth` | Net worth (vested only); unvested listed as potential |
 | `moneta cashflow [--start D --end D]` | Accrual spend vs cash out for a range (default: this month) |
 | `moneta txns [--month M \| --start D --end D] [--account ID] [--merchant NAME] [--sources]` | Combined retained history; source audit includes superseded provider observations without counting them again |
+| `moneta txns --pass-through NAME` / `--clear-pass-through NAME` | Rule a merchant's transactions someone else's money (a partner's rent they repay): never spend, a bill or income |
 | `moneta recurring [--events] [--end\|--not-a-bill\|--habit\|--re-review ID]` | Series; missed payments/price increases; cancel, overrule, or reopen a series |
 | `moneta obligations` | Loans/financing: payment, months left, promo-ends-before-payoff warnings |
 | `moneta review` | Resolve ambiguous classifications interactively |

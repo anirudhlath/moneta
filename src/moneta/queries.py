@@ -240,6 +240,21 @@ def linked_txn_ids(links: list[ClassifiedLink]) -> set[int]:
     return ids
 
 
+async def pass_through_merchants(session: AsyncSession) -> frozenset[str]:
+    """Merchants a person ruled pass-through (someone else's money moving through the
+    account): every transaction of theirs is out of spend, income and detection. The
+    newest ruling per merchant wins, so a later False clears an earlier True."""
+    latest: dict[str, bool] = {}
+    for item in await session.scalars(
+        select(ReviewItem).where(ReviewItem.kind == ReviewKind.pass_through).order_by(ReviewItem.id)
+    ):
+        merchant = item.payload.get("merchant")
+        ruling = item.resolution.get("pass_through") if isinstance(item.resolution, dict) else None
+        if isinstance(merchant, str) and isinstance(ruling, bool):
+            latest[merchant] = ruling
+    return frozenset(merchant for merchant, ruling in latest.items() if ruling)
+
+
 class LoanPayment(BaseModel):
     account_id: int
     cadence: Cadence

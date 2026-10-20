@@ -476,11 +476,45 @@ def txns(
     sources: Annotated[
         bool, typer.Option("--sources", help="Include suppressed provider observations.")
     ] = False,
+    pass_through: Annotated[
+        str | None,
+        typer.Option(
+            "--pass-through",
+            help="Merchant whose charges are someone else's money: never spend, a bill or income.",
+        ),
+    ] = None,
+    clear_pass_through: Annotated[
+        str | None,
+        typer.Option("--clear-pass-through", help="Count a pass-through merchant again."),
+    ] = None,
 ) -> None:
     """List transactions with why each is or isn't counted as spend (the trust view).
 
-    --month YYYY-MM and --start/--end are mutually exclusive.
+    --month YYYY-MM and --start/--end are mutually exclusive. --pass-through /
+    --clear-pass-through MERCHANT rule on a merchant instead of listing.
     """
+    if pass_through is not None and clear_pass_through is not None:
+        console.print(
+            "[red]Error:[/red] --pass-through and --clear-pass-through are mutually exclusive."
+        )
+        raise typer.Exit(1)
+    reject_json_with_writes(json_output, pass_through, clear_pass_through)
+    ruled = pass_through if pass_through is not None else clear_pass_through
+    if ruled is not None:
+        r = request(
+            "POST",
+            "/merchants/pass-through",
+            {"merchant": ruled, "pass_through": pass_through is not None},
+        )
+        name = escape(r["merchant"])
+        if r["pass_through"]:
+            console.print(
+                f"[green]{name} is a pass-through — its charges are no longer spend, "
+                "a bill or income.[/green]"
+            )
+        else:
+            console.print(f"[green]{name} counts again; the next sync looks for its bills.[/green]")
+        return
     if month is not None and (start is not None or end is not None):
         console.print("[red]Error:[/red] --month and --start/--end are mutually exclusive.")
         raise typer.Exit(1)
