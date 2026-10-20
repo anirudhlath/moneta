@@ -408,10 +408,11 @@ async def _detect_bill(
                     txn.series_id = None
             series.expected_cents = expected
             ctx.foreign_series.discard(series.id)
-        elif variable:
+        elif variable or series.cadence != cadence:
             # a variable bill has no confirmed price for events to move (events.py skips
             # it): it tracks its typical amount every sync, so one odd charge can't stand
-            # in for the bill
+            # in for the bill. A new cadence is a new reading of the charges (one biweekly
+            # bill was two monthly ones), and the old price went with the old reading
             series.expected_cents = expected
         advanced_on = max(series.next_expected_on, next_on)
         if stale:

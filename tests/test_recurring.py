@@ -1134,6 +1134,43 @@ async def test_payer_streams_at_different_amounts_form_two_series(session: Async
     assert {s.cadence for s in series} == {Cadence.biweekly}
 
 
+async def test_a_biweekly_misreading_is_repriced_as_two_monthly_bills(
+    session: AsyncSession,
+) -> None:
+    # monthly bills on the 9th and the 24th were once read as one biweekly bill
+    acct = await make_account(session)
+    old = await make_series(
+        session,
+        merchant="Appco",
+        cadence=Cadence.biweekly,
+        expected_cents=-4700,
+        next_expected_on=date(2026, 10, 7),
+    )
+    for month in range(3, 10):
+        for day, cents in ((9, -4700), (24, -5300)):
+            if (month, day) == (3, 9):
+                continue  # the 24th's bill started first, so it has more charges
+            await make_txn(
+                session,
+                acct,
+                amount_cents=cents,
+                merchant="Appco",
+                posted_on=date(2026, month, day),
+                series_id=old.id,
+            )
+    await session.commit()
+    await detect_recurring(session, llm=None, today=date(2026, 10, 1))
+    series = await _series(session)
+    assert {(s.cadence, s.expected_cents) for s in series} == {
+        (Cadence.monthly, -4700),
+        (Cadence.monthly, -5300),
+    }
+    # the bill with the most charges claims the old series first, at its own price
+    survivor = next(s for s in series if s.id == old.id)
+    assert survivor.expected_cents == -5300
+    assert sum(monthly_cents(s) for s in series) == -10000
+
+
 async def test_pre_merge_series_fold_into_one(session: AsyncSession) -> None:
     acct = await make_account(session)
     older = await make_series(

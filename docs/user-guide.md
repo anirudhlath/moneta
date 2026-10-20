@@ -543,7 +543,14 @@ merchant, so a subscription billed under a new code each month is one series; a 
 stays part of the name, and a code with a digit in it is stripped outright like any other
 reference number. A merchant can also have several series: if a subscription has
 irregular purchases alongside it, or two subscriptions at the same price bill on different
-days, each schedule is its own series and the other charges are ordinary spending. A charge of at least a quarter of the bill's
+days, each schedule is its own series and the other charges are ordinary spending. An app
+store that bills several subscriptions at similar prices splits the same way: each one that
+keeps its day of the month at a steady price for three months or more is its own monthly
+series, even when two bill on the same day, and one-off purchases stay spending as long as
+they are no more than half as many as the subscription charges. Two bills half a month
+apart look like one bill every two weeks until they drift off a 14-day schedule, which
+takes about six months; pay on the 1st and the 15th then becomes two monthly series. A
+weekly or biweekly paycheck stays one series even when some paydays are missing from it. A charge of at least a quarter of the bill's
 amount that lands after a schedule's newest charge, while the next one is not yet nearly
 due (6 days short of its due date for a monthly bill), counts the same way: a term deposit
 beside a monthly payment-plan installment is ordinary spending, and the installment alone
@@ -890,7 +897,7 @@ Files in the config dir (all owner-only, dir is 0700):
 | A provider match is wrong | Reverse an account link with `moneta accounts --unlink-source <ID>` to restore its observations. For an uncertain match with an open transaction overlap question, choose none in that review. Automatic matches do not necessarily have open questions; there is no separate public transaction-unlink endpoint. |
 | Reconciliation did not make data fresh | It only rebuilds stored data; run `moneta sync` and inspect source warnings for new observations. |
 | Merchant names look wrong | Answer the merchant questions in `moneta review`; naming rules and merchant merging already run on every sync, and `moneta renormalize` applies them on demand without a sync. A question disappears by itself once its descriptor no longer appears on any transaction or the rules already name it cleanly. |
-| One bill shows up as two series, or two bills as one | Merging is by name: a truncated name that is not a prefix of the full one (`Acme Fitnriverton`) stays split, and a per-charge code (`Acmeapp-Qwertyui`) is dropped only once two different codes appear for the merchant. Duplicates that a merge does produce are folded automatically on the next sync. `moneta recurring --end <ID>` only ends a series, and a series that is still charging revives. |
+| One bill shows up as two series, or two bills as one | Merging is by name: a truncated name that is not a prefix of the full one (`Acme Fitnriverton`) stays split, and a per-charge code (`Acmeapp-Qwertyui`) is dropped only once two different codes appear for the merchant. Duplicates that a merge does produce are folded automatically on the next sync. `moneta recurring --end <ID>` only ends a series, and a series that is still charging revives. Subscriptions at one merchant split only once each has three months on its own day at a steady price (about six months for two billed half a month apart), so a new one counts as ordinary spending until then. |
 | A subscription shows as active but is cancelled | `moneta recurring --end <ID>`. |
 | A series was wrongly confirmed as a recurring bill | `moneta recurring --not-a-bill <ID>` — ends it and suppresses it from every future sync; from the next sync its charges are untagged (they count as spend, or as Other inflows if money came in). |
 | A recurring series is really discretionary spending | `moneta recurring --habit <ID>` — reactivates it if ended, tags it discretionary (not a fixed cost). When the merchant has a single bill, the answer keeps applying as long as its amount is among the bill's newest charges, so a habit whose typical spend drifts stays a habit. |
