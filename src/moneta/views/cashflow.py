@@ -5,14 +5,20 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from moneta.cadence import month_bounds
-from moneta.logical import load_logical_data
+from moneta.logical import LogicalData, load_logical_data
 from moneta.models import (
     LIQUID_ACCOUNT_TYPES,
     SPEND_ACCOUNT_TYPES,
     Direction,
     RecurringSeries,
 )
-from moneta.queries import ClassifiedLink, classified_links, linked_txn_ids, primary_currency
+from moneta.queries import (
+    ClassifiedLink,
+    classified_links,
+    linked_txn_ids,
+    pass_through_merchants,
+    primary_currency,
+)
 
 
 class MonthFlows(NamedTuple):
@@ -22,6 +28,12 @@ class MonthFlows(NamedTuple):
     income_cents: int  # inflows tagged to an income series (non-discretionary, active or ended)
     other_inflows_cents: int  # every other counted inflow: refunds, P2P, one-off deposits
     spend_cents: int
+
+
+async def _pass_through_ids(session: AsyncSession, logical: LogicalData) -> set[int]:
+    """Txns of a pass-through merchant: someone else's money, in no cashflow figure."""
+    merchants = await pass_through_merchants(session)
+    return {t.id for t in logical.transactions if t.merchant in merchants}
 
 
 async def _accrual(
@@ -34,14 +46,14 @@ async def _accrual(
     inflows: bool,
 ) -> int:
     """Shared magnitude sum behind accrual_spend/accrual_inflows: same exclusions
-    (transfer-linked txns, non-spend accounts, non-primary currency), opposite
-    amount sign. Both callers return an unsigned magnitude."""
+    (transfer-linked txns, pass-through merchants, non-spend accounts, non-primary
+    currency), opposite amount sign. Both callers return an unsigned magnitude."""
     if links is None:
         links = await classified_links(session)
-    excluded = linked_txn_ids(links)
     if primary is None:
         primary = await primary_currency(session)
     logical = await load_logical_data(session)
+    excluded = linked_txn_ids(links) | await _pass_through_ids(session, logical)
     txns = [
         t
         for t in logical.transactions
@@ -89,10 +101,9 @@ async def accrual_by_month(
     reported beside it, never dropped. One SELECT over the whole
     [oldest month start, newest month end] range instead of accrual_inflows/
     accrual_spend called once per month; same exclusions (transfer-linked txns,
-    non-spend accounts, non-primary currency), linked_txn_ids computed once."""
+    pass-through merchants, non-spend accounts, non-primary currency), computed once."""
     if links is None:
         links = await classified_links(session)
-    excluded = linked_txn_ids(links)
     if primary is None:
         primary = await primary_currency(session)
     income_series = {
@@ -113,6 +124,7 @@ async def accrual_by_month(
     newest_end = bounds[0][2]
 
     logical = await load_logical_data(session)
+    excluded = linked_txn_ids(links) | await _pass_through_ids(session, logical)
     txns = [
         t
         for t in logical.transactions
@@ -156,10 +168,12 @@ async def cash_out(
     if primary is None:
         primary = await primary_currency(session)
     logical = await load_logical_data(session)
+    pass_through = await _pass_through_ids(session, logical)
     txns = [
         t
         for t in logical.transactions
         if start <= t.posted_on <= end
+        and t.id not in pass_through
         and logical.accounts[logical.account_roots[t.account_id]].type in LIQUID_ACCOUNT_TYPES
         and logical.accounts[logical.account_roots[t.account_id]].currency == primary
         and t.amount_cents < 0

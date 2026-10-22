@@ -34,12 +34,18 @@ from moneta.models import (
     amounts_match,
     bill_ref,
     decision_precedence,
+    pass_through_item,
     recurring_cluster_item,
     same_bill,
 )
 from moneta.pipelines.bills import split_bills, whole_bill
 from moneta.pipelines.reconcile import _supersede
-from moneta.queries import classified_links, foreign_series_ids, primary_currency
+from moneta.queries import (
+    classified_links,
+    foreign_series_ids,
+    pass_through_merchants,
+    primary_currency,
+)
 
 _MIN_OCCURRENCES = 3
 _AMOUNT_TOLERANCE = 0.20
@@ -66,6 +72,49 @@ def reactivate_series(series: RecurringSeries, today: date) -> None:
     """Forward-only bump: reactivating must not resurrect ancient missed windows."""
     series.next_expected_on = max(series.next_expected_on, today)
     series.status = SeriesStatus.active
+
+
+_PASS_THROUGH_REASON = "Merchant is a pass-through, never a bill"
+
+
+async def rule_pass_through(
+    session: AsyncSession, names: list[str], pass_through: bool, today: date
+) -> None:
+    """Record a person's pass-through ruling on these merchant names; the caller
+    commits. Ruling one retires the open questions about its bills and its series'
+    prices now, before auto-review could answer one; clearing it reopens the ones a
+    ruling retired (a price question only while its series is active: once a sync has
+    ended the series, events asks afresh when it revives). Its series are left to the
+    views, which drop them at once, and to the next sync, which ends them — so clearing
+    a ruling before then restores everything untouched."""
+    for name in names:
+        session.add(pass_through_item(name, pass_through))
+    series_status = {
+        s.id: s.status
+        for s in await session.scalars(
+            select(RecurringSeries).where(RecurringSeries.merchant.in_(names))
+        )
+    }
+    for item in await session.scalars(
+        select(ReviewItem).where(
+            ReviewItem.status == (ReviewStatus.open if pass_through else ReviewStatus.resolved),
+            ReviewItem.kind.in_((ReviewKind.recurring_cluster, ReviewKind.price_change)),
+        )
+    ):
+        if item.kind == ReviewKind.recurring_cluster:
+            ref = bill_ref(item.payload)
+            if ref is None or ref[0] not in names:
+                continue
+        else:
+            sid = item.payload.get("series_id")
+            status = series_status.get(sid) if isinstance(sid, int) else None
+            if status is None or (not pass_through and status != SeriesStatus.active):
+                continue
+        if pass_through:
+            _supersede(item, _PASS_THROUGH_REASON, today)
+        elif (item.resolution or {}).get("superseded_reason") == _PASS_THROUGH_REASON:
+            item.status = ReviewStatus.open
+            item.resolution = None
 
 
 _LLM_PROMPT = (
@@ -463,6 +512,7 @@ async def detect_recurring(
 ) -> RecurringStats:
     stats = RecurringStats()
     excluded, loan_payment_outflows = await _excluded_txn_ids(session)
+    pass_through = await pass_through_merchants(session)
     # bill-scoped: an answer about one bill (direction and, when named, amount) must
     # not force another (design 2026-10-13 §4)
     open_refs: list[BillRef] = []
@@ -476,6 +526,9 @@ async def detect_recurring(
     ).scalars():
         ref = bill_ref(item.payload)
         if ref is None:
+            continue
+        if item.status == ReviewStatus.open and ref[0] in pass_through:
+            _supersede(item, _PASS_THROUGH_REASON, today)
             continue
         if item.status == ReviewStatus.open:
             open_refs.append(ref)
@@ -532,14 +585,16 @@ async def detect_recurring(
     # loan-like payment outflows no longer belong to a merchant series — their
     # per-account cadence/amount is derived in queries.loan_payment_stats instead
     # (design 2026-07-16 §3).
+    # and a pass-through merchant's txns are someone else's money, never a bill or income
     for t in txns:
-        if t.id in loan_payment_outflows and t.series_id is not None:
+        stray = t.id in loan_payment_outflows or t.merchant in pass_through
+        if stray and t.series_id is not None:
             untagged_series.add(t.series_id)
             t.series_id = None
 
     groups: dict[tuple[str, Direction], list[Transaction]] = {}
     for t in txns:
-        if t.id in excluded or t.merchant is None:
+        if t.id in excluded or t.merchant is None or t.merchant in pass_through:
             continue
         direction = Direction.outflow if t.amount_cents < 0 else Direction.inflow
         groups.setdefault((t.merchant, direction), []).append(t)
@@ -589,6 +644,10 @@ async def detect_recurring(
         if series.id in folded:
             continue
         if series.status != SeriesStatus.active or series.id in foreign_series:
+            continue
+        if series.merchant in pass_through:  # even one reactivated by hand since
+            series.status = SeriesStatus.ended
+            stats.updated += 1
             continue
         # detect_recurring tags every occurrence it matches, so an active series
         # normally always has tagged txns. Zero tagged txns means either there's no

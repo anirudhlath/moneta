@@ -434,5 +434,17 @@ async def renormalize_merchants(session: AsyncSession) -> int:
             ):
                 payload["amount_cents"] = old_medians[ref[:2]]
             item.payload = payload
+        await move_pass_through_rulings(session, renames)
     await session.commit()
     return changed
+
+
+async def move_pass_through_rulings(session: AsyncSession, renames: dict[str, str]) -> None:
+    """Point the pass-through rulings on each old merchant name at its new one; the
+    caller commits, and passes only names no transaction carries any more."""
+    for item in (
+        await session.execute(select(ReviewItem).where(ReviewItem.kind == ReviewKind.pass_through))
+    ).scalars():
+        merchant = item.payload.get("merchant")
+        if isinstance(merchant, str) and merchant in renames:
+            item.payload = {**item.payload, "merchant": renames[merchant]}

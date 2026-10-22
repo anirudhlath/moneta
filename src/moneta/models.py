@@ -104,6 +104,19 @@ def recurring_cluster_item(
     return ReviewItem(kind=ReviewKind.recurring_cluster, question=question, payload=payload)
 
 
+def pass_through_item(merchant: str, pass_through: bool) -> "ReviewItem":
+    """A person's ruling that a merchant's transactions are someone else's money passing
+    through (or, False, no longer are). Resolved at birth — never a question in the
+    queue; the newest ruling per merchant wins (`queries.pass_through_merchants`)."""
+    return ReviewItem(
+        kind=ReviewKind.pass_through,
+        question=f"Is {merchant!r} someone else's money passing through?",
+        payload={"merchant": merchant},
+        status=ReviewStatus.resolved,
+        resolution={"pass_through": pass_through, "resolved_by": "manual"},
+    )
+
+
 class Cadence(StrEnum):
     weekly = "weekly"
     biweekly = "biweekly"
@@ -147,6 +160,7 @@ class ReviewKind(StrEnum):
     financing_account = "financing_account"
     account_overlap = "account_overlap"
     transaction_overlap = "transaction_overlap"
+    pass_through = "pass_through"
 
 
 class Base(DeclarativeBase):

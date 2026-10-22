@@ -18,7 +18,12 @@ from moneta.models import (
     SeriesStatus,
     Transaction,
 )
-from moneta.queries import ClassifiedLink, classified_links, primary_currency
+from moneta.queries import (
+    ClassifiedLink,
+    classified_links,
+    pass_through_merchants,
+    primary_currency,
+)
 
 
 class TxnRow(BaseModel):
@@ -61,6 +66,8 @@ def spend_reason(
     link: str | None,
     series_status: str | None,
     series_discretionary: bool | None,
+    *,
+    pass_through: bool,
 ) -> str | None:
     """The counted-in-spend predicate, in spec §2's precedence order — pure, no
     session. `None` means counted; any other value is the (generic) reason it isn't.
@@ -70,7 +77,12 @@ def spend_reason(
     the two views can never quietly diverge on what counts as spend.
     `account_loan_like` is the txn's logical account's `loan_like`: that account's own
     outflows (purchases, interest, fees) are paid off by the payments `power` counts as
-    its fixed cost, so counting them as spend too would count them twice."""
+    its fixed cost, so counting them as spend too would count them twice.
+    `pass_through` is the txn's merchant's pass-through ruling (`queries.
+    pass_through_merchants`): a person's word that it is someone else's money, so it
+    names either direction before any other reason."""
+    if pass_through:
+        return "pass-through"
     if txn_amount_cents >= 0:
         return "inflow"
     if link == "loan_payment":
@@ -96,6 +108,7 @@ def _excluded_because(
     series: RecurringSeries | None,
     link: str | None,
     primary: str,
+    pass_through: frozenset[str],
 ) -> str | None:
     """`_excluded_because` string for a TxnRow. `counted_in_spend` is
     `excluded_because is None` by construction — never a separately maintained bool."""
@@ -108,6 +121,7 @@ def _excluded_because(
         link,
         series.status if series is not None else None,
         series.discretionary if series is not None else None,
+        pass_through=txn.merchant in pass_through,
     )
     if reason == "fixed cost" and series is not None:
         return f"fixed cost (series {series.merchant})"
@@ -126,6 +140,7 @@ async def transactions_report(
     links = await classified_links(session)
     by_outflow = {link.outflow_id: link for link in links}
     inflow_ids = {link.inflow_id for link in links}
+    pass_through = await pass_through_merchants(session)
 
     logical = await load_logical_data(session)
     series_by_id = {s.id: s for s in await session.scalars(select(RecurringSeries))}
@@ -157,7 +172,7 @@ async def transactions_report(
         reason = (
             "provider_duplicate"
             if duplicate
-            else _excluded_because(txn, account, series, link, primary)
+            else _excluded_because(txn, account, series, link, primary, pass_through)
         )
         result.append(
             TxnRow(
