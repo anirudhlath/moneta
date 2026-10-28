@@ -23,10 +23,22 @@ _PREFIXES = re.compile(
 )
 # ACH metadata ("WEB ID: 123…", "PPD ID: …") is not part of the merchant
 _ACH_TAIL = re.compile(r"\b(?:web|ppd|ccd|tel)\s+id\b:?.*$", re.IGNORECASE)
-# a street address and everything after it; runs before _STORE_NUM eats the number
+# a word of a street name: hyphens and apostrophes inside ("Nord-Est"), an initial or
+# abbreviation with its period ("E.", "Jr."), or an ordinal ("3rd")
+_STREET_WORD = r"(?:[a-z]+(?:[-'][a-z]+)*\.?|\d+(?:st|nd|rd|th))"
+# a street address and everything after it; runs before _STORE_NUM eats the number. The
+# house number may be glued onto the last, truncated word of a fixed-width name field
+# ("SUBSCRIPTION12 ELM ST"): that word goes too, as _REF_TOKEN drops a long one, unless
+# it starts the name or follows a processor's star ("ZAPPROC* ACMESOUND12 …" names the
+# merchant the processor bills for). A numbered building may stand before the address
+# ("7 ACME TRADE CENTER 100 ELM STREET") when a word precedes it, so a name starting
+# with a number stays. A store number's "#" goes with it ("#1234 ST …"), never left
+# behind; "CT" is not a court type, since a trailing "CT" is the state
 _ADDRESS = re.compile(
-    r"\b\d+(?:st|nd|rd|th)?\s+(?:[a-z]+\s+){0,3}?"
-    r"(?:street|st|road|rd|avenue|ave|blvd|drive|dr|lane|ln|way|pkwy|expy|expwy)\b.*$",
+    rf"(?:(?<=\S\s)\d+\s+(?:{_STREET_WORD}\s+){{0,3}}?(?:center|plaza|tower|building)\s+)?"
+    rf"(?:(?<=[^\s*]\s)[a-z]+)?(?<![\d#])#?\d+(?:st|nd|rd|th)?\s+(?:{_STREET_WORD}\s+){{0,4}}?"
+    r"(?:street|st|road|rd|avenue|ave|boulevard|blvd|drive|dr|lane|ln|way|parkway|pkwy"
+    r"|expy|expwy|court|highway|hwy|suite|ste)\b.*$",
     re.IGNORECASE,
 )
 _LEGAL = re.compile(r"\b(?:llc|inc|corp|ltd)\b\.?,?", re.IGNORECASE)
@@ -185,6 +197,12 @@ _CHARGE_CODE = re.compile(r"^([a-z]{4,})-([0-9a-z]{8})$", re.IGNORECASE)
 # one hyphenated name may be a real one ("Corner-Sandwich"); different codes behind one
 # merchant are per-charge references
 _MIN_CODES = 2
+# a short reference code among a name's words ("Acme Cloud Q1W2E3"): letters and digits
+# mixed, 4+ characters (_REF_TOKEN strips the 8+ character ones with a digit)
+_SHORT_CODE = re.compile(r"(?=[a-z]*\d)(?=\d*[a-z])[0-9a-z]{4,}", re.IGNORECASE)
+# an ordinal is a street ("21St"), and a masked account number ("Xxx1234") names the
+# account it pays, so neither is a per-charge code
+_NOT_A_CODE = re.compile(r"\d+(?:st|nd|rd|th)|x+\d+", re.IGNORECASE)
 
 
 def _tokens(name: str) -> tuple[str, ...]:
@@ -223,11 +241,25 @@ def _glued(
     return glued
 
 
-def _charge_codes(names: set[str]) -> dict[str, str]:
-    """name -> the name without its per-charge code ("Acmeapp-Qwertyui" -> "Acmeapp"),
-    for a merchant seen with 2+ different codes."""
-    parts: dict[str, tuple[str, str]] = {}  # name -> (merchant, rest of the name)
+def _descriptor_codes(descriptors: Iterable[str]) -> dict[str, set[str]]:
+    """merchant -> the per-charge codes hyphenated onto it in raw descriptors, digit codes
+    included ("ACMEAPP-QW3RTYUI" -> {"acmeapp": {"qw3rtyui"}}): the rules strip a digit
+    code as a reference token, so only the raw text shows the merchant bills under codes."""
     codes: dict[str, set[str]] = {}
+    for raw in descriptors:
+        s = raw.strip()
+        while (stripped := _PREFIXES.sub("", s)) != s:
+            s = stripped
+        if (match := _CHARGE_CODE.match(s.partition(" ")[0])) is not None:
+            codes.setdefault(match[1].lower(), set()).add(match[2].lower())
+    return codes
+
+
+def _charge_codes(names: set[str], seen: dict[str, set[str]]) -> dict[str, str]:
+    """name -> the name without its per-charge code ("Acmeapp-Qwertyui" -> "Acmeapp"),
+    for a merchant seen with 2+ different codes, counting the codes in `seen`."""
+    parts: dict[str, tuple[str, str]] = {}  # name -> (merchant, rest of the name)
+    codes = {merchant: set(found) for merchant, found in seen.items()}
     for name in names:
         first, _, rest = name.partition(" ")
         if (match := _CHARGE_CODE.match(first)) is not None:
@@ -240,24 +272,70 @@ def _charge_codes(names: set[str]) -> dict[str, str]:
     }
 
 
-def merge_targets(names: Iterable[str], targets_only: Iterable[str] = ()) -> dict[str, str]:
+def _is_code(word: str) -> bool:
+    return _SHORT_CODE.fullmatch(word) is not None and _NOT_A_CODE.fullmatch(word) is None
+
+
+def _short_codes(names: set[str], others: set[str]) -> dict[str, str]:
+    """name -> the name without its short code ("Acme Cloud Q1W2E3" -> "Acme Cloud"),
+    for names identical but for one code, seen with 2+ different codes. Right behind a
+    prefix that 3+ different words follow (a payment rail), a code may be all that names
+    the payee, so it stays; `others` count toward that but never shed a code."""
+    after: dict[tuple[str, ...], set[str]] = {}  # prefix -> the non-code words after it
+    for name in names | others:
+        words = name.lower().split()
+        for i, word in enumerate(words):
+            if not _is_code(word):
+                after.setdefault(tuple(words[:i]), set()).add(word)
+    slots: dict[tuple[tuple[str, ...], tuple[str, ...]], set[str]] = {}  # name sans code
+    found: dict[str, tuple[tuple[tuple[str, ...], tuple[str, ...]], str]] = {}
+    for name in names:
+        words = name.split()
+        coded = [i for i, word in enumerate(words) if _is_code(word)]
+        if len(coded) != 1:
+            continue
+        i = coded[0]
+        lower = [word.lower() for word in words]
+        slot = (tuple(lower[:i]), tuple(lower[i + 1 :]))
+        slots.setdefault(slot, set()).add(lower[i])
+        found[name] = (slot, " ".join(words[:i] + words[i + 1 :]))
+    return {
+        name: bare
+        for name, (slot, bare) in found.items()
+        if len(slots[slot]) >= _MIN_CODES
+        and len(after.get(slot[0], ())) < _MAX_TAILS
+        and _letters(bare) >= _MIN_TARGET_LETTERS
+    }
+
+
+def merge_targets(
+    names: Iterable[str], targets_only: Iterable[str] = (), descriptors: Iterable[str] = ()
+) -> dict[str, str]:
     """name -> the shorter name it merges into (design 2026-10-13 §1).
 
     A multi-token name absorbs any name it is a token prefix of; a single-token name
     absorbs only itself plus one *place* — a token that follows 3+ distinct existing
     names, learned from the data. Brand + product names therefore stay apart. A prefix
-    with 3+ different non-place tails absorbs only its place variants. A name whose last
+    with 3+ different non-place tails absorbs only its place variants; the tails count
+    the names as they arrived, before any code below is shed. A name whose last
     word is a shorter name's last word with a place glued on ("Acme Universityriverton")
     merges into it when the glued tail is a place, or when a multi-word name shows 2+
     different glued tails, unless that name is a generic prefix (3+ different non-place
     tails), where only a place folds. A per-charge code ("Acmeapp-Qwertyui") is dropped
-    once 2+ different codes share the merchant. Names in `targets_only` can absorb others
-    but never merge themselves and teach no places.
+    once 2+ different codes share the merchant, counting the digit codes the rules
+    stripped from `descriptors` (raw bank text). Names identical but for one short code
+    ("Acme Cloud Q1W2E3") fold into the name without it once 2+ different codes appear
+    there, unless the code follows a payment rail. Names in `targets_only` can absorb
+    others but never merge themselves and teach no places.
     """
-    sources = set(names)
-    coded = _charge_codes(sources)
+    arrived = set(names)
+    sources = set(arrived)
+    fixed = set(targets_only)
+    coded = _charge_codes(sources, _descriptor_codes(descriptors))
     sources = (sources - coded.keys()) | set(coded.values())
-    keyed = {n: _tokens(n) for n in sorted(sources | set(targets_only))}
+    short = _short_codes(sources, fixed)
+    sources = (sources - short.keys()) | set(short.values())
+    keyed = {n: _tokens(n) for n in sorted(sources | fixed)}
     by_tokens: dict[tuple[str, ...], str] = {}
     for name, toks in keyed.items():
         by_tokens.setdefault(toks, name)
@@ -271,11 +349,12 @@ def merge_targets(names: Iterable[str], targets_only: Iterable[str] = ()) -> dic
         return len(tail) == 1 and tail[0] in places
 
     tails: dict[tuple[str, ...], set[tuple[str, ...]]] = {}
-    for name, toks in keyed.items():
-        if name in sources:
-            for size in range(1, len(toks)):
-                if toks[:size] in by_tokens and not is_place(toks[size:]):
-                    tails.setdefault(toks[:size], set()).add(toks[size:])
+    # names count as they arrived too: a payee shedding its codes must not leave a
+    # payment rail with too few tails to look like one
+    for toks in [*(keyed[n] for n in keyed if n in sources), *map(_tokens, arrived)]:
+        for size in range(1, len(toks)):
+            if toks[:size] in by_tokens and not is_place(toks[size:]):
+                tails.setdefault(toks[:size], set()).add(toks[size:])
     generic = {prefix for prefix, found in tails.items() if len(found) >= _MAX_TAILS}
     glued = _glued(keyed, sources, by_tokens)
     glued_tails: dict[tuple[str, ...], set[str]] = {}
@@ -311,7 +390,7 @@ def merge_targets(names: Iterable[str], targets_only: Iterable[str] = ()) -> dic
                 targets[name] = by_tokens[toks]
             elif (glued_into := glued_target(name)) is not None:
                 targets[name] = glued_into
-    for name, bare in coded.items():  # before chains, so a code follows its merchant
+    for name, bare in (coded | short).items():  # before chains, so a code follows its merchant
         targets[name] = bare
     for name in list(targets):  # resolve chains: A -> B -> C becomes A -> C
         seen = {name}
@@ -357,6 +436,7 @@ async def renormalize_merchants(session: AsyncSession) -> int:
         targets = merge_targets(
             (base[a.id] for a in aliases if a.id not in fixed),
             targets_only=(base[a.id] for a in aliases if a.id in fixed),
+            descriptors=(a.raw_descriptor for a in aliases),
         )
         grown = False
         for group in llm_groups.values():

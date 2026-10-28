@@ -564,9 +564,15 @@ the old cadence. A price increase is only applied after two agreeing charges (or
 confirmation) — a single weird charge never rewrites what a bill is "supposed to" cost.
 
 One bill is one series, however the bank words it. Every sync strips wallet prefixes
-(`AplPay`, `SQ*`), legal suffixes (`LLC`), street addresses (expressways too) and
-city/state tails from descriptors, then merges a longer name into a shorter one it
-starts with (`Acme Fitness` and `Acme Fitness Riverton` become `Acme Fitness`). A city
+(`AplPay`, `SQ*`), legal suffixes (`LLC`), street addresses and city/state tails from
+descriptors. An address runs from its house number over street words with hyphens or
+abbreviations (`Nord-Est`, `Jr.`) to a street type (expressways, parkways, courts,
+highways and suites too), with any numbered building in front of it
+(`7 Acme Trade Center 100 Elm Street`). When a bank's fixed-width name field runs
+straight into the house number (`ACME *CHATBOT SUBSCR12 ELM ST`), the truncated word goes
+with the address, unless it is the first word of the name or follows a processor's `*`,
+where it names the merchant the processor bills for. Then a longer name merges into a
+shorter one it starts with (`Acme Fitness` and `Acme Fitness Riverton` become `Acme Fitness`). A city
 glued onto the name folds the same way: `Acme Universityelmton` and
 `Acme Universityriverton` become `Acme University` once the tail is a known place or the
 name shows two different glued tails, while one longer word (`Corner Storehouse` beside
@@ -575,9 +581,15 @@ place, so `Streamco` and `Streamco Plus` stay apart. A prefix shared by many unr
 names, such as a payment rail (`Zelle Payment To …`), absorbs nothing. A per-charge code
 hyphenated onto a name's first word (`Acmeapp-Qwertyui`: a word of 4 or more letters, a
 hyphen, then exactly 8 letters) is dropped once two or more different codes appear for the
-merchant, so a subscription billed under a new code each month is one series; a lone code
-stays part of the name, and a code with a digit in it is stripped outright like any other
-reference number. A merchant can also have several series: if a subscription has
+merchant, so a subscription billed under a new code each month is one series. Codes with a
+digit in them count too: the rules strip those outright like any other reference number,
+so one letters-only code among them folds into the plain name. A lone code with no other
+coded charge stays part of the name. A short code of letters and digits mixed, 4 or more
+characters (`Acme Cloud Q1W2E3`, `Acme Cloud 4R5T6Y`), is dropped the same way once two
+different codes appear in the same place in otherwise identical names. An ordinal
+(`21st`), a masked account number (`Xxx1234`), a code right behind a payment rail, where
+it may be all that names the payee, and a code whose removal leaves fewer than four
+letters all stay. A merchant can also have several series: if a subscription has
 irregular purchases alongside it, or two subscriptions at the same price bill on different
 days, each schedule is its own series and the other charges are ordinary spending. An app
 store that bills several subscriptions at similar prices splits the same way: each one that
@@ -934,7 +946,7 @@ Files in the config dir (all owner-only, dir is 0700):
 | A provider match is wrong | Reverse an account link with `moneta accounts --unlink-source <ID>` to restore its observations. For an uncertain match with an open transaction overlap question, choose none in that review. Automatic matches do not necessarily have open questions; there is no separate public transaction-unlink endpoint. |
 | Reconciliation did not make data fresh | It only rebuilds stored data; run `moneta sync` and inspect source warnings for new observations. |
 | Merchant names look wrong | Answer the merchant questions in `moneta review`; naming rules and merchant merging already run on every sync, and `moneta renormalize` applies them on demand without a sync. A question disappears by itself once its descriptor no longer appears on any transaction or the rules already name it cleanly. |
-| One bill shows up as two series, or two bills as one | Merging is by name: a truncated name that is not a prefix of the full one (`Acme Fitnriverton`) stays split, and a per-charge code (`Acmeapp-Qwertyui`) is dropped only once two different codes appear for the merchant. Duplicates that a merge does produce are folded automatically on the next sync. `moneta recurring --end <ID>` only ends a series, and a series that is still charging revives. Subscriptions at one merchant split only once each has three months on its own day at a steady price (about six months for two billed half a month apart), so a new one counts as ordinary spending until then. |
+| One bill shows up as two series, or two bills as one | Merging is by name: a truncated name that is not a prefix of the full one (`Acme Fitnriverton`) stays split, a per-charge code (`Acmeapp-Qwertyui`) is dropped only once two different codes appear for the merchant, and a short code (`Acme Cloud Q1W2E3`) only once two differ in otherwise identical names; a code of letters alone that is not hyphenated (`Acme Co Qwertyu`) reads as a word and stays. A merchant that switches processor or brand name keeps its old charges under the old name. Duplicates that a merge does produce are folded automatically on the next sync. `moneta recurring --end <ID>` only ends a series, and a series that is still charging revives. Subscriptions at one merchant split only once each has three months on its own day at a steady price (about six months for two billed half a month apart), so a new one counts as ordinary spending until then. |
 | A subscription shows as active but is cancelled | `moneta recurring --end <ID>`. |
 | Money you pay on someone else's behalf (and they repay) counts as your spending, or became a bill | `moneta txns --pass-through "<merchant>"` — none of that merchant's transactions count anywhere, and its series stop counting at once (the next sync ends them). See [Pass-through merchants](#pass-through-merchants). |
 | A series was wrongly confirmed as a recurring bill | `moneta recurring --not-a-bill <ID>` — ends it and suppresses it from every future sync; from the next sync its charges are untagged (they count as spend, or as Other inflows if money came in). |
