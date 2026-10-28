@@ -668,3 +668,214 @@ async def test_per_charge_codes_form_one_subscription(session: AsyncSession) -> 
     assert stats.new_series == 1
     series = (await session.execute(select(RecurringSeries))).scalar_one()
     assert series.merchant == "Acmeapp" and series.expected_cents == -1500
+
+
+def test_a_lone_letters_code_folds_beside_a_digit_code_of_its_merchant() -> None:
+    # the rules strip a code with a digit, so only the raw descriptors show that this
+    # merchant bills under per-charge codes: the digit code is the second code
+    descriptors = [
+        "ACMEAPP 12 ELM AVENUE ELMTON 99999 TX USA",
+        "ACMEAPP-QW3RTYUI 12 ELM AVENUE ELMTON 99999 TX USA",
+        "ACMEAPP-ASDFGHJK 12 ELM AVENUE ELMTON 99999 TX USA",
+    ]
+    names = {rule_normalize(raw) for raw in descriptors}
+    assert names == {"Acmeapp", "Acmeapp-Asdfghjk"}
+    assert merge_targets(names, descriptors=descriptors) == {"Acmeapp-Asdfghjk": "Acmeapp"}
+    assert merge_targets(names) == {}  # without the descriptors one code is one name
+
+
+def test_a_hyphenated_name_beside_its_first_word_stays_apart() -> None:
+    descriptors = ["CORNER", "CORNER-SANDWICH"]
+    names = {rule_normalize(raw) for raw in descriptors}
+    assert merge_targets(names, descriptors=descriptors) == {}
+
+
+async def test_a_letters_code_beside_digit_codes_forms_one_subscription(
+    session: AsyncSession,
+) -> None:
+    acct = await make_account(session)
+    for month, code in ((4, ""), (5, "-QW3RTYUI"), (6, "-ASDFGHJK")):
+        await make_txn(
+            session,
+            acct,
+            description=f"ACMEAPP{code} 12 ELM AVENUE ELMTON 99999 TX USA",
+            amount_cents=-1500,
+            posted_on=date(2026, month, 3),
+        )
+    await normalize_merchants(session, llm=None)
+
+    assert await renormalize_merchants(session) == 1
+    assert await renormalize_merchants(session) == 0
+
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.new_series == 1
+    series = (await session.execute(select(RecurringSeries))).scalar_one()
+    assert series.merchant == "Acmeapp" and series.expected_cents == -1500
+
+
+def test_short_codes_fold_once_two_differ() -> None:
+    assert merge_targets(["Acme Cloud Q1W2E3", "Acme Cloud 4R5T6Y"]) == {
+        "Acme Cloud Q1W2E3": "Acme Cloud",
+        "Acme Cloud 4R5T6Y": "Acme Cloud",
+    }
+    # inside the name, not only at its end
+    assert merge_targets(["Acme Energy K1234 Auto", "Acme Energy K5678 Auto"]) == {
+        "Acme Energy K1234 Auto": "Acme Energy Auto",
+        "Acme Energy K5678 Auto": "Acme Energy Auto",
+    }
+    # onto a one-word brand, which otherwise absorbs only places
+    assert merge_targets(["Streamco Q1W2E3A", "Streamco R4T5Y6U"]) == {
+        "Streamco Q1W2E3A": "Streamco",
+        "Streamco R4T5Y6U": "Streamco",
+    }
+
+
+def test_one_short_code_stays_part_of_the_name() -> None:
+    assert merge_targets(["Streamco", "Streamco Q1W2E3"]) == {}
+
+
+def test_letter_digit_words_that_are_not_codes_stay() -> None:
+    # too short to be a code: a name's own letter-digit word
+    assert merge_targets(["Acme O1", "Acme O2"]) == {}
+    # an ordinal is a street, not a code
+    assert merge_targets(["Acme Diner 21St", "Acme Diner 33Rd"]) == {}
+    # a masked account number names an account: two are two payees
+    assert merge_targets(["Acme Transfer To Xxx1234", "Acme Transfer To Xxx5678"]) == {}
+    # names that differ in more than one word are different names
+    assert merge_targets(["Acme Q1W2 Alpha", "Acme R3T4 Bravo"]) == {}
+    # the rest of the name needs four letters, like any merge target
+    assert merge_targets(["Abc Q1W2E3", "Abc R4T5Y6"]) == {}
+
+
+def test_a_payment_rail_keeps_its_codes() -> None:
+    rail = ["Payrail Xfer Alpha", "Payrail Xfer Bravo", "Payrail Xfer Charlie"]
+    # right behind a prefix shared by 3+ different names, a code may be all that names
+    # the payee
+    assert merge_targets([*rail, "Payrail Xfer Q1W2E3", "Payrail Xfer R4T5Y6"]) == {}
+    # a merchant behind the rail still sheds its codes
+    assert merge_targets(
+        [*rail, "Payrail Xfer Streamco Q1W2E3", "Payrail Xfer Streamco R4T5Y6"]
+    ) == {
+        "Payrail Xfer Streamco Q1W2E3": "Payrail Xfer Streamco",
+        "Payrail Xfer Streamco R4T5Y6": "Payrail Xfer Streamco",
+    }
+
+
+def test_shed_codes_never_turn_a_payment_rail_into_a_merchant() -> None:
+    # three different tails make the bare rail generic; once one payee's two codes fold,
+    # only two payees remain behind it, but the rail must still not absorb them
+    names = ["Payrail Xfer", "Payrail Xfer Alpha Q1W2E3", "Payrail Xfer Alpha R4T5Y6"]
+    assert merge_targets([*names, "Payrail Xfer Bravo"]) == {
+        "Payrail Xfer Alpha Q1W2E3": "Payrail Xfer Alpha",
+        "Payrail Xfer Alpha R4T5Y6": "Payrail Xfer Alpha",
+    }
+
+
+async def test_short_codes_form_one_subscription(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    for month, code in ((4, "Q1W2E3A"), (5, "R4T5Y6U"), (6, "Z7X8C9V")):
+        await make_txn(
+            session,
+            acct,
+            description=f"PAYRAIL XFER STREAMCO*{code} WEB ID: PAYRAIL77",
+            amount_cents=-1199,
+            posted_on=date(2026, month, 3),
+        )
+    await normalize_merchants(session, llm=None)
+
+    assert await renormalize_merchants(session) == 3
+    assert await renormalize_merchants(session) == 0
+
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.new_series == 1
+    series = (await session.execute(select(RecurringSeries))).scalar_one()
+    assert series.merchant == "Payrail Xfer Streamco"
+
+
+def test_rule_normalize_strips_streets_with_hyphens_initials_and_abbreviations() -> None:
+    # a hyphenated street name
+    assert rule_normalize("ACME AI 17 DU NORD-EST AVE O SUITE 9 ELMTON QC CAN") == "Acme Ai"
+    # initials and a suffix: four words, one with a period, before the street type
+    assert rule_normalize("ACMEHUB INC. 12 ELM P OAK JR. STREET ELMTON99999 CA USA") == "Acmehub"
+    # an abbreviated direction before an ordinal street
+    assert rule_normalize("STREAMCO USA 12 E. 3RD STREET ELMTON 99999 NY USA") == "Streamco"
+    assert rule_normalize("ACME DINER 0042 77 N. ELM AVE ELMTON 99999 TX USA") == "Acme Diner"
+
+
+def test_rule_normalize_strips_a_house_number_glued_onto_the_name() -> None:
+    # a fixed-width name field runs straight into the house number; its last, truncated
+    # word goes with the address, as the reference-token rule drops a long one
+    assert rule_normalize("ACME.AI SUBSCRIPTION12 ELM STREET PMB 4321 ELMTON99999 CA USA") == (
+        "Acme.Ai"
+    )
+    assert rule_normalize("ACME DINER RESTAURA4100 OAK LINE RD STE 7 ELMTON 99999 TX USA") == (
+        "Acme Diner"
+    )
+    assert rule_normalize("ACME *CHATBOT SUBSCR5 ELM STREET ELMTON CA USA") == "Acme Chatbot"
+    # a glued word that starts the name is the name
+    assert rule_normalize("SQ *ACMEHUB12 ELM STREET ELMTON CA USA") == "Acmehub"
+
+
+def test_a_glued_word_right_after_a_processor_star_stays() -> None:
+    # behind a processor's star the first word names the merchant it bills for; dropping
+    # it would leave only the processor, and two of its merchants would share that name
+    assert rule_normalize("ZAPPROC.NET* ACMESOUND12 ELM BLVD 9 ELMTON 99999 NY USA") == (
+        "Zapproc.Net Acmesound"
+    )
+    assert rule_normalize("ZAPPROC.NET*BETAAPP34 OAK ST ELMTON NY USA") == "Zapproc.Net Betaapp"
+
+
+def test_a_glued_name_word_keeps_the_name_other_descriptors_start_with() -> None:
+    raws = ("ACME *CHATBOT SUBSCR5 ELM STREET ELMTON CA USA", "ACME *CHATBOT SUBSELMTON CA")
+    assert merge_targets({rule_normalize(raw) for raw in raws}) == {
+        "Acme Chatbot Subselmton": "Acme Chatbot"
+    }
+
+
+def test_rule_normalize_strips_more_street_types() -> None:
+    assert rule_normalize("ACME ONLINE 4400 OAK PARKWAY ELMTON CA USA") == "Acme Online"
+    assert rule_normalize("ACME SUSHI 3100 ELM BOULEVARD S ELMTON 99999 KS USA") == "Acme Sushi"
+    assert rule_normalize("ACMEHUB 1234 OAK COURT ELMTON99999 CA USA") == "Acmehub"
+    assert rule_normalize("ACME CARE 86 ELM CT E STE 4 ELMTON GA USA") == "Acme Care"
+    assert rule_normalize("ACME HARDWARE 2468 HWY 12 ELMTON TX") == "Acme Hardware"
+    assert rule_normalize("ACME LABS 1357 OAK LINE STE 40 ELMTON 99999 TX USA") == "Acme Labs"
+
+
+def test_rule_normalize_reads_a_trailing_ct_as_the_state() -> None:
+    # "CT" is a state tail, not a court: the store number before the city is no house number
+    assert rule_normalize("ACME PHARMACY #05436 ELMTON CT") == "Acme Pharmacy Elmton"
+    assert rule_normalize("ACME 24 HOUR GYM ELMTON CT") == "Acme 24 Hour Gym Elmton"
+    assert rule_normalize("ACME 5 STAR DINER ELMTON CT") == "Acme 5 Star Diner Elmton"
+
+
+def test_rule_normalize_never_strands_a_store_hash_before_an_address() -> None:
+    assert rule_normalize("ACME PHARMACY #1234 ST ELMTON MO") == "Acme Pharmacy"
+
+
+def test_rule_normalize_strips_a_numbered_building_before_the_street_address() -> None:
+    assert rule_normalize("STREAMCO 7 ACME TRADE CENTER 100 ELM STREET ELMTON 99999 NY USA") == (
+        "Streamco"
+    )
+    # a number in the merchant's own name is not a building
+    assert rule_normalize("ACME 24 HOUR GYM 100 ELM STREET ELMTON TX") == "Acme 24 Hour Gym"
+    assert rule_normalize("24 HOUR ACME CENTER 100 ELM STREET ELMTON TX") == "24 Hour Acme Center"
+
+
+async def test_address_variants_form_one_subscription(session: AsyncSession) -> None:
+    acct = await make_account(session)
+    raws = (
+        "STREAMCO USA 12 E. 3RD STREET ELMTON 99999 NY USA",
+        "STREAMCO X1Y2Z3W4V5 7 ACME TRADE CENTER 100 ELM STREET ELMTON 99999 NY USA",
+        "STREAMCO USA 12 E. 3RD STREET ELMTON 99999 NY USA",
+    )
+    for month, raw in enumerate(raws, start=4):
+        await make_txn(
+            session, acct, description=raw, amount_cents=-1199, posted_on=date(2026, month, 3)
+        )
+    await normalize_merchants(session, llm=None)
+    await renormalize_merchants(session)
+
+    stats = await detect_recurring(session, llm=None, today=date(2026, 7, 1))
+    assert stats.new_series == 1
+    series = (await session.execute(select(RecurringSeries))).scalar_one()
+    assert series.merchant == "Streamco"
