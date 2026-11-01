@@ -390,6 +390,14 @@ async def _detect_bill(
         classification = answer.get("classification") if answer else None
         if classification == "habit":
             discretionary = True
+            item = recurring_cluster_item(merchant, direction, round(med) if split else None)
+            item.status = ReviewStatus.resolved
+            item.resolution = {
+                "is_recurring": True,
+                "discretionary": True,
+                "resolved_by": "llm",
+            }
+            ctx.session.add(item)
         elif classification != "bill":
             # an actual (even malformed) LLM answer means the LLM already looked —
             # mirror verify_series: human-only from here, autoreview must not ask the
