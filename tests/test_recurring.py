@@ -386,6 +386,37 @@ async def test_unstable_llm_habit_becomes_discretionary(session: AsyncSession) -
     assert s.discretionary is True
 
 
+async def test_unstable_llm_habit_persists_when_newest_run_stabilizes(
+    session: AsyncSession,
+) -> None:
+    await _seed_weekly_unstable(session)
+    llm = _UnstableLLM({"classification": "habit"})
+    await detect_recurring(session, llm=llm, today=date(2026, 7, 1))
+
+    item = (await session.execute(select(ReviewItem))).scalar_one()
+    assert item.status == ReviewStatus.resolved
+    assert item.resolution == {
+        "is_recurring": True,
+        "discretionary": True,
+        "resolved_by": "llm",
+    }
+
+    acct = await make_account(session)
+    for day in (date(2026, 7, 20), date(2026, 7, 27), date(2026, 8, 3)):
+        await make_txn(
+            session,
+            acct,
+            amount_cents=-4100,
+            merchant="Neighborhood Bistro",
+            posted_on=day,
+        )
+
+    await detect_recurring(session, llm=None, today=date(2026, 8, 4))
+    (series,) = await _series(session)
+    assert series.discretionary is True
+    assert len((await session.execute(select(ReviewItem))).scalars().all()) == 1
+
+
 async def test_unstable_llm_bill_stays_fixed(session: AsyncSession) -> None:
     await _seed_weekly_unstable(session)
     llm = _UnstableLLM({"classification": "bill"})
